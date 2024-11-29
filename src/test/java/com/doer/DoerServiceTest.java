@@ -11,9 +11,11 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 
 import org.junit.jupiter.api.BeforeAll;
@@ -168,6 +170,39 @@ public class DoerServiceTest {
         runAllExecutorJobs();
 
         assertEquals(Arrays.asList(4, 2, 2, 2), service.tst_limits); // actually it is second reloadTasksFromDb call
+    }
+
+    @Test
+    void loadTasks__should_skip_nulls() throws Exception {
+        assertTrue(service.loadTasks(Collections.emptyList()).isEmpty());
+        assertTrue(service.loadTasks(Collections.singleton(null)).isEmpty());
+    }
+
+    @Test
+    void loadTasks__should_skip_duplicates() throws Exception {
+        Task task = createNewTask("Test for load tasks");
+        Long taskId = task.getId();
+
+        Map<Long, Task> result1 = service.loadTasks(Collections.singleton(taskId));
+        Map<Long, Task> result2 = service.loadTasks(Arrays.asList(taskId, taskId));
+        Map<Long, Task> result3 = service.loadTasks(Arrays.asList(taskId, taskId, taskId));
+
+        assertEquals(1, result1.size());
+        assertEquals(1, result2.size());
+        assertEquals(1, result3.size());
+
+        assertEquals(taskId, result1.get(taskId).getId());
+        assertEquals(taskId, result2.get(taskId).getId());
+        assertEquals(taskId, result3.get(taskId).getId());
+    }
+
+    @Test
+    void loadTasks__should_skip_missing() throws Exception {
+        Long missingTask = 9839892L;
+
+        Map<Long, Task> result = service.loadTasks(Collections.singleton(missingTask));
+
+        assertEquals(0, result.size());
     }
 
     private Task createNewTask(String status) throws Exception {
