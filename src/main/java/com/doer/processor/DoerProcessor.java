@@ -932,8 +932,10 @@ public class DoerProcessor extends AbstractProcessor {
                 out.println("            \"emits\": [");
                 List<String> emits = new ArrayList<>(new HashSet<>(method.emitList));
                 Iterator<String> iterator = emits.iterator();
+                boolean emitsNull = false;
                 while (iterator.hasNext()) {
                     if (iterator.next() == null) {
+                        emitsNull = true;
                         iterator.remove();
                     }
                 }
@@ -946,7 +948,12 @@ public class DoerProcessor extends AbstractProcessor {
                     }
                     out.println();
                 }
-                out.println("            ]");
+                if (emitsNull) {
+                    out.println("            ],");
+                    out.println("            \"emits_null\": true");
+                } else {
+                    out.println("            ]");
+                }
                 out.println("        }" + (last ? "" : ","));
             }
             out.println("    ],");
@@ -1120,7 +1127,7 @@ public class DoerProcessor extends AbstractProcessor {
         shortnames.put(javaEePackage + ".json.Json", "Json");
         shortnames.put(javaEePackage + ".json.JsonWriterFactory", "JsonWriterFactory");
         shortnames.put(javaEePackage + ".json.JsonWriter", "JsonWriter");
-        shortnames.put(javaEePackage + ".json.stream.JsonGenerator;", "JsonGenerator");
+        shortnames.put(javaEePackage + ".json.stream.JsonGenerator", "JsonGenerator");
 
         shortnames.put("java.util.concurrent.Callable", "Callable");
         shortnames.put("javax.sql.DataSource", "DataSource");

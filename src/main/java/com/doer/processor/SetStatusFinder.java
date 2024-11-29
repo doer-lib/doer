@@ -443,16 +443,6 @@ public class SetStatusFinder {
         }
 
         @Override
-        public Object visitGuardedPattern(GuardedPatternTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitParenthesizedPattern(ParenthesizedPatternTree node, Object p) {
-            return null;
-        }
-
-        @Override
         public Object visitNewClass(NewClassTree node, Object p) {
             stack.push(false);
             for (ExpressionTree expression : node.getArguments()) {
@@ -685,6 +675,31 @@ public class SetStatusFinder {
         @Override
         public Object visitYield(YieldTree node, Object p) {
             node.getValue().accept(this, null);
+            return null;
+        }
+
+        @Override
+        public Object visitStringTemplate(StringTemplateTree node, Object o) {
+            return null;
+        }
+
+        @Override
+        public Object visitAnyPattern(AnyPatternTree node, Object o) {
+            return null;
+        }
+
+        @Override
+        public Object visitConstantCaseLabel(ConstantCaseLabelTree node, Object o) {
+            return null;
+        }
+
+        @Override
+        public Object visitPatternCaseLabel(PatternCaseLabelTree node, Object o) {
+            return null;
+        }
+
+        @Override
+        public Object visitDeconstructionPattern(DeconstructionPatternTree node, Object o) {
             return null;
         }
     }
