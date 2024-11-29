@@ -9,29 +9,34 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [ 8, 11, 17, 21, 22 ]
     steps:
       - uses: actions/checkout@v4
-      - name: Set up JDK 17
+
+      # Java22 is used to build library (but -target=8)
+      - name: Set up JDK 22 (for building)
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '22'
           distribution: 'temurin'
           cache: maven
       - name: Build with Maven
-        run: mvn -B --color=always package
-      - name: Tests Java17 jakarta 10.0.0
-        run: mvn -B --color=always verify
-      - name: Tests Java17 jakarta 8.0.0
-        run: mvn -B --color=always -Dtest.doer.jakarta.version=8.0.0 verify
-      - name: Set up JDK 8
+        run: mvn -B --color=always -DskipTests package
+
+      - name: Set up Java${{ matrix.version }} (for testing)
         uses: actions/setup-java@v4
         with:
-          java-version: '8'
+          java-version: '${{ matrix.version }}'
           distribution: 'temurin'
           cache: maven
       - name: Show java version
         run: java -version
       - name: Show mvn version
         run: mvn --version
-      - name: Tests Java8 jakarta 8.0.0
+      - name: Tests Java${{ matrix.version }} jakarta 10.0.0
+        if: ${{ matrix.version > 8 }} # (java8 is too old for jakarta10)
+        run: mvn -B --color=always verify
+      - name: Tests Java${{ matrix.version }} jakarta 8.0.0
         run: mvn -B --color=always -Dtest.doer.jakarta.version=8.0.0 verify

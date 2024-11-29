@@ -2,6 +2,7 @@ package com.doer;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -12,6 +13,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -656,6 +658,22 @@ public abstract class DoerService {
                 }
             }
         }
+    }
+
+    public Map<Long, Task> loadTasks(Collection<Long> ids) throws SQLException {
+        String sql = "SELECT * FROM tasks WHERE id = ANY(?)";
+        HashMap<Long, Task> result = new HashMap<>();
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            Array sqlArray = con.createArrayOf("BIGINT", ids.toArray());
+            pst.setArray(1, sqlArray);
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    Task task = readTask(rs);
+                    result.put(task.getId(), task);
+                }
+            }
+        }
+        return result;
     }
 
     private Task readTask(ResultSet rs) throws SQLException {
