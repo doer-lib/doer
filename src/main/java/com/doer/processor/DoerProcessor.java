@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -78,6 +79,7 @@ public class DoerProcessor extends AbstractProcessor {
                 finder.updateDoerMethods(doerMethods);
 
                 generateDoerJson(doerMethods, loaders, unloaders, appenders, concurrencies);
+                generateDoerDot(doerMethods);
 
                 return true;
             }
@@ -1014,6 +1016,147 @@ public class DoerProcessor extends AbstractProcessor {
                 }
             }
             out.println("    ]");
+            out.println("}");
+        }
+    }
+
+    private void generateDoerDot(List<DoerMethodInfo> doerMethods) throws IOException {
+        String[][] colors = {
+                // color, fillcolor, fontcolor
+                {"#343A40", "#E9ECEF", "#212529"},
+                {"#28A745", "#D4EDDA", "#155724"},
+                {"#007BFF", "#D1ECF1", "#0C5460"},
+                {"#6F42C1", "#E9D8FD", "#4A148C"},
+                {"#FF5733", "#FFC300", "#000000"},
+                {"#FD7E14", "#FFF3CD", "#856404"},
+                {"#DC3545", "#F8D7DA", "#721C24"},
+                {"#17A2B8", "#E3F7FA", "#084C61"},
+                {"#20C997", "#D8F3E8", "#116D5E"},
+                {"#FFC107", "#FFF9DB", "#856404"},
+        };
+        FileObject doerJson = processingEnv.getFiler()
+                .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", "doer.dot");
+        try (PrintWriter out = new PrintWriter(doerJson.openWriter())) {
+            out.println("digraph alg {");
+            out.println("    rankdir=TD;");
+            out.println("    graph [overlap=true];");
+            out.println("    node [");
+            out.println("        fontname=Helvetica,");
+            out.println("        fontsize=10,");
+            out.println("        shape=box,");
+            out.println("        style=filled,");
+            out.println("        margin=\"0.1,0.1\",");
+            out.println("        height=0.3");
+            out.println("    ];");
+
+            AtomicInteger methodNodeIndexer = new AtomicInteger(100);
+            HashMap<DoerMethodInfo, String> methodNodeNames = new HashMap<>();
+            AtomicInteger statusNodeIndexer = new AtomicInteger(500);
+            HashMap<String, String> statusNodeNames = new HashMap<>();
+            HashMap<DoerMethodInfo, String> terminationStatusNodeNames = new HashMap<>();
+
+            List<DoerMethodInfo> sortedDoerMethods = new ArrayList<>(doerMethods);
+            sortedDoerMethods.sort(Comparator
+                    .comparing((DoerMethodInfo m) -> m.className)
+                    .thenComparing(m -> m.methodName)
+                    .thenComparing(m -> m.parameterTypes.toString()));
+
+            Map<String, List<DoerMethodInfo>> domainMethods = groupMethodsByDomain(sortedDoerMethods);
+            List<String> sortedDomainNames = new ArrayList<>(domainMethods.keySet());
+            Collections.sort(sortedDomainNames);
+            for (int nameIndex = 0; nameIndex < sortedDomainNames.size(); nameIndex++) {
+                out.println();
+                String[] colorScheme = colors[nameIndex % colors.length];
+                String borderColor = colorScheme[0];
+                String fillColor = colorScheme[1];
+                String fontColor = colorScheme[2];
+                out.printf("node [color=\"%s\", fillcolor=\"%s\", fontcolor=\"%s\"];%n",
+                        borderColor, fillColor, fontColor);
+
+                String domainName = sortedDomainNames.get(nameIndex);
+                for (DoerMethodInfo method : domainMethods.get(domainName)) {
+                    String fullName = method.className + "." + method.methodName;
+                    String nodeName = methodNodeNames.computeIfAbsent(method,
+                            key -> "m" + methodNodeIndexer.incrementAndGet());
+                    out.printf("%s [label=\"%s\", tooltip=\"%s\"];%n",
+                            nodeName, method.methodName, fullName);
+                }
+            }
+
+            out.println();
+            out.println("node [shape=circle,fixedsize=true,color=\"black\",fillcolor=\"white\"];");
+            Set<String> allStatuses = new HashSet<>();
+            for (DoerMethodInfo method : sortedDoerMethods) {
+                allStatuses.addAll(method.emitList);
+                for (AcceptStatus acceptStatus : method.acceptList) {
+                    allStatuses.add(acceptStatus.value());
+                }
+                if (method.onException != null) {
+                    allStatuses.add(method.onException.setStatus());
+                }
+            }
+            allStatuses.remove(null);
+            List<String> sortedStatuses = new ArrayList<>(allStatuses);
+            Collections.sort(sortedStatuses);
+            for (String status : sortedStatuses) {
+                String nodeName = statusNodeNames.computeIfAbsent(status,
+                        key -> "s" + statusNodeIndexer.incrementAndGet());
+                out.printf("%s [label=\" \", tooltip=\"%s\"];%n", nodeName, escape(status));
+            }
+
+            for (DoerMethodInfo method : sortedDoerMethods) {
+                if (method.emitList.contains(null)) {
+                    String nodeName = terminationStatusNodeNames.computeIfAbsent(method,
+                            key -> "n" + statusNodeIndexer.incrementAndGet());
+                    out.printf("%s [label=\"❌\", shape=none, fillcolor=\"none\", fontcolor=\"red\", fontsize=20, tooltip=\"null\"];%n", nodeName);
+                }
+            }
+
+            Set<String> errorOnlyStatuses = new HashSet<>();
+            for (DoerMethodInfo method : sortedDoerMethods) {
+                if (method.onException != null && method.onException.setStatus() != null) {
+                    errorOnlyStatuses.add(method.onException.setStatus());
+                }
+            }
+            for (DoerMethodInfo method : sortedDoerMethods) {
+                errorOnlyStatuses.removeIf(s -> method.emitList.contains(s));
+            }
+            out.println();
+            out.println("edge [arrowhead=\"vee\",fontname=\"Helvetica\",fontsize=\"8\",penwidth=0.8];");
+            for (DoerMethodInfo method : sortedDoerMethods) {
+                String methodNodeName = methodNodeNames.get(method);
+                List<AcceptStatus> acceptList = new ArrayList<>(method.acceptList);
+                acceptList.sort(Comparator.comparing(AcceptStatus::value));
+                for (AcceptStatus acceptStatus : acceptList) {
+                    String status = acceptStatus.value();
+                    String statusNodeName = statusNodeNames.get(status);
+                    if (!"".equals(acceptStatus.delay())) {
+                        String label = "delay " + acceptStatus.delay();
+                        String toolTip = acceptStatus.delay();
+                        out.printf("%s -> %s[arrowtail=dot,dir=both,label=\"%s\", tooltip=\"%s\"];%n",
+                                statusNodeName, methodNodeName, escape(label), escape(toolTip));
+                    } else if (errorOnlyStatuses.contains(status)) {
+                        out.printf("%s -> %s[color=\"red\"];%n",
+                                statusNodeName, methodNodeName);
+                    } else {
+                        out.printf("%s -> %s;%n", statusNodeName, methodNodeName);
+                    }
+                }
+                List<String> emitList = new ArrayList<>(new HashSet<>(method.emitList));
+                Collections.sort(emitList);
+                for (String status : emitList) {
+                    String statusNodeName = (status != null ? statusNodeNames.get(status) :
+                            terminationStatusNodeNames.get(method));
+                    out.printf("%s -> %s;%n", methodNodeName, statusNodeName);
+                }
+                if (method.onException != null) {
+                    String status = method.onException.setStatus();
+                    String statusNodeName = statusNodeNames.get(status);
+                    String toolTip = "[after retry] " + method.onException.retry();
+                    out.printf("%s -> %s[color=\"red\", tooltip=\"%s\"];%n",
+                            methodNodeName, statusNodeName, escape(toolTip));
+                }
+            }
             out.println("}");
         }
     }
