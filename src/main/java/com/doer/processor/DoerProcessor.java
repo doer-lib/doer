@@ -1085,19 +1085,45 @@ public class DoerProcessor extends AbstractProcessor {
 
             out.println();
             out.println("node [shape=circle,fixedsize=true,color=\"black\",fillcolor=\"white\"];");
-            Set<String> allStatuses = new HashSet<>();
+
+            Set<String> accepted = new HashSet<>();
+            Set<String> emitted = new HashSet<>();
+            Set<String> onerror = new HashSet<>();
             for (DoerMethodInfo method : sortedDoerMethods) {
-                allStatuses.addAll(method.emitList);
+                emitted.addAll(method.emitList);
                 for (AcceptStatus acceptStatus : method.acceptList) {
-                    allStatuses.add(acceptStatus.value());
+                    accepted.add(acceptStatus.value());
                 }
                 if (method.onException != null) {
-                    allStatuses.add(method.onException.setStatus());
+                    onerror.add(method.onException.setStatus());
                 }
             }
-            allStatuses.remove(null);
+            emitted.remove(null);
+            Set<String> allStatuses = new HashSet<>();
+            allStatuses.addAll(accepted);
+            allStatuses.addAll(emitted);
+            allStatuses.addAll(onerror);
             List<String> sortedStatuses = new ArrayList<>(allStatuses);
-            Collections.sort(sortedStatuses);
+            Comparator<String> comparator = Comparator.<String, Integer>comparing(s -> {
+                if (accepted.contains(s) && !emitted.contains(s) && !onerror.contains(s)) {
+                    return 1;
+                } else if (accepted.contains(s) && emitted.contains(s) && !onerror.contains(s)) {
+                    return 2;
+                } else if (accepted.contains(s) && emitted.contains(s) && onerror.contains(s)) {
+                    return 3;
+                } else if (accepted.contains(s) && !emitted.contains(s) && onerror.contains(s)) {
+                    return 4;
+                } else if (!accepted.contains(s) && emitted.contains(s) && !onerror.contains(s)) {
+                    return 5;
+                } else if (!accepted.contains(s) && emitted.contains(s) && onerror.contains(s)) {
+                    return 6;
+                } else if (!accepted.contains(s) && !emitted.contains(s) && onerror.contains(s)) {
+                    return 7;
+                } else {
+                    return 8;
+                }
+            }).thenComparing(s -> s);
+            sortedStatuses.sort(comparator);
             for (String status : sortedStatuses) {
                 String nodeName = statusNodeNames.computeIfAbsent(status,
                         key -> "s" + statusNodeIndexer.incrementAndGet());
@@ -1112,15 +1138,8 @@ public class DoerProcessor extends AbstractProcessor {
                 }
             }
 
-            Set<String> errorOnlyStatuses = new HashSet<>();
-            for (DoerMethodInfo method : sortedDoerMethods) {
-                if (method.onException != null && method.onException.setStatus() != null) {
-                    errorOnlyStatuses.add(method.onException.setStatus());
-                }
-            }
-            for (DoerMethodInfo method : sortedDoerMethods) {
-                errorOnlyStatuses.removeIf(s -> method.emitList.contains(s));
-            }
+            Set<String> errorOnlyStatuses = new HashSet<>(onerror);
+            errorOnlyStatuses.removeAll(emitted);
             out.println();
             out.println("edge [arrowhead=\"vee\",fontname=\"Helvetica\",fontsize=\"8\",penwidth=0.8];");
             for (DoerMethodInfo method : sortedDoerMethods) {
