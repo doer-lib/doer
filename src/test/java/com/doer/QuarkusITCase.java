@@ -70,7 +70,7 @@ public class QuarkusITCase {
         }
 
         exec(0, projectDir,
-                "mvn -B install:install-file ? -DgroupId=com.doer -DartifactId=doer ? -Dpackaging=jar -DgeneratePom=true ?",
+                "mvn -B install:install-file ? -DgroupId=com.java-doer -DartifactId=doer ? -Dpackaging=jar -DgeneratePom=true ?",
                 "-Dfile=" + jarPath,
                 "-Dversion=" + doerLibVersion,
                 "-DlocalRepositoryPath=" + localMaven);
@@ -108,6 +108,15 @@ public class QuarkusITCase {
                 "quarkus.log.console.format=%d{yyyy-MM-dd HH:mm:ss,SSS} %p {%t} %c{1.} - %s%e%n"));
 
         String pomXml = String.join(System.lineSeparator(), Files.readAllLines(quarkusDir.resolve("pom.xml")));
+        String annotationProcessor ="" +
+                "<annotationProcessorPaths>\n" +
+                "  <path>\n" +
+                "    <groupId>com.java-doer</groupId>\n" +
+                "    <artifactId>doer</artifactId>\n" +
+                "    <version>" + doerLibVersion + "</version>\n" +
+                "  </path>\n" +
+                "</annotationProcessorPaths>\n" +
+                "";
         String updatedPomXlm = Pattern.compile("</dependencies>\\s*<build>", Pattern.MULTILINE)
                 .matcher(pomXml)
                 .replaceFirst("<dependency>\n" +
@@ -115,11 +124,12 @@ public class QuarkusITCase {
                         "  <artifactId>flyway-database-postgresql</artifactId>\n" +
                         "</dependency>\n" +
                         "<dependency>\n" +
-                        "  <groupId>com.doer</groupId>\n" +
+                        "  <groupId>com.java-doer</groupId>\n" +
                         "  <artifactId>doer</artifactId>\n" +
                         "  <version>" + doerLibVersion + "</version>\n" +
                         "</dependency>\n" +
-                        "</dependencies>\n<build>");
+                        "</dependencies>\n<build>")
+                .replaceAll("<parameters>true</parameters>", "<parameters>true</parameters>\n" + annotationProcessor);
         Files.write(quarkusDir.resolve("pom.xml"), updatedPomXlm.getBytes(StandardCharsets.UTF_8),
                 StandardOpenOption.TRUNCATE_EXISTING);
 

@@ -5,21 +5,46 @@ Doer is a Java library designed for building fault-tolerant, cluster-ready backe
 It simplifies distributed task execution, automatic retries, and state transitions, ensuring reliable 
 processing of complex workflows.
 
+## Features
+
+- Annotation-based API
+- Execution in distributed environments
+- Automatic retries and failover
+
 ## Usage
 
 ```xml
 <dependency>
     <groupId>com.java-doer</groupId>
     <artifactId>doer</artifactId>
-    <version>0.0.11</version>
+    <version>0.0.12</version>
 </dependency>
 ```
+### Since JDK23
 
-## Features
+Starting from java 23 you need to enable annotation processing explicitly.
 
-- Annotation-based API
-- Execution in distributed environments
-- Automatic retries and failover
+Set `-Dmaven.compiler.proc=full` to enable ALL annotation processors, or explicitly enable doer annotation processor.
+
+```xml
+<build>
+    <plugins>
+        <plugin>
+            <artifactId>maven-compiler-plugin</artifactId>
+            <version>3.14.0</version>
+            <configuration>
+                <annotationProcessorPaths>
+                    <path>
+                        <groupId>com.java-doer</groupId>
+                        <artifactId>doer</artifactId>
+                        <version>0.0.12</version>
+                    </path>
+                </annotationProcessorPaths>
+            </configuration>
+        </plugin>
+    </plugins>
+</build>
+```
 
 ## Example Code
 
