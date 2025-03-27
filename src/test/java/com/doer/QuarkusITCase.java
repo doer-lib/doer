@@ -79,7 +79,7 @@ public class QuarkusITCase {
         t0 = System.currentTimeMillis();
         Utils.deleteReqursivelly(quarkusDir);
         exec(0, quarkusDir.getParent(),
-                "mvn -B ? io.quarkus.platform:quarkus-maven-plugin:3.17.2:create -DprojectGroupId=tst.demo " +
+                "mvn -B ? io.quarkus:quarkus-maven-plugin:3.21.0:create -DprojectGroupId=tst.demo " +
                         "-DprojectArtifactId=e2e-doer-quarkus " +
                         "-Dextensions=io.quarkus:quarkus-resteasy,io.quarkus:quarkus-jdbc-postgresql," +
                         "io.quarkus:quarkus-flyway,io.quarkus:quarkus-smallrye-health,io.quarkus:quarkus-resteasy-jsonb",

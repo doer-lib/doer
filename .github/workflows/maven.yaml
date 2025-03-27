@@ -21,7 +21,6 @@ jobs:
         with:
           java-version: '22'
           distribution: 'temurin'
-          cache: maven
       - name: Build with Maven
         run: mvn -B --color=always -DskipTests package
 
@@ -30,7 +29,6 @@ jobs:
         with:
           java-version: '${{ matrix.version }}'
           distribution: 'temurin'
-          cache: maven
       - name: Show java version
         run: java -version
       - name: Show mvn version
