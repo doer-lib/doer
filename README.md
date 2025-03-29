@@ -17,10 +17,9 @@ processing of complex workflows.
 
 ## Features
 
-- **Annotation-based API**: Define task handling logic with simple Java annotations.
-- **Automatic retries**: Configure retry policies for failed operations.
-- **State transitions**: Seamlessly manage task progression through different states.
-- **Fault tolerance**: Ensure reliable execution in distributed environments.
+- Annotation-based API
+- Execution in distributed environments
+- Automatic retries and failover
 
 ## Example Code
 
