@@ -111,6 +111,19 @@
         </pluginManagement>
         <plugins>
             <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <parameters>true</parameters>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>com.google.auto.service</groupId>
+                            <artifactId>auto-service</artifactId>
+                            <version>1.1.1</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>3.5.2</version>
@@ -135,6 +148,19 @@
             <id>release</id>
             <build>
                 <plugins>
+                    <plugin>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <parameters>true</parameters>
+                            <annotationProcessorPaths>
+                                <path>
+                                    <groupId>com.google.auto.service</groupId>
+                                    <artifactId>auto-service</artifactId>
+                                    <version>1.1.1</version>
+                                </path>
+                            </annotationProcessorPaths>
+                        </configuration>
+                    </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-source-plugin</artifactId>

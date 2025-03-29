@@ -48,7 +48,7 @@ public class GeneratorITCase {
         exec(0, dir, "mvn -B -Dmaven.repo.local=m2-local dependency:get -Dartifact=jakarta.platform:jakarta.jakartaee-api:"
                         + jakartaVersion);
         exec(0, projectDir,
-                "mvn -B install:install-file ? -DgroupId=com.doer -DartifactId=doer ? -Dpackaging=jar -DgeneratePom=true ?",
+                "mvn -B install:install-file ? -DgroupId=com.java-doer -DartifactId=doer ? -Dpackaging=jar -DgeneratePom=true ?",
                 "-Dfile=" + jarPath,
                 "-Dversion=" + doerLibVersion,
                 "-DlocalRepositoryPath=" + localRepo);
@@ -66,7 +66,7 @@ public class GeneratorITCase {
         String sep = System.getProperty("path.separator");
         doerJackarta = "m2-local/jakarta/platform/jakarta.jakartaee-api/" + jakartaVersion +
                 "/jakarta.jakartaee-api-" + jakartaVersion + ".jar" + sep +
-                "m2-local/com/doer/doer/"+ doerLibVersion + "/doer-" + doerLibVersion + ".jar";
+                "m2-local/com/java-doer/doer/"+ doerLibVersion + "/doer-" + doerLibVersion + ".jar";
         doerJackartaClasses = doerJackarta + sep + "classes";
     }
 
@@ -115,7 +115,8 @@ public class GeneratorITCase {
         // processor.
         // "-J-Xdebug -J-Xrunjdwp:transport=dt_socket,server=y,suspend=y,address=8000",
         // -J-ea - enable accertion in annotation processor
-        exec(0, dir, "javac -J-ea -cp ? -d classes Doer1.java Main.java", doerJackarta);
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes Doer1.java Main.java",
+                doerJackarta);
 
         String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
 
@@ -165,7 +166,8 @@ public class GeneratorITCase {
                 "}\n" +
                 "";
         Files.write(dir.resolve("Main.java"), code2.getBytes(UTF_8));
-        exec(0, dir, "javac -J-ea -cp ? -d classes Doer1.java Main.java", doerJackarta);
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes Doer1.java Main.java",
+                doerJackarta);
 
         String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
 
@@ -236,7 +238,8 @@ public class GeneratorITCase {
                 "}\n" +
                 "";
         Files.write(dir.resolve("Main.java"), code4.getBytes(UTF_8));
-        exec(0, dir, "javac -J-ea -cp ? -d classes Doer1.java DemoClass.java DemoClassLoader.java Main.java",
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor " +
+                        "-cp ? -d classes Doer1.java DemoClass.java DemoClassLoader.java Main.java",
                 doerJackarta);
 
         String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
@@ -288,7 +291,8 @@ public class GeneratorITCase {
                 "}\n" +
                 "";
         Files.write(dir.resolve("Main.java"), code.getBytes(UTF_8));
-        exec(0, dir, "javac -J-ea -cp ? -d classes Main.java", doerJackarta);
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes Main.java",
+                doerJackarta);
 
         String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
 
@@ -311,7 +315,8 @@ public class GeneratorITCase {
                 "demo/test/CheckIn.java",
                 "demo/test/ExceptionMapper.java",
                 "demo/test/Main.java");
-        exec(0, dir, "javac -J-ea -cp ? -d classes " + String.join(" ", files), doerJackarta);
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes " +
+                String.join(" ", files), doerJackarta);
 
         String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
 
@@ -335,7 +340,7 @@ public class GeneratorITCase {
         String expectedResult = generateMainClassForCarWathAndReturnExpectedResult(srcRoot);
         String additionalDependencies = "" +
                 "  <dependency>\n" +
-                "      <groupId>com.doer</groupId>\n" +
+                "      <groupId>com.java-doer</groupId>\n" +
                 "      <artifactId>doer</artifactId>\n" +
                 "      <version>" + doerLibVersion + "</version>\n" +
                 "    </dependency>\n" +
@@ -345,12 +350,37 @@ public class GeneratorITCase {
                 "      <version>" + jakartaVersion + "</version>\n" +
                 "    </dependency>\n" +
                 "";
+        String annotationProcessor ="" +
+                "  <plugins>\n" +
+                "      <plugin>\n" +
+                "        <artifactId>maven-compiler-plugin</artifactId>\n" +
+                "        <configuration>\n" +
+                "          <parameters>true</parameters>\n" +
+                "          <annotationProcessorPaths>\n" +
+                "            <path>\n" +
+                "              <groupId>com.java-doer</groupId>\n" +
+                "              <artifactId>doer</artifactId>\n" +
+                "              <version>" + doerLibVersion + "</version>\n" +
+                "            </path>\n" +
+                (jakartaVersion.equals("8.0.0") ? "" +
+                        "    <path>\n" +
+                        "      <groupId>jakarta.platform</groupId>\n" +
+                        "      <artifactId>jakarta.jakartaee-api</artifactId>\n" +
+                        "      <version>8.0.0</version>\n" +
+                        "    </path>\n" +
+                        "" : "") +
+                "          </annotationProcessorPaths>\n" +
+                "        </configuration>\n" +
+                "      </plugin>\n" +
+                "    </plugins>\n" +
+                "";
         String pom = new String(Files.readAllBytes(appFolder.resolve("pom.xml")))
                 .replaceAll("<maven.compiler.source>[^<]+</maven.compiler.source>",
                         "<maven.compiler.source>1.8</maven.compiler.source>")
                 .replaceAll("<maven.compiler.target>[^<]+</maven.compiler.target>",
                         "<maven.compiler.target>1.8</maven.compiler.target>")
-                .replaceAll("</dependencies>", additionalDependencies + "  </dependencies>");
+                .replaceAll("</dependencies>", additionalDependencies + "  </dependencies>")
+                .replaceAll("</build>", annotationProcessor + "  </build>");
         Files.write(appFolder.resolve("pom.xml"), pom.getBytes(UTF_8));
 
         exec(0, appFolder, "mvn -B -Dmaven.repo.local=../m2-local package");
@@ -632,7 +662,7 @@ public class GeneratorITCase {
                 "";
         Files.write(dir.resolve("Flamingo.java"), code.getBytes(UTF_8));
 
-        exec(0, dir, "javac -J-ea -cp ? -d classes Flamingo.java",
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes Flamingo.java",
                 doerJackarta);
         
         File doerJson = new File(dir.toFile(), "classes/com/doer/generated/doer.json");
@@ -690,7 +720,8 @@ public class GeneratorITCase {
                 "";
         Files.write(dir.resolve("Flamingo.java"), code3.getBytes(UTF_8));
 
-        exec(0, dir, "javac -J-ea -cp ? -d classes Flamingo.java Statuses1.java Statuses2.java",
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? " +
+                        "-d classes Flamingo.java Statuses1.java Statuses2.java",
                 doerJackarta);
 
         File doerJson = new File(dir.toFile(), "classes/com/doer/generated/doer.json");
