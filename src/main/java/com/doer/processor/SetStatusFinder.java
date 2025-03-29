@@ -679,11 +679,6 @@ public class SetStatusFinder {
         }
 
         @Override
-        public Object visitStringTemplate(StringTemplateTree node, Object o) {
-            return null;
-        }
-
-        @Override
         public Object visitAnyPattern(AnyPatternTree node, Object o) {
             return null;
         }
