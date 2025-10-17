@@ -7,7 +7,7 @@
 
     <groupId>com.java-doer</groupId>
     <artifactId>doer</artifactId>
-    <version>0.0.14-SNAPSHOT</version>
+    <version>0.0.14</version>
     <packaging>jar</packaging>
 
     <name>com.java-doer:doer</name>
