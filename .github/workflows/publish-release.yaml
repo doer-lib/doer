@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '24'
+          java-version: '25'
           server-id: central1
           server-username: MAVEN_CENTRAL_LOGIN
           server-password: MAVEN_CENTRAL_PASSWORD
@@ -63,6 +63,15 @@ jobs:
         run: |
           echo "====== Updating version to $RELEASE_VERSION ======"
           mvn -B --color=always versions:set -DnewVersion=$RELEASE_VERSION
+
+          mv README.md README.md.bak
+          awk -v v="$RELEASE_VERSION" '\
+            doer_artifact { sub(/<version>[^<]+<\/version>/, "<version>" v "</version>"); doer_artifact=0 }\
+            /<artifactId>doer<\/artifactId>/ { doer_artifact=1 }\
+            { print }\
+          ' README.md.bak > README.md
+          rm README.md.bak
+
           mvn -B --color=always versions:commit
 
           echo "====== Commiting and tagging ======"
