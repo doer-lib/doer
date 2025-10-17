@@ -24,7 +24,9 @@ processing of complex workflows.
 
 Starting from java 23 you need to enable annotation processing explicitly.
 
-Set `-Dmaven.compiler.proc=full` to enable ALL annotation processors, or explicitly enable doer annotation processor.
+Set `-Dmaven.compiler.proc=full` to enable ALL annotation processors.
+
+Or explicitly enable doer annotation processor:
 
 ```xml
 <build>
