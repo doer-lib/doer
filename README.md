@@ -17,7 +17,7 @@ processing of complex workflows.
 <dependency>
     <groupId>com.java-doer</groupId>
     <artifactId>doer</artifactId>
-    <version>0.0.14</version>
+    <version>0.0.15</version>
 </dependency>
 ```
 ### Since JDK23
@@ -39,7 +39,7 @@ Or explicitly enable doer annotation processor:
                     <path>
                         <groupId>com.java-doer</groupId>
                         <artifactId>doer</artifactId>
-                        <version>0.0.14</version>
+                        <version>0.0.15</version>
                     </path>
                 </annotationProcessorPaths>
             </configuration>
