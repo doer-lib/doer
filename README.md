@@ -83,6 +83,20 @@ The following diagram illustrates the state transitions and error-handling mecha
 
 ![intro.svg](intro.svg)
 
+## Tutorials
+
+Video tutorials are available on [YouTube](https://www.youtube.com/@DoerLib).
+
+Learn how to use Doer with these tutorials:
+
+1. [Episode 01: The Core Concept Behind the Doer](https://github.com/doer-lib/doertutorial/wiki/Episode-01:-The-Core-Concept-Behind-the-Doer)
+2. [Episode 02: Doer Methods - Implementing Business Operations with Doer](https://github.com/doer-lib/doertutorial/wiki/Episode-02.-Doer-Methods:-Implementing-Business-Operations-with-Doer)
+3. [Episode 03: How to Read a Doer Diagram](https://github.com/doer-lib/doertutorial/wiki/Episode-03:-How-to-Read-a-Doer-Diagram)
+
+## Tools
+
+- [Doer Diagram Tool](https://www.java-doer.com/doer-diagram.html) - Visualize your Doer workflows
+
 ---
 
 Contributions and feedback are welcome! Feel free to open an issue or submit a pull request.
