@@ -11,21 +11,21 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        version: [ 8, 11, 17, 21, 23, 24, 25 ]
+        version: [ 8, 11, 17, 21, 23, 25, 26, 27 ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      # Java25 is used to build library (but -target=8)
-      - name: Set up JDK 25 (for building)
-        uses: actions/setup-java@v4
+      # Java27 is used to build library (but -target=8)
+      - name: Set up JDK 27 (for building)
+        uses: actions/setup-java@v6
         with:
-          java-version: '25'
+          java-version: '27'
           distribution: 'temurin'
       - name: Build with Maven
         run: mvn -B --color=always -DskipTests package
 
       - name: Set up Java${{ matrix.version }} (for testing)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '${{ matrix.version }}'
           distribution: 'temurin'

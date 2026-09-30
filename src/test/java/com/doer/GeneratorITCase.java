@@ -1,5 +1,8 @@
 package com.doer;
 
+import static com.doer.Utils.exec;
+import static io.restassured.path.json.JsonPath.with;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -10,17 +13,13 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
-
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnJre;
+import org.junit.jupiter.api.condition.EnabledForJreRange;
 import org.junit.jupiter.api.condition.JRE;
 import org.junit.jupiter.api.io.TempDir;
-
-import static com.doer.Utils.*;
-import static io.restassured.path.json.JsonPath.with;
-import static java.nio.charset.StandardCharsets.UTF_8;
 
 public class GeneratorITCase {
     @TempDir
@@ -66,7 +65,7 @@ public class GeneratorITCase {
         String sep = System.getProperty("path.separator");
         doerJackarta = "m2-local/jakarta/platform/jakarta.jakartaee-api/" + jakartaVersion +
                 "/jakarta.jakartaee-api-" + jakartaVersion + ".jar" + sep +
-                "m2-local/com/java-doer/doer/"+ doerLibVersion + "/doer-" + doerLibVersion + ".jar";
+                "m2-local/com/java-doer/doer/" + doerLibVersion + "/doer-" + doerLibVersion + ".jar";
         doerJackartaClasses = doerJackarta + sep + "classes";
     }
 
@@ -239,7 +238,7 @@ public class GeneratorITCase {
                 "";
         Files.write(dir.resolve("Main.java"), code4.getBytes(UTF_8));
         exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor " +
-                        "-cp ? -d classes Doer1.java DemoClass.java DemoClassLoader.java Main.java",
+                "-cp ? -d classes Doer1.java DemoClass.java DemoClassLoader.java Main.java",
                 doerJackarta);
 
         String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
@@ -350,7 +349,7 @@ public class GeneratorITCase {
                 "      <version>" + jakartaVersion + "</version>\n" +
                 "    </dependency>\n" +
                 "";
-        String annotationProcessor ="" +
+        String annotationProcessor = "" +
                 "  <plugins>\n" +
                 "      <plugin>\n" +
                 "        <artifactId>maven-compiler-plugin</artifactId>\n" +
@@ -664,7 +663,7 @@ public class GeneratorITCase {
 
         exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes Flamingo.java",
                 doerJackarta);
-        
+
         File doerJson = new File(dir.toFile(), "classes/com/doer/generated/doer.json");
         List<String> ressult = with(doerJson)
                 .get("doer_methods[0].emits");
@@ -685,6 +684,98 @@ public class GeneratorITCase {
                 "In Fly 7",
                 "In Fly A",
                 "In Fly Default");
+        assertEquals(expected, ressult);
+    }
+
+    @Test
+    void javac__should_handle_null_and_non_null_setStatus_in_one_method() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Pelican {\n" +
+                "    boolean anything = false;\n" +
+                "    @AcceptStatus(\"A1\")\n" +
+                "    public void fish(Task task) {\n" +
+                "        if (anything) {\n" +
+                "            task.setStatus(null);\n" +
+                "        } else {\n" +
+                "            task.setStatus(\"Extra to do\");\n" +
+                "        }\n" +
+                "    }\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Pelican.java"), code.getBytes(UTF_8));
+
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes Pelican.java",
+                doerJackarta);
+
+        File doerJson = new File(dir.toFile(), "classes/com/doer/generated/doer.json");
+        List<String> emits = with(doerJson).get("doer_methods[0].emits");
+        Boolean emitsNull = with(doerJson).get("doer_methods[0].emits_null");
+        assertEquals(Arrays.asList("Extra to do"), emits);
+        assertEquals(Boolean.TRUE, emitsNull);
+        assertTrue(new File(dir.toFile(), "classes/com/doer/generated/doer.dot").isFile());
+    }
+
+    @EnabledForJreRange(min = JRE.JAVA_14) // switch expressions and yield
+    @Test
+    void javac__should_find_setStatus_in_modern_constructs() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Heron {\n" +
+                "    static final String DONE = \"Const field\";\n" +
+                "    int n = 1;\n" +
+                "    @AcceptStatus(\"A1\")\n" +
+                "    public void fly(Task task) {\n" +
+                "        final String local = \"Const local\";\n" +
+                "        switch (task.getStatus()) {\n" +
+                "            case \"A\" -> task.setStatus(\"Arrow A\");\n" +
+                "            default -> { task.setStatus(\"Arrow Default\"); }\n" +
+                "        }\n" +
+                "        task.setStatus(switch (n) {\n" +
+                "            case 1 -> \"Switch 1\";\n" +
+                "            case 2 -> n > 0 ? \"Switch 2a\" : \"Switch 2b\";\n" +
+                "            default -> {\n" +
+                "                int m = switch (n) { case 3 -> 3; default -> { yield 4; } };\n" +
+                "                yield \"Switch Default\";\n" +
+                "            }\n" +
+                "        });\n" +
+                "        outer:\n" +
+                "        for (int i = 0; i < 1; i++) {\n" +
+                "            task.setStatus(\"Labeled\");\n" +
+                "            break outer;\n" +
+                "        }\n" +
+                "        run(() -> task.setStatus(\"Via helper\"));\n" +
+                "        task.setStatus(DONE);\n" +
+                "        task.setStatus(Heron.DONE);\n" +
+                "        task.setStatus(local);\n" +
+                "        task.setStatus(\"Prefix \" + n);\n" +
+                "        task.setStatus(String.valueOf(n));\n" +
+                "    }\n" +
+                "    static void run(Runnable r) {\n" +
+                "        r.run();\n" +
+                "    }\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Heron.java"), code.getBytes(UTF_8));
+
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes Heron.java",
+                doerJackarta);
+
+        File doerJson = new File(dir.toFile(), "classes/com/doer/generated/doer.json");
+        List<String> ressult = with(doerJson)
+                .get("doer_methods[0].emits");
+        List<String> expected = Arrays.asList("Arrow A",
+                "Arrow Default",
+                "Const field",
+                "Const local",
+                "Labeled",
+                "Switch 1",
+                "Switch 2a",
+                "Switch 2b",
+                "Switch Default",
+                "Via helper");
         assertEquals(expected, ressult);
     }
 
@@ -721,7 +812,7 @@ public class GeneratorITCase {
         Files.write(dir.resolve("Flamingo.java"), code3.getBytes(UTF_8));
 
         exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? " +
-                        "-d classes Flamingo.java Statuses1.java Statuses2.java",
+                "-d classes Flamingo.java Statuses1.java Statuses2.java",
                 doerJackarta);
 
         File doerJson = new File(dir.toFile(), "classes/com/doer/generated/doer.json");

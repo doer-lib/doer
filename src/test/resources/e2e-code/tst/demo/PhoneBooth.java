@@ -1,8 +1,8 @@
 package tst.demo;
 
+import com.doer.*;
 import com.doer.AcceptStatus;
 import com.doer.DoerConcurrency;
-import com.doer.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.json.JsonObjectBuilder;
 

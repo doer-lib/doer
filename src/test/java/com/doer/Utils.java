@@ -18,14 +18,13 @@ import java.util.List;
 import java.util.Scanner;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-
 import org.postgresql.ds.PGSimpleDataSource;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 public class Utils {
 
     static PGSimpleDataSource _ds;
-    static PostgreSQLContainer<?> _pgContainer;
+    static PostgreSQLContainer _pgContainer;
 
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(Utils::closeAll));
@@ -118,7 +117,7 @@ public class Utils {
             _pgContainer.close();
             _pgContainer = null;
         }
-        PostgreSQLContainer<?> container = new PostgreSQLContainer<>("postgres:12.3")
+        PostgreSQLContainer container = new PostgreSQLContainer("postgres:12.3")
                 .withDatabaseName("doer")
                 .withUsername("doer")
                 .withPassword("doer")

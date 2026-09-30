@@ -3,10 +3,9 @@ package tst.demo;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import org.junit.jupiter.api.Test;
-
 import com.doer.AcceptStatus;
 import com.doer.Task;
+import org.junit.jupiter.api.Test;
 
 /**
  * This test class is needed to check that DoerProcessor will skip code generation during

@@ -1,5 +1,7 @@
 package com.doer.processor;
 
+import com.doer.*;
+import com.google.auto.service.AutoService;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.time.Duration;
@@ -23,7 +25,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.Messager;
 import javax.annotation.processing.Processor;
@@ -38,14 +39,10 @@ import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
+import javax.tools.Diagnostic.Kind;
+import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
 import javax.tools.StandardLocation;
-import javax.tools.Diagnostic.Kind;
-
-import javax.tools.FileObject;
-
-import com.doer.*;
-import com.google.auto.service.AutoService;
 
 @SupportedAnnotationTypes({ "com.doer.*" })
 @AutoService(Processor.class)
@@ -1162,7 +1159,7 @@ public class DoerProcessor extends AbstractProcessor {
                     }
                 }
                 List<String> emitList = new ArrayList<>(new HashSet<>(method.emitList));
-                Collections.sort(emitList);
+                emitList.sort(Comparator.nullsLast(Comparator.naturalOrder()));
                 for (String status : emitList) {
                     String statusNodeName = (status != null ? statusNodeNames.get(status) :
                             terminationStatusNodeNames.get(method));

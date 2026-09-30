@@ -1,53 +1,120 @@
 package com.doer.processor;
 
+import com.doer.Task;
+import com.sun.source.tree.BlockTree;
+import com.sun.source.tree.CaseTree;
+import com.sun.source.tree.ClassTree;
+import com.sun.source.tree.ConditionalExpressionTree;
+import com.sun.source.tree.ExpressionTree;
+import com.sun.source.tree.LambdaExpressionTree;
+import com.sun.source.tree.LiteralTree;
+import com.sun.source.tree.MemberSelectTree;
+import com.sun.source.tree.MethodInvocationTree;
+import com.sun.source.tree.MethodTree;
+import com.sun.source.tree.ParenthesizedTree;
+import com.sun.source.tree.SwitchExpressionTree;
+import com.sun.source.tree.Tree;
+import com.sun.source.tree.TypeCastTree;
+import com.sun.source.tree.YieldTree;
+import com.sun.source.util.TreePath;
+import com.sun.source.util.TreePathScanner;
+import com.sun.source.util.Trees;
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
-import java.util.Set;
 import java.util.stream.Collectors;
-
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.RoundEnvironment;
-import javax.lang.model.element.*;
-import javax.lang.model.type.DeclaredType;
+import javax.lang.model.element.AnnotationMirror;
+import javax.lang.model.element.Element;
+import javax.lang.model.element.ElementKind;
+import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.TypeMirror;
 
-import com.doer.Task;
-import com.sun.source.tree.*;
-import com.sun.source.tree.Tree.Kind;
-import com.sun.source.util.*;
-
+/**
+ * Finds constant statuses passed to {@link Task#setStatus(String)} in method
+ * bodies and adds them to {@link DoerMethodInfo#emitList}.
+ */
 public class SetStatusFinder {
 
-    RoundEnvironment roundEnv;
-    ProcessingEnvironment processingEnv;
-    Trees trees;
-    CompilationUnitTree compilationUnitTree;
-    ArrayList<String> statusList;
-    List<DoerMethodInfo> methods;
+    private final RoundEnvironment roundEnv;
+    private final Trees trees;
+    private List<DoerMethodInfo> methods;
 
     public SetStatusFinder(RoundEnvironment roundEnv, ProcessingEnvironment processingEnv) {
         this.roundEnv = roundEnv;
-        this.processingEnv = processingEnv;
-        trees = Trees.instance(processingEnv);
+        this.trees = Trees.instance(processingEnv);
     }
 
     public void updateDoerMethods(List<DoerMethodInfo> methods) {
         this.methods = methods;
-        Set<? extends Element> rootElements = roundEnv.getRootElements();
-        for (Element element : rootElements) {
-            element.accept(new MyElementVisitor(), null);
+        for (Element element : roundEnv.getRootElements()) {
+            if (element instanceof TypeElement) {
+                scanType((TypeElement) element);
+            }
         }
+    }
+
+    private void scanType(TypeElement type) {
+        if (isClassGenerated(type)) {
+            return;
+        }
+        for (Element enclosed : type.getEnclosedElements()) {
+            if (enclosed instanceof TypeElement) {
+                scanType((TypeElement) enclosed);
+            } else if (enclosed instanceof ExecutableElement) {
+                scanExecutable((ExecutableElement) enclosed);
+            }
+        }
+    }
+
+    private boolean isClassGenerated(TypeElement e) {
+        for (AnnotationMirror annotationMirror : e.getAnnotationMirrors()) {
+            if (annotationMirror.getAnnotationType().toString().endsWith(".Generated")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void scanExecutable(ExecutableElement e) {
+        TreePath methodPath = trees.getPath(e);
+        if (methodPath == null) {
+            // Enum and record can have methods without body
+            // We just skip them
+            return;
+        }
+        BlockTree body = ((MethodTree) methodPath.getLeaf()).getBody();
+        if (body == null || !body.toString().contains(".setStatus(")) {
+            return;
+        }
+        List<String> statuses = new ArrayList<>();
+        new StatusCallScanner().scan(new TreePath(methodPath, body), statuses);
+        if (statuses.isEmpty()) {
+            return;
+        }
+
+        String className = e.getEnclosingElement().asType().toString();
+        String methodName = e.getSimpleName().toString();
+        List<String> parameterTypes = e.getParameters()
+                .stream()
+                .map(VariableElement::asType)
+                .map(TypeMirror::toString)
+                .collect(Collectors.toList());
+        DoerMethodInfo doerMethod = findDoerMethodInfo(className, methodName, parameterTypes);
+        if (doerMethod.element == null) {
+            doerMethod.element = e;
+        }
+        doerMethod.emitList.addAll(statuses);
     }
 
     private DoerMethodInfo findDoerMethodInfo(String className, String methodName, List<String> parameterTypes) {
         for (DoerMethodInfo method : methods) {
-            if (className.equals(method.className)) {
-                if (methodName.equals(method.methodName)) {
-                    if (parameterTypes.equals(method.parameterTypes)) {
-                        return method;
-                    }
-                }
+            if (className.equals(method.className)
+                    && methodName.equals(method.methodName)
+                    && parameterTypes.equals(method.parameterTypes)) {
+                return method;
             }
         }
         DoerMethodInfo newMethod = new DoerMethodInfo();
@@ -58,643 +125,142 @@ public class SetStatusFinder {
         return newMethod;
     }
 
-    class MyElementVisitor implements ElementVisitor<Object, Object> {
+    // Walks the whole method body and collects statuses of every Task.setStatus call.
+    private class StatusCallScanner extends TreePathScanner<Void, List<String>> {
         @Override
-        public Object visit(Element e, Object p) {
-            return null;
+        public Void visitMethodInvocation(MethodInvocationTree node, List<String> statuses) {
+            if (isTaskSetStatusCall(node)) {
+                collectConstantValues(new TreePath(getCurrentPath(), node.getArguments().get(0)), statuses);
+            }
+            return super.visitMethodInvocation(node, statuses);
         }
 
-        @Override
-        public Object visitPackage(PackageElement e, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitType(TypeElement e, Object p) {
-            if (isClassGenerated(e)) {
-                return null;
+        private boolean isTaskSetStatusCall(MethodInvocationTree node) {
+            ExpressionTree methodSelect = node.getMethodSelect();
+            if (methodSelect.getKind() != Tree.Kind.MEMBER_SELECT || node.getArguments().size() != 1) {
+                return false;
             }
-            for (Element x : e.getEnclosedElements()) {
-                x.accept(this, null);
+            MemberSelectTree memberSelect = (MemberSelectTree) methodSelect;
+            if (!"setStatus".contentEquals(memberSelect.getIdentifier())) {
+                return false;
             }
-            return null;
-        }
+            ExpressionTree receiver = memberSelect.getExpression();
+            TreePath receiverPath = new TreePath(new TreePath(getCurrentPath(), methodSelect), receiver);
+            Element element = trees.getElement(receiverPath);
 
-        private boolean isClassGenerated(TypeElement e) {
-            for (AnnotationMirror annotationMirror : e.getAnnotationMirrors()) {
-                DeclaredType annotationType = annotationMirror.getAnnotationType();
-                if (annotationType.toString().endsWith(".Generated")) {
-                    return true;
-                }
+            String className;
+            if (element == null) {
+                // WORKAROUND for Java 1.8
+                // javac 1.8 may not provide element here.
+                // So we use heuristics to find if it is Task object whose setStatus is being called.
+                String name = receiver.toString();
+                boolean looksLikeTask = name.toLowerCase().endsWith("task") || name.equals("t");
+                className = looksLikeTask ? Task.class.getName() : "UnknownType";
+            } else if (element.getKind() == ElementKind.METHOD) {
+                className = ((ExecutableElement) element).getReturnType().toString();
+            } else if (element.getKind() == ElementKind.CONSTRUCTOR) {
+                className = element.getEnclosingElement().toString();
+            } else {
+                className = element.asType().toString();
             }
-            return false;
-        }
-
-        @Override
-        public Object visitVariable(VariableElement e, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitExecutable(ExecutableElement e, Object p) {
-            String className = e.getEnclosingElement().asType().toString();
-            String methodName = e.getSimpleName().toString();
-            List<String> parameterTypes = e.getParameters()
-                    .stream()
-                    .map(VariableElement::asType)
-                    .map(TypeMirror::toString)
-                    .collect(Collectors.toList());
-
-            TreePath treePath = trees.getPath(e);
-            if (treePath == null) {
-                // Enum and record can have methods without body
-                // We just skip them
-                return null;
-            }
-            compilationUnitTree = treePath.getCompilationUnit();
-
-            MethodTree methodTree = trees.getTree(e); // declaration and parameters
-            BlockTree blockTree = methodTree.getBody(); // sequence of statements
-            if (blockTree == null) {
-                return null;
-            }
-            if (!blockTree.toString().contains(".setStatus(")) {
-                return null;
-            }
-            statusList = new ArrayList<>();
-            MyTreeVisitor codeVisitor = new MyTreeVisitor();
-            blockTree.accept(codeVisitor, null);
-            if (!statusList.isEmpty()) {
-                DoerMethodInfo doerMethod = findDoerMethodInfo(className, methodName, parameterTypes);
-                if (doerMethod.element == null) {
-                    doerMethod.element = e;
-                }
-                doerMethod.emitList.addAll(statusList);
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitTypeParameter(TypeParameterElement e, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitUnknown(Element e, Object p) {
-            return null;
+            return Task.class.getName().equals(className);
         }
     }
 
-    // This visitor look through code and find all constant strings passed as
-    // argument to Task.setStatus method.
-    class MyTreeVisitor implements TreeVisitor<Object, Object> {
-
-        // True when analyzing expression is status for setStatus method
-        LinkedList<Boolean> stack = new LinkedList<>();
-        {
-            stack.push(false);
-        }
-
-        @Override
-        public Object visitAnnotatedType(AnnotatedTypeTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitAnnotation(AnnotationTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitMethodInvocation(MethodInvocationTree node, Object p) {
-            ExpressionTree methodSelect = node.getMethodSelect();
-            boolean thisIsSetStatusCall = false;
-            if (methodSelect.getKind() == Tree.Kind.MEMBER_SELECT) {
-                MemberSelectTree memberSelect = (MemberSelectTree) methodSelect;
-                String methodName = memberSelect.getIdentifier().toString();
-                if ("setStatus".equals(methodName)) {
-                    if (node.getArguments().size() == 1) {
-                        ExpressionTree expression = memberSelect.getExpression();
-                        TreePath path = TreePath.getPath(compilationUnitTree, expression);
-                        Element element = trees.getElement(path);
-
-                        String className;
-                        if (element == null) {
-                            // WORKAROUND for Java 1.8
-                            // javac 1.8 may not provide element here.
-                            // So we use euristics to find if it is Task object whose setStatus is being
-                            // called.
-                            boolean isNameEndsWithTask = expression.toString().toLowerCase().endsWith("task");
-                            boolean isNameT = expression.toString().equals("t");
-                            if (isNameEndsWithTask || isNameT) {
-                                className = Task.class.getName();
-                            } else {
-                                className = "UnknownType";
-                            }
-                        } else if (element.getKind() == ElementKind.METHOD) {
-                            className = ((ExecutableElement) element).getReturnType().toString();
-                        } else if (element.getKind() == ElementKind.CONSTRUCTOR) {
-                            className = element.getEnclosingElement().toString();
-                        } else {
-                            className = element.asType().toString();
-                        }
-                        if (Task.class.getName().equals(className)) {
-                            thisIsSetStatusCall = true;
-                        }
-                    }
+    // Adds all constant values the status expression may evaluate to.
+    // Non-constant expressions (method calls, concatenation with variables, ...) are ignored.
+    private void collectConstantValues(TreePath path, List<String> statuses) {
+        Tree expression = path.getLeaf();
+        switch (expression.getKind()) {
+            case NULL_LITERAL:
+                statuses.add(null);
+                break;
+            case STRING_LITERAL:
+                statuses.add(((LiteralTree) expression).getValue().toString());
+                break;
+            case PARENTHESIZED:
+                collectConstantValues(new TreePath(path, ((ParenthesizedTree) expression).getExpression()), statuses);
+                break;
+            case TYPE_CAST:
+                collectConstantValues(new TreePath(path, ((TypeCastTree) expression).getExpression()), statuses);
+                break;
+            case CONDITIONAL_EXPRESSION:
+                ConditionalExpressionTree conditional = (ConditionalExpressionTree) expression;
+                collectConstantValues(new TreePath(path, conditional.getTrueExpression()), statuses);
+                collectConstantValues(new TreePath(path, conditional.getFalseExpression()), statuses);
+                break;
+            case IDENTIFIER:
+            case MEMBER_SELECT:
+                addConstantVariableValue(trees.getElement(path), statuses);
+                break;
+            default:
+                // Compared by name, because Kind.SWITCH_EXPRESSION does not exist in Java 1.8
+                if ("SWITCH_EXPRESSION".equals(expression.getKind().name())) {
+                    new SwitchResultScanner(statuses).scan(path, null);
                 }
+                break;
+        }
+    }
+
+    private void addConstantVariableValue(Element element, List<String> statuses) {
+        if (element == null) {
+            // workaround for java 1.8
+            // no workaround found
+            return;
+        }
+        ElementKind kind = element.getKind();
+        if ((kind == ElementKind.FIELD || kind == ElementKind.LOCAL_VARIABLE)
+                && "java.lang.String".equals(element.asType().toString())) {
+            Object value = ((VariableElement) element).getConstantValue();
+            if (value != null) {
+                statuses.add(value.toString());
             }
+        }
+    }
 
-            if (thisIsSetStatusCall) {
-                stack.push(false);
-                methodSelect.accept(this, null);
-                stack.pop();
-                stack.push(true);
-                ExpressionTree statusExpression = node.getArguments().get(0);
-                statusExpression.accept(this, null);
-                stack.pop();
-            } else {
-                if (methodSelect.getKind() == Tree.Kind.IDENTIFIER) {
-                } else if (methodSelect.getKind() == Tree.Kind.MEMBER_SELECT) {
-                    stack.push(false);
-                    methodSelect.accept(this, null);
-                    for (ExpressionTree expression : node.getArguments()) {
-                        expression.accept(this, null);
-                    }
-                    stack.pop();
-                } else {
-                    // nop
-                }
+    // Collects results of a single switch expression: arrow case expressions and yield values.
+    // Loaded only for switch expressions, so Java 1.8 never touches classes missing there.
+    private class SwitchResultScanner extends TreePathScanner<Void, Void> {
+        private final List<String> statuses;
+        private SwitchExpressionTree root;
+
+        SwitchResultScanner(List<String> statuses) {
+            this.statuses = statuses;
+        }
+
+        @Override
+        public Void visitSwitchExpression(SwitchExpressionTree node, Void p) {
+            if (root != null) {
+                // Yields of nested switch expressions belong to them
+                return null;
             }
-            return null;
+            root = node;
+            return scan(node.getCases(), p);
         }
 
         @Override
-        public Object visitAssert(AssertTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitAssignment(AssignmentTree node, Object p) {
-            ExpressionTree expression = node.getExpression();
-            if (expression != null) {
-                expression.accept(this, null);
+        public Void visitCase(CaseTree node, Void p) {
+            Tree body = node.getBody();
+            if (node.getCaseKind() == CaseTree.CaseKind.RULE && body instanceof ExpressionTree) {
+                collectConstantValues(new TreePath(getCurrentPath(), body), statuses);
+                return null;
             }
+            return super.visitCase(node, p);
+        }
+
+        @Override
+        public Void visitYield(YieldTree node, Void p) {
+            collectConstantValues(new TreePath(getCurrentPath(), node.getValue()), statuses);
             return null;
         }
 
         @Override
-        public Object visitCompoundAssignment(CompoundAssignmentTree node, Object p) {
-            node.getExpression().accept(this, null);
+        public Void visitLambdaExpression(LambdaExpressionTree node, Void p) {
             return null;
         }
 
         @Override
-        public Object visitBinary(BinaryTree node, Object p) {
-            node.getLeftOperand().accept(this, null);
-            node.getRightOperand().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitBlock(BlockTree node, Object p) {
-            for (StatementTree statement : node.getStatements()) {
-                statement.accept(this, null);
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitBreak(BreakTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitCase(CaseTree node, Object p) {
-            if (node.getStatements() != null) {
-                for (StatementTree statement : node.getStatements()) {
-                    statement.accept(this, null);
-                }
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitCatch(CatchTree node, Object p) {
-            node.getBlock().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitClass(ClassTree node, Object p) {
-            for (Tree member : node.getMembers()) {
-                member.accept(this, null);
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitConditionalExpression(ConditionalExpressionTree node, Object p) {
-            stack.push(false);
-            node.getCondition().accept(this, null);
-            stack.pop();
-            node.getTrueExpression().accept(this, null);
-            node.getFalseExpression().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitContinue(ContinueTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitDoWhileLoop(DoWhileLoopTree node, Object p) {
-            node.getStatement().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitErroneous(ErroneousTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitExpressionStatement(ExpressionStatementTree node, Object p) {
-
-            ExpressionTree expression = node.getExpression();
-            Kind kind = expression.getKind();
-            if (kind == Tree.Kind.NULL_LITERAL) {
-                if (stack.peek()) {
-                    statusList.add(null);
-                }
-            } else if (kind == Tree.Kind.STRING_LITERAL) {
-                if (stack.peek()) {
-                    Object value = ((LiteralTree) expression).getValue();
-                    statusList.add(value.toString());
-                }
-            } else {
-                expression.accept(this, null);
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitEnhancedForLoop(EnhancedForLoopTree node, Object p) {
-            node.getStatement().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitForLoop(ForLoopTree node, Object p) {
-            node.getStatement().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitIdentifier(IdentifierTree node, Object p) {
-            if (stack.peek()) {
-                TreePath path = TreePath.getPath(compilationUnitTree, node);
-                Element element = trees.getElement(path);
-                if (element == null) {
-                    // workaround for java 1.8
-                    // no workaround found
-                } else if (element.getKind() == ElementKind.FIELD) {
-                    if ("java.lang.String".equals(element.asType().toString())) {
-                        String value = (String) ((VariableElement) element).getConstantValue();
-                        if (value != null) {
-                            statusList.add(value);
-                        }
-                    }
-                }
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitIf(IfTree node, Object p) {
-            stack.push(false);
-            node.getCondition().accept(this, null);
-            if (node.getThenStatement() != null) {
-                node.getThenStatement().accept(this, null);
-            }
-            if (node.getElseStatement() != null) {
-                node.getElseStatement().accept(this, null);
-            }
-            stack.pop();
-            return null;
-        }
-
-        @Override
-        public Object visitImport(ImportTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitArrayAccess(ArrayAccessTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitLabeledStatement(LabeledStatementTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitLiteral(LiteralTree node, Object p) {
-            Kind kind = node.getKind();
-            if (stack.peek()) {
-                if (kind == Tree.Kind.NULL_LITERAL) {
-                    statusList.add(null);
-                } else if (kind == Tree.Kind.STRING_LITERAL) {
-                    Object value = node.getValue();
-                    statusList.add(value.toString());
-                }
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitBindingPattern(BindingPatternTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitDefaultCaseLabel(DefaultCaseLabelTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitMethod(MethodTree node, Object p) {
-            if (node.getBody() != null) {
-                node.getBody().accept(this, null);
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitModifiers(ModifiersTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitNewArray(NewArrayTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitNewClass(NewClassTree node, Object p) {
-            stack.push(false);
-            for (ExpressionTree expression : node.getArguments()) {
-                expression.accept(this, null);
-            }
-            if (node.getClassBody() != null) {
-                for (Tree expression : node.getClassBody().getMembers()) {
-                    expression.accept(this, null);
-                }
-            }
-            stack.pop();
-            return null;
-        }
-
-        @Override
-        public Object visitLambdaExpression(LambdaExpressionTree node, Object p) {
-            node.getBody().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitPackage(PackageTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitParenthesized(ParenthesizedTree node, Object p) {
-            node.getExpression().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitReturn(ReturnTree node, Object p) {
-            ExpressionTree expression = node.getExpression();
-            if (expression != null) {
-                expression.accept(this, null);
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitMemberSelect(MemberSelectTree node, Object p) {
-            ExpressionTree expression = node.getExpression();
-            Kind kind = expression.getKind();
-            if (kind == Tree.Kind.IDENTIFIER) {
-            } else if (kind == Tree.Kind.METHOD_INVOCATION || kind == Tree.Kind.NEW_CLASS) {
-                stack.push(false);
-                expression.accept(this, null);
-                stack.pop();
-            } else if (kind == Tree.Kind.MEMBER_SELECT) {
-                MemberSelectTree memberSelect = (MemberSelectTree) expression;
-                memberSelect.getExpression().accept(this, null);
-            } else if (kind == Tree.Kind.PARENTHESIZED) {
-                expression.accept(this, null);
-            } else {
-                // nop
-            }
-            if (stack.peek()) {
-                TreePath path = TreePath.getPath(compilationUnitTree, node);
-                Element element = trees.getElement(path);
-                if (element.getKind() == ElementKind.FIELD) {
-                    if ("java.lang.String".equals(element.asType().toString())) {
-                        String value = (String) ((VariableElement) element).getConstantValue();
-                        if (value != null) {
-                            statusList.add(value);
-                        }
-                    }
-                }
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitMemberReference(MemberReferenceTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitEmptyStatement(EmptyStatementTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitSwitch(SwitchTree node, Object p) {
-            stack.push(false);
-            for (CaseTree c : node.getCases()) {
-                c.accept(this, null);
-            }
-            stack.pop();
-            return null;
-        }
-
-        @Override
-        public Object visitSwitchExpression(SwitchExpressionTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitSynchronized(SynchronizedTree node, Object p) {
-            node.getBlock().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitThrow(ThrowTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitCompilationUnit(CompilationUnitTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitTry(TryTree node, Object p) {
-            node.getBlock().accept(this, null);
-            for (CatchTree block : node.getCatches()) {
-                block.getBlock().accept(this, null);
-            }
-            BlockTree finallyBlock = node.getFinallyBlock();
-            if (finallyBlock != null) {
-                finallyBlock.accept(this, null);
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitParameterizedType(ParameterizedTypeTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitUnionType(UnionTypeTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitIntersectionType(IntersectionTypeTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitArrayType(ArrayTypeTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitTypeCast(TypeCastTree node, Object p) {
-            node.getExpression().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitPrimitiveType(PrimitiveTypeTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitTypeParameter(TypeParameterTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitInstanceOf(InstanceOfTree node, Object p) {
-            node.getExpression().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitUnary(UnaryTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitVariable(VariableTree node, Object p) {
-            if (node.getInitializer() != null) {
-                stack.push(false);
-                node.getInitializer().accept(this, null);
-                stack.pop();
-            }
-            return null;
-        }
-
-        @Override
-        public Object visitWhileLoop(WhileLoopTree node, Object p) {
-            node.getStatement().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitWildcard(WildcardTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitModule(ModuleTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitExports(ExportsTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitOpens(OpensTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitProvides(ProvidesTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitRequires(RequiresTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitUses(UsesTree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitOther(Tree node, Object p) {
-            return null;
-        }
-
-        @Override
-        public Object visitYield(YieldTree node, Object p) {
-            node.getValue().accept(this, null);
-            return null;
-        }
-
-        @Override
-        public Object visitAnyPattern(AnyPatternTree node, Object o) {
-            return null;
-        }
-
-        @Override
-        public Object visitConstantCaseLabel(ConstantCaseLabelTree node, Object o) {
-            return null;
-        }
-
-        @Override
-        public Object visitPatternCaseLabel(PatternCaseLabelTree node, Object o) {
-            return null;
-        }
-
-        @Override
-        public Object visitDeconstructionPattern(DeconstructionPatternTree node, Object o) {
+        public Void visitClass(ClassTree node, Void p) {
             return null;
         }
     }
