@@ -1,6 +1,5 @@
 package com.doer;
 
-import static org.junit.Assert.assertFalse;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.io.IOException;
@@ -17,7 +16,6 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
-
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

@@ -1,5 +1,6 @@
 package com.doer;
 
+import com.doer.ConcurrencyDomainImpl.SubQueue;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Array;
@@ -34,8 +35,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-
-import com.doer.ConcurrencyDomainImpl.SubQueue;
 
 public abstract class DoerService {
     private static final long MAX_MONITOR_TIMEOUT_MS = 60 * 1000;

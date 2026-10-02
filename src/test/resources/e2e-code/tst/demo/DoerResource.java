@@ -17,12 +17,11 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
-
-import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
+import javax.sql.DataSource;
 
 @Path("/doer")
 @Produces(MediaType.APPLICATION_JSON)

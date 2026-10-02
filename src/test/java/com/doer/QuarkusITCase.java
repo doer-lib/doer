@@ -12,6 +12,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.restassured.RestAssured;
+import io.restassured.path.json.JsonPath;
 import java.io.File;
 import java.io.OutputStream;
 import java.lang.ProcessBuilder.Redirect;
@@ -36,7 +38,6 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,9 +45,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnJre;
 import org.junit.jupiter.api.condition.JRE;
 import org.postgresql.ds.PGSimpleDataSource;
-
-import io.restassured.RestAssured;
-import io.restassured.path.json.JsonPath;
 
 @DisabledOnJre({JRE.JAVA_8, JRE.JAVA_11})
 public class QuarkusITCase {

@@ -6,14 +6,11 @@ import com.doer.DoerLoader;
 import com.doer.Task;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-
-import javax.sql.DataSource;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import javax.sql.DataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @ApplicationScoped
 public class CarWash {
