@@ -42,6 +42,8 @@
         <maven.compiler.target>1.8</maven.compiler.target>
         <maven.compiler.debug>true</maven.compiler.debug>
         <maven.compiler.debuglevel>lines,vars,source</maven.compiler.debuglevel>
+        <!-- Version under which built jar is installed into local repo for integration tests -->
+        <doer.it.version>0.0.0-IT-SNAPSHOT</doer.it.version>
     </properties>
 
     <dependencies>
@@ -101,6 +103,10 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.6.0</version>
                 </plugin>
+                <plugin>
+                    <artifactId>maven-install-plugin</artifactId>
+                    <version>3.1.4</version>
+                </plugin>
             </plugins>
         </pluginManagement>
         <plugins>
@@ -118,12 +124,35 @@
                 </configuration>
             </plugin>
             <plugin>
+                <artifactId>maven-install-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>install-doer-for-it</id>
+                        <phase>pre-integration-test</phase>
+                        <goals>
+                            <goal>install-file</goal>
+                        </goals>
+                        <configuration>
+                            <file>${project.build.directory}/${project.build.finalName}.jar</file>
+                            <groupId>${project.groupId}</groupId>
+                            <artifactId>${project.artifactId}</artifactId>
+                            <version>${doer.it.version}</version>
+                            <packaging>jar</packaging>
+                            <generatePom>true</generatePom>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>3.6.0</version>
                 <configuration>
+                    <!-- Separate JVM (and Postgres container) per test class -->
+                    <reuseForks>false</reuseForks>
                     <systemProperties>
-                        <doer.lib.version>${project.version}</doer.lib.version>
+                        <doer.lib.version>${doer.it.version}</doer.lib.version>
+                        <doer.test.m2.repo>${settings.localRepository}</doer.test.m2.repo>
                     </systemProperties>
                 </configuration>
                 <executions>
