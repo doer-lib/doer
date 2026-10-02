@@ -1,5 +1,7 @@
 # Doer
 
+[![maven](https://badges.mvnrepository.com/badge/com.java-doer/doer/badge.svg?label=maven)](https://mvnrepository.com/artifact/com.java-doer/doer)
+
 Doer is a Java library designed for building fault-tolerant, cluster-ready backend applications using annotations.
 
 It simplifies distributed task execution, automatic retries, and state transitions, ensuring reliable 
@@ -20,6 +22,7 @@ processing of complex workflows.
     <version>0.0.16</version>
 </dependency>
 ```
+
 ### Since JDK23
 
 Starting from java 23 you need to enable annotation processing explicitly.

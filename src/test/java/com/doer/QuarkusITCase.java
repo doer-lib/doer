@@ -48,40 +48,24 @@ import org.postgresql.ds.PGSimpleDataSource;
 
 @DisabledOnJre({JRE.JAVA_8, JRE.JAVA_11})
 public class QuarkusITCase {
-    static Path localMaven;
     static Path quarkusDir;
     static Process quarkus;
     static int quarkusPort;
-    static String doerLibVersion = System.getProperty("doer.lib.version", "1.0-SNAPSHOT");
+    static String doerLibVersion = System.getProperty("doer.lib.version", "0.0.0-IT-SNAPSHOT");
 
     @BeforeAll
     static void initTestFolder() throws Exception {
-        localMaven = Paths.get("target", "e2e-doer-m2").toAbsolutePath();
         quarkusDir = Paths.get("target", "e2e-doer-quarkus").toAbsolutePath();
 
         Path projectDir = new File(".").toPath().toAbsolutePath();
-        Path jarPath = Paths.get("target", "doer-" + doerLibVersion +  ".jar");
 
         long t0 = System.currentTimeMillis();
-        if (!Files.exists(localMaven)) {
-            Files.createDirectory(localMaven);
-        }
-
-        exec(0, projectDir,
-                "mvn -B install:install-file ? -DgroupId=com.java-doer -DartifactId=doer ? -Dpackaging=jar -DgeneratePom=true ?",
-                "-Dfile=" + jarPath,
-                "-Dversion=" + doerLibVersion,
-                "-DlocalRepositoryPath=" + localMaven);
-        System.out.printf("✔ Created local maven repository in %s seconds%n", (System.currentTimeMillis() - t0) / 1000);
-
-        t0 = System.currentTimeMillis();
         Utils.deleteReqursivelly(quarkusDir);
         exec(0, quarkusDir.getParent(),
-                "mvn -B ? io.quarkus:quarkus-maven-plugin:3.21.0:create -DprojectGroupId=tst.demo " +
+                "mvn -B io.quarkus:quarkus-maven-plugin:3.40.0:create -DprojectGroupId=tst.demo " +
                         "-DprojectArtifactId=e2e-doer-quarkus " +
                         "-Dextensions=io.quarkus:quarkus-resteasy,io.quarkus:quarkus-jdbc-postgresql," +
-                        "io.quarkus:quarkus-flyway,io.quarkus:quarkus-smallrye-health,io.quarkus:quarkus-resteasy-jsonb",
-                "-Dmaven.repo.local=" + localMaven);
+                        "io.quarkus:quarkus-flyway,io.quarkus:quarkus-smallrye-health,io.quarkus:quarkus-resteasy-jsonb");
         Path testsFolder = quarkusDir.resolve("src/test/java/tst");
         Utils.deleteReqursivelly(testsFolder);
 
@@ -139,7 +123,7 @@ public class QuarkusITCase {
                 quarkusDir.resolve("src/main/resources"));
 
         // 1. First build to generate sql files
-        exec(0, quarkusDir, "mvn -B ? package", "-Dmaven.repo.local=" + localMaven);
+        exec(0, quarkusDir, "mvn -B package");
 
         Path generatedDir = quarkusDir.resolve("target/classes/com/doer/generated");
         Path flywayFile = quarkusDir.resolve("src/main/resources/db/migration/V20240224_00__create_doer_tables.sql");
@@ -149,7 +133,7 @@ public class QuarkusITCase {
             Files.copy(generatedDir.resolve("CreateIndexes.sql"), out);
         }
         // 2. Building app with updated FlyWay sql
-        exec(0, quarkusDir, "mvn -B ? package", "-Dmaven.repo.local=" + localMaven);
+        exec(0, quarkusDir, "mvn -B package");
 
         Path quarkusOut = quarkusDir.resolve("quarkus-app-out.txt");
         Files.createFile(quarkusOut);

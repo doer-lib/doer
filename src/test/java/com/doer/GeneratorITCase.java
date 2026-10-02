@@ -26,46 +26,31 @@ public class GeneratorITCase {
     static Path dir;
     static String jakartaVersion;
     static String jakartaPackage;
-    static String doerLibVersion = System.getProperty("doer.lib.version", "1.0-SNAPSHOT");
+    static String doerLibVersion = System.getProperty("doer.lib.version", "0.0.0-IT-SNAPSHOT");
+    static Path m2Repo = Paths.get(System.getProperty("doer.test.m2.repo",
+            System.getProperty("user.home") + "/.m2/repository"));
 
     String doerJackarta;
     String doerJackartaClasses;
 
     @BeforeAll
     static void initTestFolder() throws Exception {
-        Path projectDir = new File(".").toPath();
-        Path jarPath = Paths.get("target", "doer-" + doerLibVersion + ".jar");
-        Path localRepo = dir.resolve("m2-local");
-        // Create local maven repository to use with test projects
-        System.out.println("Creating local maven repository for tests in " + localRepo);
         long t0 = System.currentTimeMillis();
-
-        Files.createDirectory(localRepo);
-
         jakartaVersion = System.getProperty("test.doer.jakarta.version", "10.0.0");
         jakartaPackage = "8.0.0".equals(jakartaVersion) ? "javax" : "jakarta";
-        exec(0, dir, "mvn -B -Dmaven.repo.local=m2-local dependency:get -Dartifact=jakarta.platform:jakarta.jakartaee-api:"
-                        + jakartaVersion);
-        exec(0, projectDir,
-                "mvn -B install:install-file ? -DgroupId=com.java-doer -DartifactId=doer ? -Dpackaging=jar -DgeneratePom=true ?",
-                "-Dfile=" + jarPath,
-                "-Dversion=" + doerLibVersion,
-                "-DlocalRepositoryPath=" + localRepo);
-        System.out.printf("✔ Created in %s seconds%n", (System.currentTimeMillis() - t0) / 1000);
+        exec(0, dir, "mvn -B dependency:get -Dartifact=jakarta.platform:jakarta.jakartaee-api:" + jakartaVersion);
+        System.out.printf("✔ Jakarta API resolved in %s seconds%n", (System.currentTimeMillis() - t0) / 1000);
     }
 
     @BeforeEach
     void clearTestFolder() throws IOException {
-        Path m2local = dir.resolve("m2-local");
-        Files.list(dir)
-                .filter(f -> !m2local.equals(f))
-                .forEach(Utils::deleteReqursivelly);
+        Files.list(dir).forEach(Utils::deleteReqursivelly);
         Files.createDirectories(dir.resolve("classes"));
 
         String sep = System.getProperty("path.separator");
-        doerJackarta = "m2-local/jakarta/platform/jakarta.jakartaee-api/" + jakartaVersion +
-                "/jakarta.jakartaee-api-" + jakartaVersion + ".jar" + sep +
-                "m2-local/com/java-doer/doer/" + doerLibVersion + "/doer-" + doerLibVersion + ".jar";
+        doerJackarta = m2Repo.resolve("jakarta/platform/jakarta.jakartaee-api/" + jakartaVersion +
+                "/jakarta.jakartaee-api-" + jakartaVersion + ".jar") + sep +
+                m2Repo.resolve("com/java-doer/doer/" + doerLibVersion + "/doer-" + doerLibVersion + ".jar");
         doerJackartaClasses = doerJackarta + sep + "classes";
     }
 
@@ -330,7 +315,7 @@ public class GeneratorITCase {
     @Test
     void mvn__should_do_all_variants() throws Exception {
         exec(0, dir,
-                "mvn -B -Dmaven.repo.local=m2-local archetype:generate -DgroupId=demo.test -DartifactId=my-app -DarchetypeArtifactId=maven-archetype-quickstart -DarchetypeVersion=1.4 -DinteractiveMode=false");
+                "mvn -B archetype:generate -DgroupId=demo.test -DartifactId=my-app -DarchetypeArtifactId=maven-archetype-quickstart -DarchetypeVersion=1.4 -DinteractiveMode=false");
         Path appFolder = dir.resolve("my-app");
         Files.delete(appFolder.resolve("src/test/java/demo/test/AppTest.java"));
         Files.delete(appFolder.resolve("src/main/java/demo/test/App.java"));
@@ -382,9 +367,9 @@ public class GeneratorITCase {
                 .replaceAll("</build>", annotationProcessor + "  </build>");
         Files.write(appFolder.resolve("pom.xml"), pom.getBytes(UTF_8));
 
-        exec(0, appFolder, "mvn -B -Dmaven.repo.local=../m2-local package");
+        exec(0, appFolder, "mvn -B package");
         String result = exec(0, appFolder,
-                "mvn -B -q -Dmaven.repo.local=../m2-local exec:java -Dexec.mainClass=demo.test.Main");
+                "mvn -B -q exec:java -Dexec.mainClass=demo.test.Main");
         assertTrue(expectedResult.contains("Washing the car (Bus came to the wash)"),
                 "Just checking expectedResult is not messed up");
         assertEquals(expectedResult, result);
