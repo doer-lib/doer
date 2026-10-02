@@ -31,7 +31,6 @@ jobs:
           server-id: central1
           server-username: MAVEN_CENTRAL_LOGIN
           server-password: MAVEN_CENTRAL_PASSWORD
-          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
 
       - name: Config GPG and GIT
