@@ -22,16 +22,17 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Scanner;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -801,67 +802,161 @@ public abstract class DoerService {
         });
     }
 
-    public void runWithTask(long taskId, String className, String methodName, CodeZero code) throws Exception {
-        Task task = self.loadTask(taskId);
-        if (task == null) {
-            throw new IllegalStateException("Task not found in database.");
+    /**
+     * Updates a task in coordination with the scheduler. Must be called outside a transaction.
+     * <p>
+     * Waits up to {@code waitTimeout} for the task to stop being in progress, polling in short transactions
+     * that hold no connection between attempts. The attempt that locks the task continues in the same
+     * transaction: calls {@code updater}, saves the task and writes a task_logs row. If the task is still in
+     * progress after the timeout, it is hijacked when {@code allowHijack} is true. After the commit the
+     * scheduler is notified, and only then the method returns.
+     *
+     * @param updater runs in Doer's transaction with the task row locked; may change the task only with
+     *                {@link Task#setStatus(String)}
+     * @return the task as committed
+     * @throws TaskNotFoundException   no task with this id
+     * @throws TaskInProgressException still in progress after waitTimeout, and allowHijack is false
+     */
+    public Task facilitateCoordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,
+            Consumer<Task> updater) throws Exception {
+        Objects.requireNonNull(updater, "updater");
+        return coordinatedTaskUpdate(taskId, waitTimeout, allowHijack, findCaller(), task -> {
+            updater.accept(task);
+        });
+    }
+
+    /**
+     * Same as {@link #facilitateCoordinatedTaskUpdate(long, Duration, boolean, Consumer)}, but the second
+     * argument of {@code updater} is loaded with the {@link DoerLoader} for {@code type}, and saved afterwards
+     * with the {@link DoerUnloader} for {@code type} (if declared), in the same transaction.
+     *
+     * @throws IllegalArgumentException no {@link DoerLoader} for {@code type}
+     */
+    public <T> Task facilitateCoordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,
+            Class<T> type, BiConsumer<Task, T> updater) throws Exception {
+        Objects.requireNonNull(type, "type");
+        Objects.requireNonNull(updater, "updater");
+        return coordinatedTaskUpdate(taskId, waitTimeout, allowHijack, findCaller(), task -> {
+            _updateWithLoaded(task, type, updater);
+        });
+    }
+
+    /**
+     * Loads the {@code type} parameter with its {@link DoerLoader}, calls {@code updater}, and saves the
+     * parameter with its {@link DoerUnloader}. Implemented by the generated service.
+     */
+    protected abstract <T> void _updateWithLoaded(Task task, Class<T> type, BiConsumer<Task, T> updater)
+            throws Exception;
+
+    private interface LockedTaskCode {
+        void call(Task task) throws Exception;
+    }
+
+    private Task coordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,
+            StackWalker.StackFrame caller, LockedTaskCode code) throws Exception {
+        Objects.requireNonNull(waitTimeout, "waitTimeout");
+        if (waitTimeout.isNegative()) {
+            throw new IllegalArgumentException("waitTimeout should not be negative");
         }
-        if (task.isInProgress()) {
-            throw new OptimisticLockException("Task is in progress");
-        }
-        AtomicReference<Exception> exceptionRef = new AtomicReference<>();
-        callDoerMethod(task, () -> null, () -> {
-            try {
-                code.call(task);
-            } catch (Exception e) {
-                exceptionRef.set(e);
-                throw e;
-            } catch (Throwable e) {
-                // OutOfMemory and other errors
-                exceptionRef.set(new ExecutionException(e));
-                throw e;
+        String className = caller == null ? "Unknown" : caller.getClassName().replaceAll(".*\\.", "");
+        String methodName = caller == null ? "unknown" : caller.getMethodName();
+        Instant deadline = Instant.now().plus(waitTimeout);
+        long sleepMs = 50;
+        Task[] result = new Task[1];
+        while (true) {
+            self.runInTransaction(() -> {
+                Task task = selectTaskForUpdate(taskId, true);
+                if (task != null) {
+                    updateLockedTask(task, code, className, methodName);
+                    result[0] = task;
+                }
+                return null;
+            });
+            if (result[0] != null) {
+                break;
             }
-            return null;
-        }, () -> null, className, methodName, null, null);
-        if (exceptionRef.get() != null) {
-            throw exceptionRef.get();
+            if (loadTask(taskId) == null) {
+                throw new TaskNotFoundException(taskId);
+            }
+            long remainingMs = Duration.between(Instant.now(), deadline).toMillis();
+            if (remainingMs <= 0) {
+                break;
+            }
+            Thread.sleep(Math.min(sleepMs, remainingMs));
+            sleepMs = Math.min(sleepMs * 2, 1000);
+        }
+        if (result[0] == null) {
+            self.runInTransaction(() -> {
+                Task task = selectTaskForUpdate(taskId, false);
+                if (task == null) {
+                    throw new TaskNotFoundException(taskId);
+                }
+                if (task.isInProgress()) {
+                    if (!allowHijack) {
+                        throw new TaskInProgressException(taskId);
+                    }
+                    Instant inProgressSince = task.getModified();
+                    task.setInProgress(false);
+                    if (!updateAndBumpVersion(task)) {
+                        throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
+                    }
+                    String extraJson = inProgressSince == null ? null
+                            : "{\"inProgressSince\": \"" + inProgressSince + "\"}";
+                    writeTaskLog(taskId, task.getStatus(), task.getStatus(), className, methodName, "TaskHijacked",
+                            extraJson, null);
+                }
+                updateLockedTask(task, code, className, methodName);
+                result[0] = task;
+                return null;
+            });
+        }
+        triggerTaskReloadFromDb(taskId);
+        return result[0];
+    }
+
+    private void updateLockedTask(Task task, LockedTaskCode code, String className, String methodName)
+            throws Exception {
+        String initialStatus = task.getStatus();
+        long t0 = System.currentTimeMillis();
+        code.call(task);
+        task.setInProgress(false);
+        task.setFailingSince(null);
+        if (!updateAndBumpVersion(task)) {
+            throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
+        }
+        int t = (int) (System.currentTimeMillis() - t0);
+        writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, null, null, t);
+    }
+
+    /**
+     * Locks the task row in the current transaction.
+     *
+     * @param notInProgress when true, an in-progress row is skipped (not locked) and null is returned
+     */
+    protected Task selectTaskForUpdate(long taskId, boolean notInProgress) throws SQLException {
+        String sql = notInProgress
+                ? "SELECT * FROM tasks WHERE id = ? AND NOT in_progress FOR UPDATE"
+                : "SELECT * FROM tasks WHERE id = ? FOR UPDATE";
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            pst.setLong(1, taskId);
+            try (ResultSet rs = pst.executeQuery()) {
+                return rs.next() ? readTask(rs) : null;
+            }
         }
     }
 
-    public <T> void runWithTask(long taskId, String className, String methodName, Class<T> klazz, CodeOne<T> code) throws Exception {
-        Task task = self.loadTask(taskId);
-        if (task == null) {
-            throw new IllegalStateException("Task not found in database.");
-        }
-        if (task.isInProgress()) {
-            throw new OptimisticLockException("Task is in progress");
-        }
-        AtomicReference<Exception> exceptionRef = new AtomicReference<>();
-        Object[] args = new Object[2];
-        callDoerMethod(task, () -> args[1] = _callLoader(klazz, task), () -> {
-            try {
-                code.call(task, (T) args[1]);
-            } catch (Exception e) {
-                exceptionRef.set(e);
-                throw e;
-            } catch (Throwable e) {
-                // OutOfMemory and other errors
-                exceptionRef.set(new ExecutionException(e));
-                throw e;
+    /** The frame that called facilitateCoordinatedTaskUpdate, skipping proxies and interceptors. */
+    private static StackWalker.StackFrame findCaller() {
+        List<StackWalker.StackFrame> frames = StackWalker.getInstance()
+                .walk(s -> s.collect(Collectors.toList()));
+        int last = -1;
+        for (int i = 0; i < frames.size(); i++) {
+            if ("facilitateCoordinatedTaskUpdate".equals(frames.get(i).getMethodName())) {
+                last = i;
             }
-            return null;
-        }, () -> {
-            _callUnLoader(klazz, task, args[1]);
-            return null;
-        }, className, methodName, null, null);
-        if (exceptionRef.get() != null) {
-            throw exceptionRef.get();
         }
+        return last >= 0 && last + 1 < frames.size() ? frames.get(last + 1) : null;
     }
-
-    protected abstract Object _callLoader(Class<?> klazz, Task task) throws Exception;
-
-    protected abstract void _callUnLoader(Class<?> klazz, Task task, Object data) throws Exception;
 
     public void triggerStalledTaskReset() {
         executor.execute(() -> {
@@ -961,14 +1056,15 @@ public abstract class DoerService {
             this.notify();
         }
         boolean processedSuccessfully = false;
+        boolean taskChangedConcurrently = false;
         String threadName = Thread.currentThread().getName();
         Thread.currentThread().setName("doer-task-" + task.getId());
         try {
             runTask(task);
             processedSuccessfully = true;
         } catch (OptimisticLockException e) {
-            // Other node is working with this task. So we should ignore it until next time
-            // we query db
+            // Other node or facilitateCoordinatedTaskUpdate changed this task. Reload it from db
+            taskChangedConcurrently = true;
         } catch (Exception e) {
             logWarning("Failed to run task TaskId: " + task.getId(), e);
         } finally {
@@ -976,6 +1072,9 @@ public abstract class DoerService {
             synchronized (this) {
                 domain.numberOfTasksInProgress--;
                 inProgressTasks.remove(task);
+                if (taskChangedConcurrently) {
+                    triggerTaskReloadFromDb(task.getId());
+                }
                 if (processedSuccessfully) {
                     boolean nextProcessingStarted = false;
                     ConcurrencyDomainImpl newDomain = selectConcurrencyDomain(task.getStatus());
