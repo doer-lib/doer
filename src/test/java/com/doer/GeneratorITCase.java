@@ -280,6 +280,49 @@ public class GeneratorITCase {
     }
 
     @Test
+    void javac__should_generate_updateWithLoaded() throws Exception {
+        String code = "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "import com.doer.generated._GeneratedDoerService;\n" +
+                "public class Main {\n" +
+                "    public static void main(String[] args) throws Exception {\n" +
+                "        var doer = new _GeneratedDoerService() {\n" +
+                "            void test(Task task, Class<?> type) throws Exception {\n" +
+                "                _updateWithLoaded(task, type, (t, data) -> System.out.println(\"---update-\" + data + \"---\"));\n" +
+                "            }\n" +
+                "        };\n" +
+                "        doer._inject_main(new Main());\n" +
+                "        Task task = new Task();\n" +
+                "        task.setStatus(\"A\");\n" +
+                "        doer.test(task, String.class);\n" +
+                "        try {\n" +
+                "            doer.test(task, Integer.class);\n" +
+                "        } catch (IllegalArgumentException e) {\n" +
+                "            System.out.println(\"---\" + e.getMessage() + \"---\");\n" +
+                "        }\n" +
+                "    }\n" +
+                "    @DoerLoader\n" +
+                "    public String loaderMethod(Task task) {\n" +
+                "        System.out.println(\"---load-String-for-\" + task.getStatus() + \"---\");\n" +
+                "        return \"d2\";\n" +
+                "    }\n" +
+                "    @DoerUnloader\n" +
+                "    public void unloderMethod(Task task, String data) {\n" +
+                "        System.out.println(\"---unload-String-\" + data + \"---\");\n" +
+                "    }\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Main.java"), code.getBytes(UTF_8));
+        exec(0, dir, "javac -J-ea -processor com.doer.processor.DoerProcessor -cp ? -d classes Main.java",
+                doerJackarta);
+
+        String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
+
+        assertEquals("---load-String-for-A---\n---update-d2---\n---unload-String-d2---\n" +
+                "---No @DoerLoader for java.lang.Integer---\n", result);
+    }
+
+    @Test
     void javac__should_do_all_variants() throws Exception {
         generateCarWashDemoClasses(dir);
         String expectedResult = generateMainClassForCarWathAndReturnExpectedResult(dir);

@@ -379,7 +379,7 @@ public class DoerProcessor extends AbstractProcessor {
                 out.println();
             }
             out.println("    @Override");
-            out.println("    @Transactional(Transactional.TxType.REQUIRES_NEW)");
+            out.println("    @Transactional(value = Transactional.TxType.REQUIRES_NEW, rollbackOn = Exception.class)");
             out.println("    public void runInTransaction(Callable<Object> code) throws Exception {");
             out.println("        code.call();");
             out.println("    }");
@@ -471,24 +471,40 @@ public class DoerProcessor extends AbstractProcessor {
             out.println("    }");
             out.println();
             out.println("    @Override");
-            out.println("    protected Object _callLoader(Class<?> klazz, Task task) throws Exception {");
-            for (DoerLoaderInfo loader : loaders) {
-                out.println("        if (" + shortcuts.get(loader.type) + ".class.equals(klazz)) {");
-                out.println("            return " + fieldNames.get(loader.className) + "." + loader.methodName + "(task);");
-                out.println("        }");
-            }
-            out.println("        return null;");
+            out.println("    @Transactional(Transactional.TxType.NEVER)");
+            out.println("    public Task facilitateCoordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,");
+            out.println("            Consumer<Task> updater) throws Exception {");
+            out.println("        return super.facilitateCoordinatedTaskUpdate(taskId, waitTimeout, allowHijack, updater);");
             out.println("    }");
             out.println();
             out.println("    @Override");
-            out.println("    protected void _callUnLoader(Class<?> klazz, Task task, Object data) throws Exception {");
-            for (DoerUnloaderInfo unloader : unloaders) {
-                out.println("        if (" + shortcuts.get(unloader.type) + ".class.equals(klazz)) {");
-                out.println("            " + fieldNames.get(unloader.className) + "." + unloader.methodName + "(task, ("
-                        + shortcuts.get(unloader.type) + ")data);");
+            out.println("    @Transactional(Transactional.TxType.NEVER)");
+            out.println("    public <T> Task facilitateCoordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,");
+            out.println("            Class<T> type, BiConsumer<Task, T> updater) throws Exception {");
+            out.println("        return super.facilitateCoordinatedTaskUpdate(taskId, waitTimeout, allowHijack, type, updater);");
+            out.println("    }");
+            out.println();
+            out.println("    @Override");
+            out.println("    protected <T> void _updateWithLoaded(Task task, Class<T> type, BiConsumer<Task, T> updater) throws Exception {");
+            Set<String> generatedTypes = new HashSet<>();
+            for (DoerLoaderInfo loader : loaders) {
+                if (!isPlainClassType(loader.type) || !generatedTypes.add(loader.type)) {
+                    continue;
+                }
+                String typeName = shortcuts.get(loader.type);
+                out.println("        if (" + typeName + ".class.equals(type)) {");
+                out.println("            " + typeName + " data = " + fieldNames.get(loader.className) + "."
+                        + loader.methodName + "(task);");
+                out.println("            updater.accept(task, type.cast(data));");
+                unloaders.stream()
+                        .filter(u -> u.type.equals(loader.type))
+                        .findFirst()
+                        .ifPresent(u -> out.println("            " + fieldNames.get(u.className) + "." + u.methodName
+                                + "(task, data);"));
                 out.println("            return;");
                 out.println("        }");
             }
+            out.println("        throw new IllegalArgumentException(\"No @DoerLoader for \" + type.getName());");
             out.println("    }");
             out.println();
             out.println("    @Override");
@@ -1299,13 +1315,17 @@ public class DoerProcessor extends AbstractProcessor {
         shortnames.put("java.io.StringWriter", "StringWriter");
         shortnames.put("java.time.Duration", "Duration");
         shortnames.put("java.util.concurrent.Executor", "Executor");
+        shortnames.put("java.util.function.Consumer", "Consumer");
+        shortnames.put("java.util.function.BiConsumer", "BiConsumer");
 
         Stream<String> classes1 = doerMethods.stream().map(s -> s.className);
         Stream<String> classes2 = loaders.stream().map(s -> s.className);
         Stream<String> classes3 = unloaders.stream().map(s -> s.className);
         Stream<String> classes4 = doerMethods.stream().flatMap(s -> s.parameterTypes.stream());
         Stream<String> classes5 = appenders.stream().flatMap(s -> Stream.of(s.type, s.className));
-        Stream.of(classes1, classes2, classes3, classes4, classes5).flatMap(i -> i).forEach(cn -> {
+        Stream<String> classes6 = Stream.concat(loaders.stream().map(s -> s.type), unloaders.stream().map(s -> s.type))
+                .filter(this::isPlainClassType);
+        Stream.of(classes1, classes2, classes3, classes4, classes5, classes6).flatMap(i -> i).forEach(cn -> {
             if (!shortnames.containsKey(cn)) {
                 TypeElement element = elementUtils.getTypeElement(cn);
                 if (element == null) {
@@ -1321,6 +1341,11 @@ public class DoerProcessor extends AbstractProcessor {
             }
         });
         return shortnames;
+    }
+
+    /** Class without type arguments, so it can be used as a {@code X.class} literal. */
+    private boolean isPlainClassType(String type) {
+        return !type.contains("<") && processingEnv.getElementUtils().getTypeElement(type) != null;
     }
 
     private HashMap<String, String> createFieldNames(List<DoerMethodInfo> doerMethods, List<DoerLoaderInfo> loaders,
@@ -1341,7 +1366,7 @@ public class DoerProcessor extends AbstractProcessor {
     }
 
     private String createFieldName(String shortName, HashMap<String, String> fieldNames) {
-        List<String> notAllowedNames = Arrays.asList("task", "status", "args", "dataSource");
+        List<String> notAllowedNames = Arrays.asList("task", "status", "args", "dataSource", "data", "type", "updater");
         List<String> javaKeywords = Arrays.asList(
                 "abstract", "continue", "for", "new", "switch", "assert", "default", "goto", "package", "synchronized",
                 "boolean", "do", "if", "private", "this", "break", "double", "implements", "protected", "throw",
