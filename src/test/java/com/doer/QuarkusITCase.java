@@ -275,6 +275,90 @@ public class QuarkusITCase {
     }
 
     @Test
+    void coordinated_update_should_change_status_and_write_log() {
+        resetServer();
+        long taskId = pushTask("Parked");
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked")
+                .get("doer/coordinated_update")
+                .then()
+                .statusCode(200)
+                .body("status", equalTo("Unparked"));
+
+        assertEquals("Unparked", restGetTask(taskId).getStatus());
+        assertEquals("Parked>Unparked>DoerResource>coordinatedUpdate", selectStringValue(
+                "SELECT initial_status || '>' || final_status || '>' || class_name || '>' || method_name "
+                        + "FROM task_logs WHERE task_id = " + taskId));
+    }
+
+    @Test
+    void coordinated_update_should_fail_for_in_progress_task_without_hijack() {
+        resetServer();
+        long taskId = pushTask("Parked");
+        sqlUpdate("UPDATE tasks SET in_progress = TRUE WHERE id = " + taskId);
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked")
+                .get("doer/coordinated_update")
+                .then()
+                .statusCode(500);
+
+        Task task = restGetTask(taskId);
+        assertEquals("Parked", task.getStatus());
+        assertTrue(task.isInProgress());
+    }
+
+    @Test
+    void coordinated_update_should_hijack_in_progress_task() {
+        resetServer();
+        long taskId = pushTask("Parked");
+        sqlUpdate("UPDATE tasks SET in_progress = TRUE WHERE id = " + taskId);
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked").queryParam("hijack", true)
+                .get("doer/coordinated_update")
+                .then()
+                .statusCode(200)
+                .body("status", equalTo("Unparked"));
+
+        Task task = restGetTask(taskId);
+        assertEquals("Unparked", task.getStatus());
+        assertFalse(task.isInProgress());
+        assertEquals(1L, selectLongValue(
+                "SELECT count(*) FROM task_logs WHERE exception_type = 'TaskHijacked' AND task_id = " + taskId));
+    }
+
+    @Test
+    void coordinated_update_should_load_and_unload_in_the_same_transaction() {
+        resetServer();
+        long taskId = pushTask("Parked");
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked")
+                .get("doer/coordinated_car_update")
+                .then()
+                .statusCode(200)
+                .body("status", equalTo("Unparked"));
+
+        // Car loaded, Car unloaded, task updated (trigger)
+        List<DemoLogRow> logs = loadDemoLogs(taskId);
+        List<String> types = logs.stream().map(r -> r.type).collect(Collectors.toList());
+        assertEquals(Arrays.asList("Car", "Car", "task"), types);
+        assertEquals(logs.get(0).txId, logs.get(1).txId);
+        assertEquals(logs.get(1).txId, logs.get(2).txId);
+    }
+
+    @Test
+    void coordinated_update_should_not_be_called_in_transaction() {
+        resetServer();
+        long taskId = pushTask("Parked");
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked")
+                .get("doer/coordinated_update_in_transaction")
+                .then()
+                .statusCode(500);
+
+        assertEquals("Parked", restGetTask(taskId).getStatus());
+    }
+
+    @Test
     void concurrency_1_should_run_only_1_method_at_a_time() {
         resetServer();
         long task1 = pushTask("Need call taxi");

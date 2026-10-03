@@ -11,6 +11,7 @@ import jakarta.enterprise.context.BeforeDestroyed;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.Shutdown;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
@@ -140,6 +141,29 @@ public class DoerResource {
     public Task getTask(@QueryParam("id") Long id) throws Exception {
         Task task = doerService.loadTask(id);
         return task;
+    }
+
+    @Path("coordinated_update")
+    @GET
+    public Task coordinatedUpdate(@QueryParam("id") long id, @QueryParam("s") String status,
+            @QueryParam("hijack") @DefaultValue("false") boolean hijack) throws Exception {
+        return doerService.facilitateCoordinatedTaskUpdate(id, Duration.ofMillis(300), hijack,
+                task -> task.setStatus(status));
+    }
+
+    @Path("coordinated_car_update")
+    @GET
+    public Task coordinatedCarUpdate(@QueryParam("id") long id, @QueryParam("s") String status) throws Exception {
+        return doerService.facilitateCoordinatedTaskUpdate(id, Duration.ZERO, false, Car.class,
+                (task, car) -> task.setStatus(status));
+    }
+
+    @Path("coordinated_update_in_transaction")
+    @GET
+    @Transactional
+    public Task coordinatedUpdateInTransaction(@QueryParam("id") long id, @QueryParam("s") String status)
+            throws Exception {
+        return doerService.facilitateCoordinatedTaskUpdate(id, Duration.ZERO, false, task -> task.setStatus(status));
     }
 
     @AcceptStatus("A")
