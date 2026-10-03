@@ -220,7 +220,7 @@ public class DoerProcessor extends AbstractProcessor {
             ExecutableType executableType = (ExecutableType) element.asType();
             List<? extends TypeMirror> args = executableType.getParameterTypes();
 
-            String jsonObjectBuilder = getJakartaPrefix() + ".json.JsonObjectBuilder";
+            String jsonObjectBuilder = "jakarta.json.JsonObjectBuilder";
             if (args.size() != 3 || !Task.class.getName().equals(args.get(0).toString())
                     || !jsonObjectBuilder.equals(args.get(2).toString())
                     || ((ExecutableType) element.asType()).getReturnType().getKind() != TypeKind.VOID) {
@@ -1274,19 +1274,18 @@ public class DoerProcessor extends AbstractProcessor {
         shortnames.put("java.lang.Override", "Override");
         shortnames.put("java.lang.Exception", "Exception");
         shortnames.put("java.lang.Throwable", "Throwable");
-        String javaEePackage = getJakartaPrefix();
-        shortnames.put(javaEePackage + ".transaction.Transactional", "Transactional");
-        shortnames.put(javaEePackage + ".inject.Inject", "Inject");
-        shortnames.put(javaEePackage + ".enterprise.context.ApplicationScoped", "ApplicationScoped");
-        shortnames.put(javaEePackage + ".annotation.Generated", "Generated");
-        shortnames.put(javaEePackage + ".json.JsonObjectBuilder", "JsonObjectBuilder");
-        shortnames.put(javaEePackage + ".json.JsonObject", "JsonObject");
-        shortnames.put(javaEePackage + ".json.JsonArrayBuilder", "JsonArrayBuilder");
-        shortnames.put(javaEePackage + ".json.JsonArray", "JsonArray");
-        shortnames.put(javaEePackage + ".json.Json", "Json");
-        shortnames.put(javaEePackage + ".json.JsonWriterFactory", "JsonWriterFactory");
-        shortnames.put(javaEePackage + ".json.JsonWriter", "JsonWriter");
-        shortnames.put(javaEePackage + ".json.stream.JsonGenerator", "JsonGenerator");
+        shortnames.put("jakarta.transaction.Transactional", "Transactional");
+        shortnames.put("jakarta.inject.Inject", "Inject");
+        shortnames.put("jakarta.enterprise.context.ApplicationScoped", "ApplicationScoped");
+        shortnames.put("jakarta.annotation.Generated", "Generated");
+        shortnames.put("jakarta.json.JsonObjectBuilder", "JsonObjectBuilder");
+        shortnames.put("jakarta.json.JsonObject", "JsonObject");
+        shortnames.put("jakarta.json.JsonArrayBuilder", "JsonArrayBuilder");
+        shortnames.put("jakarta.json.JsonArray", "JsonArray");
+        shortnames.put("jakarta.json.Json", "Json");
+        shortnames.put("jakarta.json.JsonWriterFactory", "JsonWriterFactory");
+        shortnames.put("jakarta.json.JsonWriter", "JsonWriter");
+        shortnames.put("jakarta.json.stream.JsonGenerator", "JsonGenerator");
 
         shortnames.put("java.util.concurrent.Callable", "Callable");
         shortnames.put("javax.sql.DataSource", "DataSource");
@@ -1322,20 +1321,6 @@ public class DoerProcessor extends AbstractProcessor {
             }
         });
         return shortnames;
-    }
-
-    private String getJakartaPrefix() {
-        try {
-            Class.forName("jakarta.inject.Inject");
-            return "jakarta";
-        } catch (ClassNotFoundException e) {
-            try {
-                Class.forName("javax.inject.Inject");
-                return "javax";
-            } catch (ClassNotFoundException e2) {
-                return "jakarta";
-            }
-        }
     }
 
     private HashMap<String, String> createFieldNames(List<DoerMethodInfo> doerMethods, List<DoerLoaderInfo> loaders,
