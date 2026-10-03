@@ -16,16 +16,12 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.DisabledOnJre;
-import org.junit.jupiter.api.condition.EnabledForJreRange;
-import org.junit.jupiter.api.condition.JRE;
 import org.junit.jupiter.api.io.TempDir;
 
 public class GeneratorITCase {
     @TempDir
     static Path dir;
     static String jakartaVersion;
-    static String jakartaPackage;
     static String doerLibVersion = System.getProperty("doer.lib.version", "0.0.0-IT-SNAPSHOT");
     static Path m2Repo = Paths.get(System.getProperty("doer.test.m2.repo",
             System.getProperty("user.home") + "/.m2/repository"));
@@ -37,7 +33,6 @@ public class GeneratorITCase {
     static void initTestFolder() throws Exception {
         long t0 = System.currentTimeMillis();
         jakartaVersion = System.getProperty("test.doer.jakarta.version", "10.0.0");
-        jakartaPackage = "8.0.0".equals(jakartaVersion) ? "javax" : "jakarta";
         exec(0, dir, "mvn -B dependency:get -Dartifact=jakarta.platform:jakarta.jakartaee-api:" + jakartaVersion);
         System.out.printf("✔ Jakarta API resolved in %s seconds%n", (System.currentTimeMillis() - t0) / 1000);
     }
@@ -346,13 +341,6 @@ public class GeneratorITCase {
                 "              <artifactId>doer</artifactId>\n" +
                 "              <version>" + doerLibVersion + "</version>\n" +
                 "            </path>\n" +
-                (jakartaVersion.equals("8.0.0") ? "" +
-                        "    <path>\n" +
-                        "      <groupId>jakarta.platform</groupId>\n" +
-                        "      <artifactId>jakarta.jakartaee-api</artifactId>\n" +
-                        "      <version>8.0.0</version>\n" +
-                        "    </path>\n" +
-                        "" : "") +
                 "          </annotationProcessorPaths>\n" +
                 "        </configuration>\n" +
                 "      </plugin>\n" +
@@ -360,9 +348,9 @@ public class GeneratorITCase {
                 "";
         String pom = new String(Files.readAllBytes(appFolder.resolve("pom.xml")))
                 .replaceAll("<maven.compiler.source>[^<]+</maven.compiler.source>",
-                        "<maven.compiler.source>1.8</maven.compiler.source>")
+                        "<maven.compiler.source>17</maven.compiler.source>")
                 .replaceAll("<maven.compiler.target>[^<]+</maven.compiler.target>",
-                        "<maven.compiler.target>1.8</maven.compiler.target>")
+                        "<maven.compiler.target>17</maven.compiler.target>")
                 .replaceAll("</dependencies>", additionalDependencies + "  </dependencies>")
                 .replaceAll("</build>", annotationProcessor + "  </build>");
         Files.write(appFolder.resolve("pom.xml"), pom.getBytes(UTF_8));
@@ -497,7 +485,7 @@ public class GeneratorITCase {
         String exMapperCode = "" +
                 "package demo.test;\n" +
                 "import com.doer.*;\n" +
-                "import " + jakartaPackage + ".json.JsonObjectBuilder;\n" +
+                "import jakarta.json.JsonObjectBuilder;\n" +
                 "public class ExceptionMapper {\n" +
                 "    @DoerExtraJson\n" +
                 "    public void appendException1(Task task, Exception ex, JsonObjectBuilder builder) {\n" +
@@ -702,7 +690,6 @@ public class GeneratorITCase {
         assertTrue(new File(dir.toFile(), "classes/com/doer/generated/doer.dot").isFile());
     }
 
-    @EnabledForJreRange(min = JRE.JAVA_14) // switch expressions and yield
     @Test
     void javac__should_find_setStatus_in_modern_constructs() throws Exception {
         String code = "" +
@@ -764,7 +751,6 @@ public class GeneratorITCase {
         assertEquals(expected, ressult);
     }
 
-    @DisabledOnJre(JRE.JAVA_8)
     @Test
     void javac__should_detect_statuses_set_by_constants() throws Exception {
         String code1 = "" +

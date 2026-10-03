@@ -15,6 +15,8 @@ processing of complex workflows.
 
 ## Usage
 
+Requires Java 17+ and Jakarta EE 10+ (`jakarta.*` namespace).
+
 ```xml
 <dependency>
     <groupId>com.java-doer</groupId>

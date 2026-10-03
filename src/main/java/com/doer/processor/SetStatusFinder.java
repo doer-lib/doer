@@ -193,11 +193,10 @@ public class SetStatusFinder {
             case MEMBER_SELECT:
                 addConstantVariableValue(trees.getElement(path), statuses);
                 break;
+            case SWITCH_EXPRESSION:
+                new SwitchResultScanner(statuses).scan(path, null);
+                break;
             default:
-                // Compared by name, because Kind.SWITCH_EXPRESSION does not exist in Java 1.8
-                if ("SWITCH_EXPRESSION".equals(expression.getKind().name())) {
-                    new SwitchResultScanner(statuses).scan(path, null);
-                }
                 break;
         }
     }
@@ -219,7 +218,6 @@ public class SetStatusFinder {
     }
 
     // Collects results of a single switch expression: arrow case expressions and yield values.
-    // Loaded only for switch expressions, so Java 1.8 never touches classes missing there.
     private class SwitchResultScanner extends TreePathScanner<Void, Void> {
         private final List<String> statuses;
         private SwitchExpressionTree root;

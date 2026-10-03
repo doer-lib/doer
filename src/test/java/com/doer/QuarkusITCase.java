@@ -42,11 +42,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.DisabledOnJre;
-import org.junit.jupiter.api.condition.JRE;
 import org.postgresql.ds.PGSimpleDataSource;
 
-@DisabledOnJre({JRE.JAVA_8, JRE.JAVA_11})
 public class QuarkusITCase {
     static Path quarkusDir;
     static Process quarkus;

@@ -11,7 +11,7 @@
     <packaging>jar</packaging>
 
     <name>com.java-doer:doer</name>
-    <description>Library for JavaEE/JakartaEE application to perform long-running jobs.</description>
+    <description>Library for Jakarta EE application to perform long-running jobs.</description>
     <url>https://github.com/doer-lib/doer.git</url>
 
     <licenses>
@@ -38,8 +38,7 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
+        <maven.compiler.release>17</maven.compiler.release>
         <maven.compiler.debug>true</maven.compiler.debug>
         <maven.compiler.debuglevel>lines,vars,source</maven.compiler.debuglevel>
         <!-- Version under which built jar is installed into local repo for integration tests -->
@@ -150,10 +149,10 @@
                 <configuration>
                     <!-- Separate JVM (and Postgres container) per test class -->
                     <reuseForks>false</reuseForks>
-                    <systemProperties>
+                    <systemPropertyVariables>
                         <doer.lib.version>${doer.it.version}</doer.lib.version>
                         <doer.test.m2.repo>${settings.localRepository}</doer.test.m2.repo>
-                    </systemProperties>
+                    </systemPropertyVariables>
                 </configuration>
                 <executions>
                     <execution>
