@@ -781,21 +781,21 @@ public abstract class DoerService {
     public <T> Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
             Class<T> klazz, DoerUpdater<T> updater) throws Exception {
         Objects.requireNonNull(updater, "updater");
-        StackWalker.StackFrame caller = StackWalker.getInstance()
+        CallerInfo caller = StackWalker.getInstance()
                 .walk(frames -> frames
-                        .dropWhile(f -> "facilitateCoordinatedUpdate".equals(f.getMethodName()) || isGeneratedFrame(f))
+                        .map(CallerInfo::fromFrame)
+                        .filter(c -> !c.looksLikeProxy())
+                        .filter(c -> !"facilitateCoordinatedUpdate".equals(c.methodName()))
                         .findFirst())
-                .orElse(null);
-        String className = caller == null ? "Unknown" : caller.getClassName().replaceAll(".*\\.", "");
-        String methodName = caller == null ? "unknown" : caller.getMethodName();
+                .orElse(new CallerInfo("Unknown", "Unknown", "unknown"));
         long waitNanos = waitDuration == null || waitDuration.isNegative() ? 0 : waitDuration.toNanos();
         long deadline = System.nanoTime() + waitNanos;
         long sleepMs = 50;
         while (true) {
             long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
             boolean isLastAttempt = remainingMs <= 0;
-            Task task = attemptCoordinatedUpdate(taskId, isLastAttempt, allowHijacking, klazz, updater, className,
-                    methodName);
+            Task task = attemptCoordinatedUpdate(taskId, isLastAttempt, allowHijacking, klazz, updater,
+                    caller.className(), caller.methodName());
             if (task != null) {
                 triggerTaskReloadFromDb(taskId);
                 return task;
@@ -804,32 +804,6 @@ public abstract class DoerService {
             Thread.sleep(timeoutMs);
             sleepMs = Math.min(sleepMs * 2, 1000);
         }
-    }
-
-    /**
-     * Frame of a generated proxy, subclass, lambda or interceptor: its class or method name contains '$', its
-     * class name has a usual generated suffix, or its class is in a container, interceptor or reflection package.
-     */
-    private static boolean isGeneratedFrame(StackWalker.StackFrame frame) {
-        String className = frame.getClassName();
-        if (className.contains("$") || frame.getMethodName().contains("$")) {
-            return true;
-        }
-        String[] generatedSuffixes = { "_Subclass", "_ClientProxy", "_Bean" };
-        for (String suffix : generatedSuffixes) {
-            if (className.endsWith(suffix)) {
-                return true;
-            }
-        }
-        String[] frameworkPackages = { "io.quarkus.", "io.smallrye.", "org.jboss.", "org.apache.webbeans.",
-                "org.springframework.", "org.glassfish.", "com.sun.ejb.", "jakarta.", "javax.", "java.lang.reflect.",
-                "jdk.internal.", "sun.reflect.", "jdk.proxy" };
-        for (String prefix : frameworkPackages) {
-            if (className.startsWith(prefix)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -1075,4 +1049,33 @@ public abstract class DoerService {
         }
         return s.substring(0, 1023) + "\u2026";
     }
+
+    private record CallerInfo(String fullClassName, String className, String methodName) {
+        boolean looksLikeProxy() {
+            return methodName.contains("$") ||
+                    fullClassName.contains("$") ||
+                    fullClassName.endsWith("_Subclass") ||
+                    fullClassName.endsWith("_ClientProxy") ||
+                    fullClassName.endsWith("_Bean") ||
+                    fullClassName.startsWith("io.quarkus.") ||
+                    fullClassName.startsWith("io.smallrye.") ||
+                    fullClassName.startsWith("org.jboss.") ||
+                    fullClassName.startsWith("org.apache.webbeans.") ||
+                    fullClassName.startsWith("org.springframework.") ||
+                    fullClassName.startsWith("org.glassfish.") ||
+                    fullClassName.startsWith("com.sun.ejb.") ||
+                    fullClassName.startsWith("jakarta.") ||
+                    fullClassName.startsWith("javax.") ||
+                    fullClassName.startsWith("java.lang.reflect.") ||
+                    fullClassName.startsWith("jdk.internal.") ||
+                    fullClassName.startsWith("sun.reflect.") ||
+                    fullClassName.startsWith("jdk.proxy");
+        }
+
+        static CallerInfo fromFrame(StackWalker.StackFrame frame) {
+            String fullClassName = frame.getClassName();
+            return new CallerInfo(fullClassName, fullClassName.replaceAll(".*\\.", ""), frame.getMethodName());
+        }
+    }
+
 }
