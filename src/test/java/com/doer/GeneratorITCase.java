@@ -80,7 +80,7 @@ public class GeneratorITCase {
                 "                return 1;\n" +
                 "            }\n" +
                 "        };\n" +
-                "        doer._inject_SelfReference(doer);\n" +
+                "        doer.setSelfReference(doer);\n" +
                 "        doer._inject_doer1(new Doer1());\n" +
                 "        Task task = new Task();\n" +
                 "        task.setStatus(\"A\");\n" +
@@ -134,7 +134,7 @@ public class GeneratorITCase {
                 "                return 1;\n" +
                 "            }\n" +
                 "        };\n" +
-                "        doer._inject_SelfReference(doer);\n" +
+                "        doer.setSelfReference(doer);\n" +
                 "        doer._inject_doer1(new Doer1());\n" +
                 "        Task task = new Task();\n" +
                 "        task.setStatus(\"A\");\n" +
@@ -207,7 +207,7 @@ public class GeneratorITCase {
                 "                return 1;\n" +
                 "            }\n" +
                 "        };\n" +
-                "        doer._inject_SelfReference(doer);\n" +
+                "        doer.setSelfReference(doer);\n" +
                 "        doer._inject_doer1(new Doer1());\n" +
                 "        doer._inject_demoClassLoader(new DemoClassLoader());\n" +
                 "        Task task = new Task();\n" +
@@ -246,7 +246,7 @@ public class GeneratorITCase {
                 "                return 1;\n" +
                 "            }\n" +
                 "        };\n" +
-                "        doer._inject_SelfReference(doer);\n" +
+                "        doer.setSelfReference(doer);\n" +
                 "        doer._inject_main(new Main());\n" +
 
                 "        Task task = new Task();\n" +
@@ -280,7 +280,7 @@ public class GeneratorITCase {
     }
 
     @Test
-    void javac__should_generate_updateWithLoaded() throws Exception {
+    void javac__should_generate_load_and_unload() throws Exception {
         String code = "package demo.test;\n" +
                 "import com.doer.*;\n" +
                 "import com.doer.generated._GeneratedDoerService;\n" +
@@ -288,7 +288,7 @@ public class GeneratorITCase {
                 "    public static void main(String[] args) throws Exception {\n" +
                 "        var doer = new _GeneratedDoerService() {\n" +
                 "            void test(Task task, Class<?> type) throws Exception {\n" +
-                "                _updateWithLoaded(task, type, (t, data) -> System.out.println(\"---update-\" + data + \"---\"));\n" +
+                "                _unload(task, type, _load(task, type));\n" +
                 "            }\n" +
                 "        };\n" +
                 "        doer._inject_main(new Main());\n" +
@@ -318,7 +318,7 @@ public class GeneratorITCase {
 
         String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
 
-        assertEquals("---load-String-for-A---\n---update-d2---\n---unload-String-d2---\n" +
+        assertEquals("---load-String-for-A---\n---unload-String-d2---\n" +
                 "---No @DoerLoader for java.lang.Integer---\n", result);
     }
 
@@ -564,7 +564,7 @@ public class GeneratorITCase {
                 "                return 1;\n" +
                 "            }\n" +
                 "        };\n" +
-                "        doer._inject_SelfReference(doer);\n" +
+                "        doer.setSelfReference(doer);\n" +
                 "        doer._inject_carWash(new CarWash());\n" +
                 "        doer._inject_bar(new Bar());\n" +
                 "        doer._inject_checkIn(new CheckIn());\n" +
