@@ -30,21 +30,24 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import javax.sql.DataSource;
 
 public abstract class DoerService {
     private static final long MAX_MONITOR_TIMEOUT_MS = 60 * 1000;
-    Logger logger = Logger.getLogger(DoerService.class.getName());
-    protected DoerService self;
-    protected volatile boolean isRunning;
-    protected volatile boolean taskLoadRequired;
-    protected volatile boolean loadingInProgress;
-    protected Executor executor;
+    protected static final Logger LOG = Logger.getLogger(DoerService.class.getName());
+
+    private DoerService self;
+    private Executor executor;
+    private DataSource dataSource;
+
+    private boolean isRunning;
+    private boolean taskLoadRequired;
+    private boolean loadingInProgress;
 
     protected AtomicInteger dbTimeDiffMs = new AtomicInteger(0);
     protected ConcurrentLinkedQueue<Task> inProgressTasks = new ConcurrentLinkedQueue<>();
@@ -64,6 +67,54 @@ public abstract class DoerService {
     Duration stalledTaskTimeout = Duration.ofHours(2);
     Instant lastStalledTaskChecked = Instant.now();
 
+    public DoerService getSelfReference() {
+        return self;
+    }
+
+    public void setSelfReference(DoerService self) {
+        this.self = self;
+    }
+
+    public Executor getExecutor() {
+        return executor;
+    }
+
+    public void setExecutor(Executor executor) {
+        this.executor = executor;
+    }
+
+    public DataSource getDataSource() {
+        return dataSource;
+    }
+
+    public void setDataSource(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
+
+    public void setMaxAllQueuesSize(int value) {
+        maxAllQueuesSize = value;
+    }
+
+    public int getMaxAllQueuesSize() {
+        return maxAllQueuesSize;
+    }
+
+    public void setMinSingleQueueSize(int value) {
+        minSingleQueueSize = value;
+    }
+
+    public int getMinSingleQueueSize() {
+        return minSingleQueueSize;
+    }
+
+    public void setQueueReloadInterval(Duration value) {
+        queueReloadInterval = value;
+    }
+
+    public Duration getQueueReloadInterval() {
+        return queueReloadInterval;
+    }
+
     public void start(boolean enableMonitor) {
         synchronized (this) {
             isRunning = true;
@@ -82,16 +133,161 @@ public abstract class DoerService {
         }
     }
 
-    public boolean isMonitorEnabld() {
+    public void triggerQueuesReloadFromDb() {
         synchronized (this) {
-            return monitorEnabled;
+            if (!isRunning) {
+                return;
+            }
+            if (taskLoadRequired) {
+                return;
+            }
+            taskLoadRequired = true;
+            if (!loadingInProgress) {
+                loadingInProgress = true;
+                executor.execute(self::reloadTasksFromDb);
+            }
         }
     }
 
-    public void setMonitorEnabled(boolean value) {
+    public void triggerTaskReloadFromDb(long taskId) {
         synchronized (this) {
-            monitorEnabled = value;
-            executor.execute(this::monitorIdleState);
+            if (!isRunning) {
+                return;
+            }
+            if (taskLoadRequired) {
+                return;
+            }
+            executor.execute(() -> reloadQueuedTask(taskId));
+        }
+    }
+
+    public Connection getConnection() throws SQLException {
+        return dataSource.getConnection();
+    }
+
+    public Instant getDbNow() {
+        Instant i = Instant.now()
+                .plusMillis(dbTimeDiffMs.get());
+        return i;
+    }
+
+    public long generateId() throws SQLException {
+        String sql = "SELECT nextval('id_generator'::regclass) AS v";
+        try (Connection con = getConnection();
+                PreparedStatement pst = con.prepareStatement(sql);
+                ResultSet rs = pst.executeQuery()) {
+            rs.next();
+            return rs.getLong("v");
+        }
+    }
+
+    public void insert(Task task) throws SQLException {
+        String sql = "INSERT INTO tasks (created, modified, status, in_progress, failing_since, version) VALUES (now(), now(), ?, ?, ?, ?) RETURNING *";
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            pst.setString(1, task.getStatus());
+            pst.setBoolean(2, task.isInProgress());
+            pst.setObject(3, toOffsetDateTime(task.getFailingSince()));
+            pst.setInt(4, 0);
+            try (ResultSet rs = pst.executeQuery()) {
+                if (rs.next()) {
+                    task.assignFieldsFrom(readTask(rs));
+                } else {
+                    throw new IllegalStateException("Unexpected result after SQL INSERT command");
+                }
+            }
+        }
+    }
+
+    public Task loadTask(long id) throws SQLException {
+        String sql = "SELECT * FROM tasks WHERE id = ?";
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            pst.setLong(1, id);
+            try (ResultSet rs = pst.executeQuery()) {
+                if (rs.next()) {
+                    return readTask(rs);
+                } else {
+                    return null;
+                }
+            }
+        }
+    }
+
+    public Map<Long, Task> loadTasks(Collection<Long> ids) throws SQLException {
+        String sql = "SELECT * FROM tasks WHERE id = ANY(?)";
+        HashMap<Long, Task> result = new HashMap<>();
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            Array sqlArray = con.createArrayOf("BIGINT", ids.toArray());
+            pst.setArray(1, sqlArray);
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    Task task = readTask(rs);
+                    result.put(task.getId(), task);
+                }
+            }
+        }
+        return result;
+    }
+
+    public boolean updateAndBumpVersion(Task task) throws SQLException {
+        int newVersion = task.getVersion() + 1;
+        String sql = "UPDATE tasks SET in_progress = ?, status = ?, modified = now(), failing_since = ?, version = ? WHERE id = ? AND version = ? RETURNING *";
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            pst.setBoolean(1, task.isInProgress());
+            pst.setString(2, task.getStatus());
+            pst.setObject(3, toOffsetDateTime(task.getFailingSince()));
+            pst.setInt(4, newVersion);
+            pst.setLong(5, task.getId());
+            pst.setInt(6, task.getVersion());
+            try (ResultSet rs = pst.executeQuery()) {
+                if (rs.next()) {
+                    Task updated = readTask(rs);
+                    task.assignFieldsFrom(updated);
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+
+    public List<Task> loadTasksFromDatabase(List<Integer> limits) throws SQLException, IOException {
+        List<Task> tasks = new ArrayList<>();
+        String sql;
+        try (InputStream is = getClass().getResourceAsStream("/com/doer/generated/SelectTasks.sql");
+             Scanner scanner = new Scanner(is, "UTF-8")) {
+            sql = scanner.useDelimiter("\\A").next();
+        }
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            for (int i = 0; i < limits.size(); i++) {
+                pst.setInt(i + 1, limits.get(i));
+            }
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    Task task = readTask(rs);
+                    tasks.add(task);
+                }
+            }
+        }
+        return tasks;
+    }
+
+    protected void setupConcurrencyDomain(String name, int concurrency, Map<String, Duration> delays, Map<String, Duration> retryDelays) {
+        HashSet<String> keys = new HashSet<>(delays.keySet());
+        keys.addAll(retryDelays.keySet());
+        List<String> statuses = new CopyOnWriteArrayList<>(keys);
+        Collections.sort(statuses);
+
+        ConcurrencyDomainImpl domain = new ConcurrencyDomainImpl();
+        domain.domainName = name;
+        domain.numberOfTasksToRunSimultaneously = concurrency;
+        domain.statuses = statuses;
+        domain.delays = new HashMap<>(delays);
+        domain.retryDelays = new HashMap<>(retryDelays);
+        domain.numberOfTasksInProgress = 0;
+        domain.initSubQueues(minSingleQueueSize);
+        domains.add(domain);
+        synchronized(this) {
+            this.statusesCache = null;
         }
     }
 
@@ -115,11 +311,11 @@ public abstract class DoerService {
             try {
                 long timeout = getNextCheckTime();
                 long waitTime = timeout > 0 ? timeout : 1000;
-                logInfo("Next check after " + waitTime);
+                LOG.info("Next check after " + waitTime);
                 this.wait(waitTime);
-                executor.execute(self::onCheckTime);
+                executor.execute(this::onCheckTime);
             } catch (InterruptedException e) {
-                logWarning("Monitoring thread interrupted", e);
+                LOG.log(Level.WARNING, "Monitoring thread interrupted", e);
             } finally {
                 Thread.currentThread().setName(threadName);
                 monitorThread = null;
@@ -164,7 +360,7 @@ public abstract class DoerService {
         }
     }
 
-    public void onCheckTime() {
+    private void onCheckTime() {
         synchronized (this) {
             Instant now = getDbNow();
             if (stalledTaskCheckInterval != null && lastStalledTaskChecked != null &&
@@ -174,78 +370,6 @@ public abstract class DoerService {
                 triggerQueuesReloadFromDb();
             }
             checkTasksBecomeReady();
-        }
-    }
-
-    public void setMaxAllQueuesSize(int value) {
-        maxAllQueuesSize = value;
-    }
-
-    public int getMaxAllQueuesSize() {
-        return maxAllQueuesSize;
-    }
-
-    public void setMinSingleQueueSize(int value) {
-        minSingleQueueSize = value;
-    }
-
-    public int getMinSingleQueueSize() {
-        return minSingleQueueSize;
-    }
-
-    public void setQueueReloadInterval(Duration value) {
-        queueReloadInterval = value;
-    }
-
-    public Duration getQueueReloadInterval() {
-        return queueReloadInterval;
-    }
-
-    protected void setupConcurrencyDomain(String name, int concurrency, Map<String, Duration> delays, Map<String, Duration> retryDelays) {
-        HashSet<String> keys = new HashSet<>(delays.keySet());
-        keys.addAll(retryDelays.keySet());
-        List<String> statuses = new CopyOnWriteArrayList<>(keys);
-        Collections.sort(statuses);
-
-        ConcurrencyDomainImpl domain = new ConcurrencyDomainImpl();
-        domain.domainName = name;
-        domain.numberOfTasksToRunSimultaneously = concurrency;
-        domain.statuses = statuses;
-        domain.delays = new HashMap<>(delays);
-        domain.retryDelays = new HashMap<>(retryDelays);
-        domain.numberOfTasksInProgress = 0;
-        domain.initSubQueues(minSingleQueueSize);
-        domains.add(domain);
-        synchronized(this) {
-            this.statusesCache = null;
-        }
-    }
-
-    public void triggerQueuesReloadFromDb() {
-        synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            if (taskLoadRequired) {
-                return;
-            }
-            taskLoadRequired = true;
-            if (!loadingInProgress) {
-                loadingInProgress = true;
-                executor.execute(self::reloadTasksFromDb);
-            }
-        }
-    }
-
-    public void triggerTaskReloadFromDb(long taskId) {
-        synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            if (taskLoadRequired) {
-                return;
-            }
-            executor.execute(() -> reloadQueuedTask(taskId));
         }
     }
 
@@ -275,7 +399,7 @@ public abstract class DoerService {
             }
         } catch (SQLException e) {
             triggerQueuesReloadFromDb();
-            logWarning("Failed to load single task. Queue reloade initiated.", e);
+            LOG.log(Level.WARNING, "Failed to load single task. Queue reloade initiated.", e);
         }
     }
 
@@ -311,10 +435,11 @@ public abstract class DoerService {
                 }
             }
         } catch (Exception e) {
-            logWarning("Failed to load task for re-check", e);
+            LOG.log(Level.WARNING, "Failed to load task for re-check", e);
         }
     }
 
+    // todo consider to make private
     public void checkTasksBecomeReady() {
         reCheckTask();
         synchronized (this) {
@@ -331,6 +456,7 @@ public abstract class DoerService {
         }
     }
 
+    // todo consider to make private
     public void reloadTasksFromDb() {
         List<Integer> limits = new ArrayList<>();
         synchronized (this) {
@@ -356,9 +482,9 @@ public abstract class DoerService {
                     infoMessage = "Queues Loaded but skipped. Because DoerService was stopped";
                 }
             }
-            logInfo(infoMessage);
+            LOG.info(infoMessage);
         } catch (Exception e) {
-            logWarning("Failed to load tasks from db. Limits: " + limits, e);
+            LOG.log(Level.WARNING, "Failed to load tasks from db. Limits: " + limits, e);
         } finally {
             synchronized (this) {
                 if (taskLoadRequired) {
@@ -368,26 +494,6 @@ public abstract class DoerService {
                     executor.execute(self::checkTasksBecomeReady);
                 }
             }
-        }
-    }
-
-    public Logger getLogger() {
-        return logger;
-    }
-
-    public void setLogger(Logger logger) {
-        this.logger = logger;
-    }
-
-    public void logWarning(String message, Exception e) {
-        if (logger != null) {
-            logger.log(Level.WARNING, message, e);
-        }
-    }
-
-    public void logInfo(String message) {
-        if (logger != null) {
-            logger.log(Level.INFO, message);
         }
     }
 
@@ -448,10 +554,10 @@ public abstract class DoerService {
         // more (other node processed it?)
         LinkedList<Integer> limitsCopy = new LinkedList<>(limits);
         LinkedList<Integer> loadedCounts = calculateActualLoadedCounts(tasks);
-        logInfo("Load tasks.size: " + tasks.size());
-        logInfo("Loaded in_progress: " + tasks.stream().filter(Task::isInProgress).count());
-        logInfo("Limits: " + limitsCopy);
-        logInfo("Loads: " + loadedCounts);
+        LOG.info("Load tasks.size: " + tasks.size());
+        LOG.info("Loaded in_progress: " + tasks.stream().filter(Task::isInProgress).count());
+        LOG.info("Limits: " + limitsCopy);
+        LOG.info("Loads: " + loadedCounts);
         HashSet<Long> inProgressIds = new HashSet<>();
         for (Task task : inProgressTasks) {
             inProgressIds.add(task.getId());
@@ -461,15 +567,15 @@ public abstract class DoerService {
         for (Task task : tasks) {
             Task memo = inMemoryTasks.get(task.getId());
             if (memo != null && memo.getVersion() > task.getVersion()) {
-                logInfo("Newer task " + task.getId() + " " + task.getModified());
+                LOG.info("Newer task " + task.getId() + " " + task.getModified());
                 reCheckTasks.add(task);
             } else if (inProgressIds.contains(task.getId())) {
                 // We should not put task to the list, if it is in_progress
-                logInfo("Skipped In progress " + task.getId() + " " + task.getModified());
+                LOG.info("Skipped In progress " + task.getId() + " " + task.getModified());
             } else if (task.isInProgress()) {
                 // If task in db was in progress, and we don't have updated copy in memory, we
                 // need to check it a bit later.
-                logInfo("Skipped DB In progress " + task.getId() + " " + task.getModified());
+                LOG.info("Skipped DB In progress " + task.getId() + " " + task.getModified());
                 reCheckTasks.add(task);
             } else {
                 copy.add(task);
@@ -517,7 +623,7 @@ public abstract class DoerService {
                 queue.hasMoreInDb = (limit <= loaded);
             }
         }
-        logInfo("Tasks to reload later: " + reCheckTasks.stream().map(Task::getId).collect(Collectors.toList()));
+        LOG.info("Tasks to reload later: " + reCheckTasks.stream().map(Task::getId).collect(Collectors.toList()));
     }
 
     private LinkedList<Integer> calculateActualLoadedCounts(List<Task> tasks) {
@@ -601,79 +707,12 @@ public abstract class DoerService {
         return ss;
     }
 
-    public void setExecutor(Executor executor) {
-        this.executor = executor;
-    }
-
-    public Instant getDbNow() {
-        Instant i = Instant.now()
-                .plusMillis(dbTimeDiffMs.get());
-        return i;
-    }
-
-    public long generateId() throws SQLException {
-        String sql = "SELECT nextval('id_generator'::regclass) AS v";
-        try (Connection con = getConnection();
-                PreparedStatement pst = con.prepareStatement(sql);
-                ResultSet rs = pst.executeQuery()) {
-            rs.next();
-            return rs.getLong("v");
-        }
-    }
-
-    public void insert(Task task) throws SQLException {
-        String sql = "INSERT INTO tasks (created, modified, status, in_progress, failing_since, version) VALUES (now(), now(), ?, ?, ?, ?) RETURNING *";
-        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setString(1, task.getStatus());
-            pst.setBoolean(2, task.isInProgress());
-            pst.setObject(3, toOffsetDateTime(task.getFailingSince()));
-            pst.setInt(4, 0);
-            try (ResultSet rs = pst.executeQuery()) {
-                if (rs.next()) {
-                    task.assignFieldsFrom(readTask(rs));
-                } else {
-                    throw new IllegalStateException("Unexpected result after SQL INSERT command");
-                }
-            }
-        }
-    }
-
     private OffsetDateTime toOffsetDateTime(Instant instant) {
         return instant == null ? null : OffsetDateTime.ofInstant(instant, ZoneId.systemDefault());
     }
 
     private Instant toInstant(OffsetDateTime odt) {
         return odt == null ? null : odt.toInstant();
-    }
-
-    public Task loadTask(long id) throws SQLException {
-        String sql = "SELECT * FROM tasks WHERE id = ?";
-        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setLong(1, id);
-            try (ResultSet rs = pst.executeQuery()) {
-                if (rs.next()) {
-                    return readTask(rs);
-                } else {
-                    return null;
-                }
-            }
-        }
-    }
-
-    public Map<Long, Task> loadTasks(Collection<Long> ids) throws SQLException {
-        String sql = "SELECT * FROM tasks WHERE id = ANY(?)";
-        HashMap<Long, Task> result = new HashMap<>();
-        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            Array sqlArray = con.createArrayOf("BIGINT", ids.toArray());
-            pst.setArray(1, sqlArray);
-            try (ResultSet rs = pst.executeQuery()) {
-                while (rs.next()) {
-                    Task task = readTask(rs);
-                    result.put(task.getId(), task);
-                }
-            }
-        }
-        return result;
     }
 
     private Task readTask(ResultSet rs) throws SQLException {
@@ -688,54 +727,9 @@ public abstract class DoerService {
         return task;
     }
 
-    public boolean updateAndBumpVersion(Task task) throws SQLException {
-        int newVersion = task.getVersion() + 1;
-        String sql = "UPDATE tasks SET in_progress = ?, status = ?, modified = now(), failing_since = ?, version = ? WHERE id = ? AND version = ? RETURNING *";
-        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setBoolean(1, task.isInProgress());
-            pst.setString(2, task.getStatus());
-            pst.setObject(3, toOffsetDateTime(task.getFailingSince()));
-            pst.setInt(4, newVersion);
-            pst.setLong(5, task.getId());
-            pst.setInt(6, task.getVersion());
-            try (ResultSet rs = pst.executeQuery()) {
-                if (rs.next()) {
-                    Task updated = readTask(rs);
-                    task.assignFieldsFrom(updated);
-                    return true;
-                } else {
-                    return false;
-                }
-            }
-        }
-    }
-
     public abstract void runTask(Task task) throws Exception;
 
     public abstract void runInTransaction(Callable<Object> code) throws Exception;
-
-    public abstract Connection getConnection() throws SQLException;
-
-    public List<Task> loadTasksFromDatabase(List<Integer> limits) throws SQLException, IOException {
-        List<Task> tasks = new ArrayList<>();
-        String sql;
-        try (InputStream is = getClass().getResourceAsStream("/com/doer/generated/SelectTasks.sql");
-             Scanner scanner = new Scanner(is, "UTF-8")) {
-            sql = scanner.useDelimiter("\\A").next();
-        }
-        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            for (int i = 0; i < limits.size(); i++) {
-                pst.setInt(i + 1, limits.get(i));
-            }
-            try (ResultSet rs = pst.executeQuery()) {
-                while (rs.next()) {
-                    Task task = readTask(rs);
-                    tasks.add(task);
-                }
-            }
-        }
-        return tasks;
-    }
 
     public void callDoerMethod(Task task, Callable<Object> loader, Callable<Object> caller, Callable<Object> unloader,
             String className, String methodName, Duration errorTimeout, String onErrorStatus) throws Exception {
@@ -755,7 +749,7 @@ public abstract class DoerService {
             exception = null;
         } catch (Exception e) {
             exception = e;
-            logWarning("Doer method error", e);
+            LOG.log(Level.WARNING, "Doer method error", e);
         }
         if (exception == null) {
             try {
@@ -775,7 +769,7 @@ public abstract class DoerService {
                 throw e;
             } catch (Exception e) {
                 exception = e;
-                logWarning("Unloader error", e);
+                LOG.log(Level.WARNING, "Unloader error", e);
             }
         }
         Exception finalException = exception;
@@ -805,138 +799,157 @@ public abstract class DoerService {
     /**
      * Updates a task in coordination with the scheduler. Must be called outside a transaction.
      * <p>
-     * Waits up to {@code waitTimeout} for the task to stop being in progress, polling in short transactions
+     * Waits up to {@code waitDuration} for the task to stop being in progress, polling in short transactions
      * that hold no connection between attempts. The attempt that locks the task continues in the same
      * transaction: calls {@code updater}, saves the task and writes a task_logs row. If the task is still in
-     * progress after the timeout, it is hijacked when {@code allowHijack} is true. After the commit the
-     * scheduler is notified, and only then the method returns.
+     * progress after {@code waitDuration}, it is hijacked when {@code allowHijacking} is true. After the commit
+     * the scheduler is notified, and only then the method returns.
      *
-     * @param updater runs in Doer's transaction with the task row locked; may change the task only with
-     *                {@link Task#setStatus(String)}
+     * @param updater runs in Doer's transaction with the task row locked and sees the task as it is in the
+     *                database; may change the task only with {@link Task#setStatus(String)}
      * @return the task as committed
      * @throws TaskNotFoundException   no task with this id
-     * @throws TaskInProgressException still in progress after waitTimeout, and allowHijack is false
+     * @throws TaskInProgressException still in progress after waitDuration, and allowHijacking is false
      */
-    public Task facilitateCoordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,
-            Consumer<Task> updater) throws Exception {
+    public Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
+            DoerTaskConsumer updater) throws Exception {
         Objects.requireNonNull(updater, "updater");
-        return coordinatedTaskUpdate(taskId, waitTimeout, allowHijack, findCaller(), task -> {
-            updater.accept(task);
-        });
+        return facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, null,
+                (task, data) -> updater.apply(task));
     }
 
     /**
-     * Same as {@link #facilitateCoordinatedTaskUpdate(long, Duration, boolean, Consumer)}, but the second
-     * argument of {@code updater} is loaded with the {@link DoerLoader} for {@code type}, and saved afterwards
-     * with the {@link DoerUnloader} for {@code type} (if declared), in the same transaction.
+     * Same as {@link #facilitateCoordinatedUpdate(long, Duration, boolean, DoerTaskConsumer)}, but when
+     * {@code klazz} is not null, the second argument of {@code updater} is loaded with the {@link DoerLoader}
+     * for {@code klazz} before the update, and saved with the {@link DoerUnloader} for {@code klazz} (if
+     * declared) after the task is written, in the same transaction.
      *
-     * @throws IllegalArgumentException no {@link DoerLoader} for {@code type}
+     * @throws IllegalArgumentException no {@link DoerLoader} for {@code klazz}
      */
-    public <T> Task facilitateCoordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,
-            Class<T> type, BiConsumer<Task, T> updater) throws Exception {
-        Objects.requireNonNull(type, "type");
+    public <T> Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
+            Class<T> klazz, DoerUpdater<T> updater) throws Exception {
         Objects.requireNonNull(updater, "updater");
-        return coordinatedTaskUpdate(taskId, waitTimeout, allowHijack, findCaller(), task -> {
-            _updateWithLoaded(task, type, updater);
-        });
-    }
-
-    /**
-     * Loads the {@code type} parameter with its {@link DoerLoader}, calls {@code updater}, and saves the
-     * parameter with its {@link DoerUnloader}. Implemented by the generated service.
-     */
-    protected abstract <T> void _updateWithLoaded(Task task, Class<T> type, BiConsumer<Task, T> updater)
-            throws Exception;
-
-    private interface LockedTaskCode {
-        void call(Task task) throws Exception;
-    }
-
-    private Task coordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,
-            StackWalker.StackFrame caller, LockedTaskCode code) throws Exception {
-        Objects.requireNonNull(waitTimeout, "waitTimeout");
-        if (waitTimeout.isNegative()) {
-            throw new IllegalArgumentException("waitTimeout should not be negative");
-        }
+        StackWalker.StackFrame caller = StackWalker.getInstance()
+                .walk(frames -> frames
+                        .dropWhile(f -> "facilitateCoordinatedUpdate".equals(f.getMethodName()) || isGeneratedFrame(f))
+                        .findFirst())
+                .orElse(null);
         String className = caller == null ? "Unknown" : caller.getClassName().replaceAll(".*\\.", "");
         String methodName = caller == null ? "unknown" : caller.getMethodName();
-        Instant deadline = Instant.now().plus(waitTimeout);
+        long waitNanos = waitDuration == null || waitDuration.isNegative() ? 0 : waitDuration.toNanos();
+        long deadline = System.nanoTime() + waitNanos;
         long sleepMs = 50;
-        Task[] result = new Task[1];
         while (true) {
-            self.runInTransaction(() -> {
-                Task task = selectTaskForUpdate(taskId, true);
-                if (task != null) {
-                    updateLockedTask(task, code, className, methodName);
-                    result[0] = task;
-                }
-                return null;
-            });
-            if (result[0] != null) {
-                break;
+            long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            boolean isLastAttempt = remainingMs <= 0;
+            Task task = attemptCoordinatedUpdate(taskId, isLastAttempt, allowHijacking, klazz, updater, className,
+                    methodName);
+            if (task != null) {
+                triggerTaskReloadFromDb(taskId);
+                return task;
             }
-            if (loadTask(taskId) == null) {
-                throw new TaskNotFoundException(taskId);
-            }
-            long remainingMs = Duration.between(Instant.now(), deadline).toMillis();
-            if (remainingMs <= 0) {
-                break;
-            }
-            Thread.sleep(Math.min(sleepMs, remainingMs));
+            long timeoutMs = Math.max(1, Math.min(sleepMs, remainingMs));
+            Thread.sleep(timeoutMs);
             sleepMs = Math.min(sleepMs * 2, 1000);
         }
-        if (result[0] == null) {
-            self.runInTransaction(() -> {
-                Task task = selectTaskForUpdate(taskId, false);
-                if (task == null) {
+    }
+
+    /**
+     * Frame of a generated proxy, subclass, lambda or interceptor: its class or method name contains '$', its
+     * class name has a usual generated suffix, or its class is in a container, interceptor or reflection package.
+     */
+    private static boolean isGeneratedFrame(StackWalker.StackFrame frame) {
+        String className = frame.getClassName();
+        if (className.contains("$") || frame.getMethodName().contains("$")) {
+            return true;
+        }
+        String[] generatedSuffixes = { "_Subclass", "_ClientProxy", "_Bean" };
+        for (String suffix : generatedSuffixes) {
+            if (className.endsWith(suffix)) {
+                return true;
+            }
+        }
+        String[] frameworkPackages = { "io.quarkus.", "io.smallrye.", "org.jboss.", "org.apache.webbeans.",
+                "org.springframework.", "org.glassfish.", "com.sun.ejb.", "jakarta.", "javax.", "java.lang.reflect.",
+                "jdk.internal.", "sun.reflect.", "jdk.proxy" };
+        for (String prefix : frameworkPackages) {
+            if (className.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * One transaction: locks the task row, writes the hijack log (if hijacked), loads, calls
+     * {@code updater}, writes the task, unloads and writes the task log.
+     *
+     * @param allowInProgressRowLock when false, an in-progress row is not locked and null is returned
+     * @return the committed task, or null when the task is in progress and allowInProgressRowLock is false
+     */
+    private <T> Task attemptCoordinatedUpdate(long taskId, boolean allowInProgressRowLock, boolean allowHijacking,
+            Class<T> klazz, DoerUpdater<T> updater, String className, String methodName) throws Exception {
+        Task[] result = new Task[1];
+        self.runInTransaction(() -> {
+            Task task = selectTaskForUpdate(taskId, allowInProgressRowLock);
+            if (task == null) {
+                if (allowInProgressRowLock) {
                     throw new TaskNotFoundException(taskId);
                 }
-                if (task.isInProgress()) {
-                    if (!allowHijack) {
-                        throw new TaskInProgressException(taskId);
-                    }
-                    Instant inProgressSince = task.getModified();
-                    task.setInProgress(false);
-                    if (!updateAndBumpVersion(task)) {
-                        throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
-                    }
-                    String extraJson = inProgressSince == null ? null
-                            : "{\"inProgressSince\": \"" + inProgressSince + "\"}";
-                    writeTaskLog(taskId, task.getStatus(), task.getStatus(), className, methodName, "TaskHijacked",
-                            extraJson, null);
-                }
-                updateLockedTask(task, code, className, methodName);
-                result[0] = task;
                 return null;
-            });
-        }
-        triggerTaskReloadFromDb(taskId);
+            }
+            if (task.isInProgress()) {
+                if (!allowHijacking) {
+                    throw new TaskInProgressException(taskId);
+                }
+                Instant inProgressSince = task.getModified();
+                String extraJson = inProgressSince == null ? null
+                        : "{\"inProgressSince\": \"" + inProgressSince + "\"}";
+                writeTaskLog(taskId, task.getStatus(), task.getStatus(), className, methodName, "TaskHijacked",
+                        extraJson, null);
+            }
+            String initialStatus = task.getStatus();
+            long t0 = System.currentTimeMillis();
+            T data = klazz == null ? null : klazz.cast(_load(task, klazz));
+            updater.applyUpdate(task, data);
+            task.setInProgress(false);
+            task.setFailingSince(null);
+            if (!updateAndBumpVersion(task)) {
+                throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
+            }
+            if (klazz != null) {
+                _unload(task, klazz, data);
+            }
+            int t = (int) (System.currentTimeMillis() - t0);
+            writeTaskLog(taskId, initialStatus, task.getStatus(), className, methodName, null, null, t);
+            result[0] = task;
+            return null;
+        });
         return result[0];
     }
 
-    private void updateLockedTask(Task task, LockedTaskCode code, String className, String methodName)
-            throws Exception {
-        String initialStatus = task.getStatus();
-        long t0 = System.currentTimeMillis();
-        code.call(task);
-        task.setInProgress(false);
-        task.setFailingSince(null);
-        if (!updateAndBumpVersion(task)) {
-            throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
-        }
-        int t = (int) (System.currentTimeMillis() - t0);
-        writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, null, null, t);
-    }
+    /**
+     * Loads with the {@link DoerLoader} for {@code type}. Implemented by the generated service.
+     *
+     * @throws IllegalArgumentException no {@link DoerLoader} for {@code type}
+     */
+    protected abstract Object _load(Task task, Class<?> type) throws Exception;
+
+    /**
+     * Saves {@code data} with the {@link DoerUnloader} for {@code type}, if declared; otherwise does nothing.
+     * Implemented by the generated service.
+     */
+    protected abstract void _unload(Task task, Class<?> type, Object data) throws Exception;
 
     /**
      * Locks the task row in the current transaction.
      *
-     * @param notInProgress when true, an in-progress row is skipped (not locked) and null is returned
+     * @param allowInProgress when false, an in-progress row is skipped (not locked) and null is returned
      */
-    protected Task selectTaskForUpdate(long taskId, boolean notInProgress) throws SQLException {
-        String sql = notInProgress
-                ? "SELECT * FROM tasks WHERE id = ? AND NOT in_progress FOR UPDATE"
-                : "SELECT * FROM tasks WHERE id = ? FOR UPDATE";
+    protected Task selectTaskForUpdate(long taskId, boolean allowInProgress) throws SQLException {
+        String sql = allowInProgress
+                ? "SELECT * FROM tasks WHERE id = ? FOR UPDATE"
+                : "SELECT * FROM tasks WHERE id = ? AND NOT in_progress FOR UPDATE";
         try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setLong(1, taskId);
             try (ResultSet rs = pst.executeQuery()) {
@@ -945,25 +958,12 @@ public abstract class DoerService {
         }
     }
 
-    /** The frame that called facilitateCoordinatedTaskUpdate, skipping proxies and interceptors. */
-    private static StackWalker.StackFrame findCaller() {
-        List<StackWalker.StackFrame> frames = StackWalker.getInstance()
-                .walk(s -> s.collect(Collectors.toList()));
-        int last = -1;
-        for (int i = 0; i < frames.size(); i++) {
-            if ("facilitateCoordinatedTaskUpdate".equals(frames.get(i).getMethodName())) {
-                last = i;
-            }
-        }
-        return last >= 0 && last + 1 < frames.size() ? frames.get(last + 1) : null;
-    }
-
     public void triggerStalledTaskReset() {
         executor.execute(() -> {
             try {
                 self.resetStalledInProgressTasks(stalledTaskTimeout);
             } catch (SQLException e) {
-                logWarning("Error resetting stalled tasks", e);
+                LOG.log(Level.WARNING, "Error resetting stalled tasks", e);
             }
         });
     }
@@ -989,7 +989,7 @@ public abstract class DoerService {
             try (PreparedStatement pst = con.prepareStatement(sqlUpdate)) {
                 pst.setObject(1, toOffsetDateTime(treshold));
                 int updated = pst.executeUpdate();
-                logInfo("Reset stalled in_progress tasks. Updated " + updated + " rows");
+                LOG.info("Reset stalled in_progress tasks. Updated " + updated + " rows");
                 return updated;
             }
         }
@@ -1063,10 +1063,10 @@ public abstract class DoerService {
             runTask(task);
             processedSuccessfully = true;
         } catch (OptimisticLockException e) {
-            // Other node or facilitateCoordinatedTaskUpdate changed this task. Reload it from db
+            // Other node or facilitateCoordinatedUpdate changed this task. Reload it from db
             taskChangedConcurrently = true;
         } catch (Exception e) {
-            logWarning("Failed to run task TaskId: " + task.getId(), e);
+            LOG.log(Level.WARNING, "Failed to run task TaskId: " + task.getId(), e);
         } finally {
             Thread.currentThread().setName(threadName);
             synchronized (this) {

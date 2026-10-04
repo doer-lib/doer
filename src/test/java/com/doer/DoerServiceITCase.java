@@ -18,7 +18,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
-import java.util.function.BiConsumer;
+
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,7 +40,7 @@ public class DoerServiceITCase {
         executorJobs = new LinkedList<>();
         service = new TstDoerService();
         service.setExecutor(executorJobs::add);
-        service.self = service;
+        service.setSelfReference(service);
         Utils.sqlUpdate("DELETE FROM task_logs");
         Utils.sqlUpdate("DELETE FROM tasks");
     }
@@ -207,10 +207,10 @@ public class DoerServiceITCase {
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_update_task_and_write_log() throws Exception {
+    void facilitateCoordinatedUpdate__should_update_task_and_write_log() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status, failing_since, version) VALUES (801, 'A', now(), 5)");
 
-        Task task = service.facilitateCoordinatedTaskUpdate(801, Duration.ZERO, false, t -> t.setStatus("B"));
+        Task task = service.facilitateCoordinatedUpdate(801, Duration.ZERO, false, t -> t.setStatus("B"));
 
         assertEquals("B", task.getStatus());
         Task dbTask = service.loadTask(801);
@@ -219,17 +219,17 @@ public class DoerServiceITCase {
         assertNull(dbTask.getFailingSince());
         assertEquals(6, dbTask.getVersion());
         assertEquals(1L, Utils.selectLongValue("SELECT count(*) FROM task_logs WHERE task_id = 801"));
-        assertEquals("A>B>DoerServiceITCase>facilitateCoordinatedTaskUpdate__should_update_task_and_write_log>",
+        assertEquals("A>B>DoerServiceITCase>facilitateCoordinatedUpdate__should_update_task_and_write_log>",
                 Utils.selectStringValue("SELECT initial_status || '>' || final_status || '>' || class_name || '>' || "
                         + "method_name || '>' || coalesce(exception_type, '') FROM task_logs WHERE task_id = 801"));
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_rollback_when_updater_throws() throws Exception {
+    void facilitateCoordinatedUpdate__should_rollback_when_updater_throws() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status) VALUES (802, 'A')");
 
         RuntimeException e = assertThrows(RuntimeException.class,
-                () -> service.facilitateCoordinatedTaskUpdate(802, Duration.ZERO, false, t -> {
+                () -> service.facilitateCoordinatedUpdate(802, Duration.ZERO, false, t -> {
                     t.setStatus("B");
                     throw new RuntimeException("updater failed");
                 }));
@@ -242,17 +242,17 @@ public class DoerServiceITCase {
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_throw_when_task_not_found() {
+    void facilitateCoordinatedUpdate__should_throw_when_task_not_found() {
         assertThrows(TaskNotFoundException.class,
-                () -> service.facilitateCoordinatedTaskUpdate(9839893L, Duration.ZERO, true, t -> fail()));
+                () -> service.facilitateCoordinatedUpdate(9839893L, Duration.ZERO, true, t -> fail()));
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_throw_when_in_progress_and_hijack_not_allowed() throws Exception {
+    void facilitateCoordinatedUpdate__should_throw_when_in_progress_and_hijack_not_allowed() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status, in_progress) VALUES (803, 'A', TRUE)");
 
         assertThrows(TaskInProgressException.class,
-                () -> service.facilitateCoordinatedTaskUpdate(803, Duration.ofMillis(200), false, t -> fail()));
+                () -> service.facilitateCoordinatedUpdate(803, Duration.ofMillis(200), false, t -> fail()));
 
         Task dbTask = service.loadTask(803);
         assertTrue(dbTask.isInProgress());
@@ -261,7 +261,7 @@ public class DoerServiceITCase {
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_wait_until_task_is_not_in_progress() throws Exception {
+    void facilitateCoordinatedUpdate__should_wait_until_task_is_not_in_progress() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status, in_progress) VALUES (804, 'A', TRUE)");
         Thread doerCompletion = new Thread(() -> {
             try {
@@ -273,7 +273,7 @@ public class DoerServiceITCase {
         });
         doerCompletion.start();
 
-        Task task = service.facilitateCoordinatedTaskUpdate(804, Duration.ofSeconds(10), false,
+        Task task = service.facilitateCoordinatedUpdate(804, Duration.ofSeconds(10), false,
                 t -> t.setStatus(t.getStatus() + "C"));
         doerCompletion.join();
 
@@ -284,16 +284,22 @@ public class DoerServiceITCase {
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_hijack_in_progress_task() throws Exception {
+    void facilitateCoordinatedUpdate__should_hijack_in_progress_task() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status, in_progress) VALUES (805, 'A', TRUE)");
         Task runningDoerCopy = service.loadTask(805);
 
-        Task task = service.facilitateCoordinatedTaskUpdate(805, Duration.ZERO, true, t -> t.setStatus("B"));
+        List<Boolean> inProgressSeen = new ArrayList<>();
 
+        Task task = service.facilitateCoordinatedUpdate(805, Duration.ZERO, true, t -> {
+            inProgressSeen.add(t.isInProgress());
+            t.setStatus("B");
+        });
+
+        assertEquals(Arrays.asList(true), inProgressSeen);
         assertEquals("B", task.getStatus());
         Task dbTask = service.loadTask(805);
         assertFalse(dbTask.isInProgress());
-        assertEquals(2, dbTask.getVersion());
+        assertEquals(1, dbTask.getVersion());
         assertEquals("A>A>TaskHijacked", Utils.selectStringValue(
                 "SELECT initial_status || '>' || final_status || '>' || exception_type FROM task_logs "
                         + "WHERE task_id = 805 AND exception_type IS NOT NULL"));
@@ -308,11 +314,11 @@ public class DoerServiceITCase {
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_rollback_hijack_when_updater_throws() throws Exception {
+    void facilitateCoordinatedUpdate__should_rollback_hijack_when_updater_throws() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status, in_progress) VALUES (806, 'A', TRUE)");
 
         assertThrows(IllegalStateException.class,
-                () -> service.facilitateCoordinatedTaskUpdate(806, Duration.ZERO, true, t -> {
+                () -> service.facilitateCoordinatedUpdate(806, Duration.ZERO, true, t -> {
                     throw new IllegalStateException();
                 }));
 
@@ -323,26 +329,27 @@ public class DoerServiceITCase {
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_load_and_unload_parameter() throws Exception {
+    void facilitateCoordinatedUpdate__should_load_and_unload_parameter() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status) VALUES (807, 'A')");
         List<String> received = new ArrayList<>();
 
-        service.facilitateCoordinatedTaskUpdate(807, Duration.ZERO, false, String.class, (t, data) -> {
+        service.facilitateCoordinatedUpdate(807, Duration.ZERO, false, String.class, (t, data) -> {
             received.add(data);
             t.setStatus("B");
         });
 
         assertEquals(Arrays.asList("loaded-A"), received);
-        assertEquals(Arrays.asList("loaded-A"), service.tst_unloaded);
+        // unloader runs after the task is written (version bumped from 0 to 1)
+        assertEquals(Arrays.asList("loaded-A@v1"), service.tst_unloaded);
         assertEquals("B", service.loadTask(807).getStatus());
     }
 
     @Test
-    void facilitateCoordinatedTaskUpdate__should_fail_without_loader() throws Exception {
+    void facilitateCoordinatedUpdate__should_fail_without_loader() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status) VALUES (808, 'A')");
 
         assertThrows(IllegalArgumentException.class,
-                () -> service.facilitateCoordinatedTaskUpdate(808, Duration.ZERO, false, Integer.class,
+                () -> service.facilitateCoordinatedUpdate(808, Duration.ZERO, false, Integer.class,
                         (t, data) -> t.setStatus("B")));
 
         assertEquals("A", service.loadTask(808).getStatus());
@@ -415,14 +422,18 @@ public class DoerServiceITCase {
         List<String> tst_unloaded = new ArrayList<>();
 
         @Override
-        protected <T> void _updateWithLoaded(Task task, Class<T> type, BiConsumer<Task, T> updater) throws Exception {
+        protected Object _load(Task task, Class<?> type) throws Exception {
             if (String.class.equals(type)) {
-                String data = "loaded-" + task.getStatus();
-                updater.accept(task, type.cast(data));
-                tst_unloaded.add(data);
-                return;
+                return "loaded-" + task.getStatus();
             }
             throw new IllegalArgumentException("No @DoerLoader for " + type.getName());
+        }
+
+        @Override
+        protected void _unload(Task task, Class<?> type, Object data) throws Exception {
+            if (String.class.equals(type)) {
+                tst_unloaded.add(data + "@v" + task.getVersion());
+            }
         }
 
         @Override
