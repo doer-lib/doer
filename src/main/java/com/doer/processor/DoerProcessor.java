@@ -345,7 +345,6 @@ public class DoerProcessor extends AbstractProcessor {
             out.println("@Generated(value = \"" + getClass().getName() + "\", date = \"" + LocalDate.now() + "\")");
             out.println("public class _GeneratedDoerService extends DoerService {");
             out.println();
-            out.println("    DataSource dataSource;");
             for (String bean : beans) {
                 out.println("    " + shortcuts.get(bean) + " " + fieldNames.get(bean) + ";");
             }
@@ -355,19 +354,22 @@ public class DoerProcessor extends AbstractProcessor {
             out.println("        initializeDomains();");
             out.println("    }");
             out.println();
+            out.println("    @Override");
             out.println("    @Inject");
-            out.println("    public void _inject_SelfReference(DoerService self) {");
-            out.println("        this.self = self;");
+            out.println("    public void setSelfReference(DoerService self) {");
+            out.println("        super.setSelfReference(self);");
             out.println("    }");
             out.println();
+            out.println("    @Override");
             out.println("    @Inject");
-            out.println("    public void _inject_DataSource(DataSource dataSource) {");
-            out.println("        this.dataSource = dataSource;");
+            out.println("    public void setDataSource(DataSource dataSource) {");
+            out.println("        super.setDataSource(dataSource);");
             out.println("    }");
             out.println();
+            out.println("    @Override");
             out.println("    @Inject");
             out.println("    public void setExecutor(Executor executor) {");
-            out.println("        this.executor = executor;");
+            out.println("        super.setExecutor(executor);");
             out.println("    }");
             out.println();
             for (String bean : beans) {
@@ -391,11 +393,6 @@ public class DoerProcessor extends AbstractProcessor {
             out.println("    }");
             out.println();
             out.println("    @Override");
-            out.println("    public Connection getConnection() throws SQLException {");
-            out.println("        return dataSource.getConnection();");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
             out.println("    @Transactional(Transactional.TxType.NOT_SUPPORTED)");
             out.println("    public void reloadTasksFromDb() {");
             out.println("        super.reloadTasksFromDb();");
@@ -414,7 +411,7 @@ public class DoerProcessor extends AbstractProcessor {
             out.println("        try {");
             out.println("            fillExtraJson(task, exception, builder);");
             out.println("        } catch (Exception e) {");
-            out.println("            logWarning(\"ExtraJson creation error\", e);");
+            out.println("            LOG.log(java.util.logging.Level.WARNING, \"ExtraJson creation error\", e);");
             out.println("        }");
             out.println("        JsonObject jsonObject = builder.build();");
             out.println("        if (jsonObject.isEmpty()) {");
@@ -472,39 +469,46 @@ public class DoerProcessor extends AbstractProcessor {
             out.println();
             out.println("    @Override");
             out.println("    @Transactional(Transactional.TxType.NEVER)");
-            out.println("    public Task facilitateCoordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,");
-            out.println("            Consumer<Task> updater) throws Exception {");
-            out.println("        return super.facilitateCoordinatedTaskUpdate(taskId, waitTimeout, allowHijack, updater);");
+            out.println("    public Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,");
+            out.println("            DoerTaskConsumer updater) throws Exception {");
+            out.println("        return super.facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, updater);");
             out.println("    }");
             out.println();
             out.println("    @Override");
             out.println("    @Transactional(Transactional.TxType.NEVER)");
-            out.println("    public <T> Task facilitateCoordinatedTaskUpdate(long taskId, Duration waitTimeout, boolean allowHijack,");
-            out.println("            Class<T> type, BiConsumer<Task, T> updater) throws Exception {");
-            out.println("        return super.facilitateCoordinatedTaskUpdate(taskId, waitTimeout, allowHijack, type, updater);");
+            out.println("    public <T> Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,");
+            out.println("            Class<T> klazz, DoerUpdater<T> updater) throws Exception {");
+            out.println("        return super.facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, klazz, updater);");
             out.println("    }");
             out.println();
             out.println("    @Override");
-            out.println("    protected <T> void _updateWithLoaded(Task task, Class<T> type, BiConsumer<Task, T> updater) throws Exception {");
+            out.println("    protected Object _load(Task task, Class<?> type) throws Exception {");
             Set<String> generatedTypes = new HashSet<>();
             for (DoerLoaderInfo loader : loaders) {
                 if (!isPlainClassType(loader.type) || !generatedTypes.add(loader.type)) {
                     continue;
                 }
-                String typeName = shortcuts.get(loader.type);
-                out.println("        if (" + typeName + ".class.equals(type)) {");
-                out.println("            " + typeName + " data = " + fieldNames.get(loader.className) + "."
-                        + loader.methodName + "(task);");
-                out.println("            updater.accept(task, type.cast(data));");
-                unloaders.stream()
-                        .filter(u -> u.type.equals(loader.type))
-                        .findFirst()
-                        .ifPresent(u -> out.println("            " + fieldNames.get(u.className) + "." + u.methodName
-                                + "(task, data);"));
-                out.println("            return;");
+                out.println("        if (" + shortcuts.get(loader.type) + ".class.equals(type)) {");
+                out.println("            return " + fieldNames.get(loader.className) + "." + loader.methodName + "(task);");
                 out.println("        }");
             }
             out.println("        throw new IllegalArgumentException(\"No @DoerLoader for \" + type.getName());");
+            out.println("    }");
+            out.println();
+            out.println("    @Override");
+            out.println("    protected void _unload(Task task, Class<?> type, Object data) throws Exception {");
+            generatedTypes.clear();
+            for (DoerUnloaderInfo unloader : unloaders) {
+                if (!isPlainClassType(unloader.type) || !generatedTypes.add(unloader.type)) {
+                    continue;
+                }
+                String typeName = shortcuts.get(unloader.type);
+                out.println("        if (" + typeName + ".class.equals(type)) {");
+                out.println("            " + fieldNames.get(unloader.className) + "." + unloader.methodName
+                        + "(task, (" + typeName + ") data);");
+                out.println("            return;");
+                out.println("        }");
+            }
             out.println("    }");
             out.println();
             out.println("    @Override");
@@ -1315,8 +1319,8 @@ public class DoerProcessor extends AbstractProcessor {
         shortnames.put("java.io.StringWriter", "StringWriter");
         shortnames.put("java.time.Duration", "Duration");
         shortnames.put("java.util.concurrent.Executor", "Executor");
-        shortnames.put("java.util.function.Consumer", "Consumer");
-        shortnames.put("java.util.function.BiConsumer", "BiConsumer");
+        shortnames.put("com.doer.DoerTaskConsumer", "DoerTaskConsumer");
+        shortnames.put("com.doer.DoerUpdater", "DoerUpdater");
 
         Stream<String> classes1 = doerMethods.stream().map(s -> s.className);
         Stream<String> classes2 = loaders.stream().map(s -> s.className);

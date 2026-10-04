@@ -147,14 +147,14 @@ public class DoerResource {
     @GET
     public Task coordinatedUpdate(@QueryParam("id") long id, @QueryParam("s") String status,
             @QueryParam("hijack") @DefaultValue("false") boolean hijack) throws Exception {
-        return doerService.facilitateCoordinatedTaskUpdate(id, Duration.ofMillis(300), hijack,
+        return doerService.facilitateCoordinatedUpdate(id, Duration.ofMillis(300), hijack,
                 task -> task.setStatus(status));
     }
 
     @Path("coordinated_car_update")
     @GET
     public Task coordinatedCarUpdate(@QueryParam("id") long id, @QueryParam("s") String status) throws Exception {
-        return doerService.facilitateCoordinatedTaskUpdate(id, Duration.ZERO, false, Car.class,
+        return doerService.facilitateCoordinatedUpdate(id, Duration.ZERO, false, Car.class,
                 (task, car) -> task.setStatus(status));
     }
 
@@ -163,7 +163,7 @@ public class DoerResource {
     @Transactional
     public Task coordinatedUpdateInTransaction(@QueryParam("id") long id, @QueryParam("s") String status)
             throws Exception {
-        return doerService.facilitateCoordinatedTaskUpdate(id, Duration.ZERO, false, task -> task.setStatus(status));
+        return doerService.facilitateCoordinatedUpdate(id, Duration.ZERO, false, task -> task.setStatus(status));
     }
 
     @AcceptStatus("A")

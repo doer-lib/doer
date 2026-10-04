@@ -337,10 +337,10 @@ public class QuarkusITCase {
                 .statusCode(200)
                 .body("status", equalTo("Unparked"));
 
-        // Car loaded, Car unloaded, task updated (trigger)
+        // Car loaded, task updated (trigger), Car unloaded
         List<DemoLogRow> logs = loadDemoLogs(taskId);
         List<String> types = logs.stream().map(r -> r.type).collect(Collectors.toList());
-        assertEquals(Arrays.asList("Car", "Car", "task"), types);
+        assertEquals(Arrays.asList("Car", "task", "Car"), types);
         assertEquals(logs.get(0).txId, logs.get(1).txId);
         assertEquals(logs.get(1).txId, logs.get(2).txId);
     }
