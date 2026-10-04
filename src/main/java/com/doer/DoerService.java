@@ -135,10 +135,7 @@ public abstract class DoerService {
 
     public void triggerQueuesReloadFromDb() {
         synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            if (taskLoadRequired) {
+            if (!isRunning || taskLoadRequired) {
                 return;
             }
             taskLoadRequired = true;
@@ -151,10 +148,7 @@ public abstract class DoerService {
 
     public void triggerTaskReloadFromDb(long taskId) {
         synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            if (taskLoadRequired) {
+            if (!isRunning || taskLoadRequired) {
                 return;
             }
             executor.execute(() -> reloadQueuedTask(taskId));
@@ -166,9 +160,7 @@ public abstract class DoerService {
     }
 
     public Instant getDbNow() {
-        Instant i = Instant.now()
-                .plusMillis(dbTimeDiffMs.get());
-        return i;
+        return Instant.now().plusMillis(dbTimeDiffMs.get());
     }
 
     public long generateId() throws SQLException {
@@ -250,6 +242,12 @@ public abstract class DoerService {
         }
     }
 
+    private void updateAndBumpVersionOrThrow(Task task) throws SQLException {
+        if (!updateAndBumpVersion(task)) {
+            throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
+        }
+    }
+
     public List<Task> loadTasksFromDatabase(List<Integer> limits) throws SQLException, IOException {
         List<Task> tasks = new ArrayList<>();
         String sql;
@@ -293,16 +291,7 @@ public abstract class DoerService {
 
     private void monitorIdleState() {
         synchronized (this) {
-            if (!monitorEnabled) {
-                return;
-            }
-            if (loadingInProgress) {
-                return;
-            }
-            if (!inProgressTasks.isEmpty()) {
-                return;
-            }
-            if (monitorThread != null) {
+            if (!monitorEnabled || loadingInProgress || !inProgressTasks.isEmpty() || monitorThread != null) {
                 return;
             }
             monitorThread = Thread.currentThread();
@@ -446,9 +435,7 @@ public abstract class DoerService {
             if (!isRunning) {
                 return;
             }
-            Iterator<ConcurrencyDomainImpl> iterator = domains.iterator();
-            while (iterator.hasNext()) {
-                ConcurrencyDomainImpl domain = iterator.next();
+            for (ConcurrencyDomainImpl domain : domains) {
                 if (domain.numberOfTasksInProgress < domain.getValue()) {
                     executor.execute(() -> processNextTask(domain));
                 }
@@ -458,7 +445,7 @@ public abstract class DoerService {
 
     // todo consider to make private
     public void reloadTasksFromDb() {
-        List<Integer> limits = new ArrayList<>();
+        List<Integer> limits;
         synchronized (this) {
             if (!isRunning) {
                 return;
@@ -582,39 +569,10 @@ public abstract class DoerService {
             }
         }
         for (ConcurrencyDomainImpl domain : domains) {
-            HashMap<Duration, HashSet<String>> delayedStatuses = new HashMap<>();
-            HashMap<Duration, HashSet<String>> retryStatuses = new HashMap<>();
-            for (String status : domain.getStatuses()) {
-                delayedStatuses
-                        .computeIfAbsent(domain.getDelay(status), key -> new HashSet<>())
-                        .add(status);
-                retryStatuses
-                        .computeIfAbsent(domain.getRetryDelay(status), key -> new HashSet<>())
-                        .add(status);
-            }
+            HashMap<Duration, HashSet<String>> delayedStatuses = groupStatusesByDelay(domain, false);
+            HashMap<Duration, HashSet<String>> retryStatuses = groupStatusesByDelay(domain, true);
             for (SubQueue queue : domain.queues) {
-                List<Task> newBuffer = new ArrayList<>();
-                if (!queue.failingTaskQueue) {
-                    HashSet<String> statuses = delayedStatuses.get(queue.delay);
-                    Iterator<Task> iterator = copy.iterator();
-                    while (iterator.hasNext()) {
-                        Task task = iterator.next();
-                        if (task.getFailingSince() == null && statuses.contains(task.getStatus())) {
-                            iterator.remove();
-                            newBuffer.add(task);
-                        }
-                    }
-                } else {
-                    HashSet<String> statuses = retryStatuses.get(queue.delay);
-                    Iterator<Task> iterator = copy.iterator();
-                    while (iterator.hasNext()) {
-                        Task task = iterator.next();
-                        if (task.getFailingSince() != null && statuses.contains(task.getStatus())) {
-                            iterator.remove();
-                            newBuffer.add(task);
-                        }
-                    }
-                }
+                List<Task> newBuffer = takeTasksForQueue(copy, queue, delayedStatuses, retryStatuses);
                 queue.buffer.clear();
                 queue.buffer.addAll(newBuffer);
                 int limit = limitsCopy.pollFirst();
@@ -630,52 +588,53 @@ public abstract class DoerService {
         LinkedList<Integer> counts = new LinkedList<>();
         LinkedList<Task> copy = new LinkedList<>(tasks);
         for (ConcurrencyDomainImpl domain : domains) {
-            HashMap<Duration, HashSet<String>> delayedStatuses = new HashMap<>();
-            HashMap<Duration, HashSet<String>> retryStatuses = new HashMap<>();
-            for (String status : domain.getStatuses()) {
-                delayedStatuses
-                        .computeIfAbsent(domain.getDelay(status), key -> new HashSet<>())
-                        .add(status);
-                retryStatuses
-                        .computeIfAbsent(domain.getRetryDelay(status), key -> new HashSet<>())
-                        .add(status);
-            }
+            HashMap<Duration, HashSet<String>> delayedStatuses = groupStatusesByDelay(domain, false);
+            HashMap<Duration, HashSet<String>> retryStatuses = groupStatusesByDelay(domain, true);
             for (SubQueue queue : domain.queues) {
-                int loadedTasks = 0;
-                if (!queue.failingTaskQueue) {
-                    HashSet<String> statuses = delayedStatuses.get(queue.delay);
-                    Iterator<Task> iterator = copy.iterator();
-                    while (iterator.hasNext()) {
-                        Task task = iterator.next();
-                        if (task.getFailingSince() == null && statuses.contains(task.getStatus())) {
-                            iterator.remove();
-                            loadedTasks++;
-                        }
-                    }
-                } else {
-                    HashSet<String> statuses = retryStatuses.get(queue.delay);
-                    Iterator<Task> iterator = copy.iterator();
-                    while (iterator.hasNext()) {
-                        Task task = iterator.next();
-                        if (task.getFailingSince() != null && statuses.contains(task.getStatus())) {
-                            iterator.remove();
-                            loadedTasks++;
-                        }
-                    }
-                }
-                counts.add(loadedTasks);
+                counts.add(takeTasksForQueue(copy, queue, delayedStatuses, retryStatuses).size());
             }
         }
         return counts;
+    }
+
+    /** Groups the domain's statuses by their delay, or by their retry delay when {@code retry} is true. */
+    private static HashMap<Duration, HashSet<String>> groupStatusesByDelay(ConcurrencyDomainImpl domain,
+            boolean retry) {
+        HashMap<Duration, HashSet<String>> result = new HashMap<>();
+        for (String status : domain.getStatuses()) {
+            Duration delay = retry ? domain.getRetryDelay(status) : domain.getDelay(status);
+            result.computeIfAbsent(delay, key -> new HashSet<>()).add(status);
+        }
+        return result;
+    }
+
+    /** Removes the tasks that belong to {@code queue} from {@code tasks} and returns them in their original order. */
+    private static List<Task> takeTasksForQueue(LinkedList<Task> tasks, SubQueue queue,
+            HashMap<Duration, HashSet<String>> delayedStatuses, HashMap<Duration, HashSet<String>> retryStatuses) {
+        HashSet<String> statuses;
+        if (queue.failingTaskQueue) {
+            statuses = retryStatuses.get(queue.delay);
+        } else {
+            statuses = delayedStatuses.get(queue.delay);
+        }
+        List<Task> taken = new ArrayList<>();
+        Iterator<Task> iterator = tasks.iterator();
+        while (iterator.hasNext()) {
+            Task task = iterator.next();
+            boolean isFailing = task.getFailingSince() != null;
+            if (isFailing == queue.failingTaskQueue && statuses.contains(task.getStatus())) {
+                iterator.remove();
+                taken.add(task);
+            }
+        }
+        return taken;
     }
 
     private HashMap<Long, Task> getInMemoryTasks() {
         HashMap<Long, Task> inMemoryTasks = new HashMap<>();
         for (ConcurrencyDomainImpl domain : domains) {
             for (SubQueue queue : domain.queues) {
-                Iterator<Task> iterator = queue.buffer.iterator();
-                while (iterator.hasNext()) {
-                    Task task = iterator.next();
+                for (Task task : queue.buffer) {
                     inMemoryTasks.put(task.getId(), task);
                 }
             }
@@ -703,8 +662,7 @@ public abstract class DoerService {
                     .append("/")
                     .append(volumes.get(i));
         }
-        String ss = sb.toString();
-        return ss;
+        return sb.toString();
     }
 
     private OffsetDateTime toOffsetDateTime(Instant instant) {
@@ -737,9 +695,7 @@ public abstract class DoerService {
         long t0 = System.currentTimeMillis();
         self.runInTransaction(() -> {
             task.setInProgress(true);
-            if (!updateAndBumpVersion(task)) {
-                throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
-            }
+            updateAndBumpVersionOrThrow(task);
             loader.call();
             return null;
         });
@@ -756,9 +712,7 @@ public abstract class DoerService {
                 self.runInTransaction(() -> {
                     task.setFailingSince(null);
                     task.setInProgress(false);
-                    if (!updateAndBumpVersion(task)) {
-                        throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
-                    }
+                    updateAndBumpVersionOrThrow(task);
                     unloader.call();
                     int t = (int) (System.currentTimeMillis() - t0);
                     writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, null, null, t);
@@ -784,9 +738,7 @@ public abstract class DoerService {
                 task.setStatus(initialStatus);
             }
             task.setInProgress(false);
-            if (!updateAndBumpVersion(task)) {
-                throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
-            }
+            updateAndBumpVersionOrThrow(task);
             String exceptionType = finalException.getClass().getName();
             String extraJson = createExtraJson(task, finalException);
             int t = (int) (System.currentTimeMillis() - t0);
@@ -914,9 +866,7 @@ public abstract class DoerService {
             updater.applyUpdate(task, data);
             task.setInProgress(false);
             task.setFailingSince(null);
-            if (!updateAndBumpVersion(task)) {
-                throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
-            }
+            updateAndBumpVersionOrThrow(task);
             if (klazz != null) {
                 _unload(task, klazz, data);
             }
@@ -1023,9 +973,7 @@ public abstract class DoerService {
     }
 
     private ConcurrencyDomainImpl selectConcurrencyDomain(String status) {
-        Iterator<ConcurrencyDomainImpl> iterator = domains.iterator();
-        while (iterator.hasNext()) {
-            ConcurrencyDomainImpl domain = iterator.next();
+        for (ConcurrencyDomainImpl domain : domains) {
             if (domain.getStatuses().contains(status)) {
                 return domain;
             }
