@@ -1074,7 +1074,7 @@ public class GeneratorITCase {
     }
 
     @Test
-    void javac__should_warn_and_use_default_retry_policy() throws Exception {
+    void javac__should_use_default_retry_policy() throws Exception {
         String code = "" +
                 "package demo.test;\n" +
                 "import com.doer.*;\n" +
@@ -1087,7 +1087,7 @@ public class GeneratorITCase {
 
         String messages = javac(0, "Orders.java");
 
-        assertTrue(messages.contains("Doer method accept has no @RetryPolicy"), messages);
+        assertFalse(messages.contains("has no @RetryPolicy"), messages);
         assertFalse(messages.contains("do not contain the statuses set by Task.setStatus"), messages);
         String service = new String(Files.readAllBytes(
                 dir.resolve("classes/com/doer/generated/_GeneratedDoerService.java")), UTF_8);

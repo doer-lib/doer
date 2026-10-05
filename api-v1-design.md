@@ -161,7 +161,7 @@ Usage:
 
 In 0.x, a doer method without `@OnException` is retried every 5 minutes forever.
 
-In v1 it is retried every 5 minutes for 1 day. After that, Doer sets the task status to `null`. No doer method accepts `null`, so the task stops being processed. Like any status change, this one is written to `task_logs`. The processor warns about every doer method without `@RetryPolicy`.
+In v1 it is retried every 5 minutes for 1 day. After that, Doer sets the task status to `null`. No doer method accepts `null`, so the task stops being processed. Like any status change, this one is written to `task_logs`.
 
 Retrying forever has to be asked for explicitly. To keep the 0.x behaviour, annotate the method with:
 
