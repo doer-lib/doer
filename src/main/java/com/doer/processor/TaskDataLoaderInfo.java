@@ -1,12 +1,4 @@
 package com.doer.processor;
 
-class TaskDataLoaderInfo {
-    String type;
-    String className;
-    String methodName;
-
-    @Override
-    public String toString() {
-        return className + "." + methodName + " -> " + type;
-    }
+record TaskDataLoaderInfo(String className, String methodName, String type) implements TypedMethodInfo {
 }
