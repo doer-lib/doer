@@ -1,9 +1,9 @@
 package tst.demo;
 
 import com.doer.AcceptStatus;
-import com.doer.DoerLoader;
+import com.doer.TaskDataLoader;
 import com.doer.DoerService;
-import com.doer.DoerUnloader;
+import com.doer.TaskDataSaver;
 import com.doer.Task;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -41,7 +41,7 @@ public class DoerResource {
         doerService.stop();
     }
 
-    @DoerLoader
+    @TaskDataLoader
     public Car loadCar(Task task) throws Exception {
         String sql = "insert into demo_log_tasks (object_type , task_id, in_progress, tx_id) values ('Car', ?, ?, txid_current());";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
@@ -52,7 +52,7 @@ public class DoerResource {
         return null;
     }
 
-    @DoerUnloader
+    @TaskDataSaver
     public void storeCar(Task task, Car car) throws Exception {
         String sql = "insert into demo_log_tasks (object_type , task_id, in_progress, tx_id) values ('Car', ?, ?, txid_current());";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
@@ -62,7 +62,7 @@ public class DoerResource {
         }
     }
 
-    @DoerUnloader
+    @TaskDataSaver
     public void storeShampoo(Task task, Shampoo shampoo) throws Exception {
         String sql = "insert into demo_log_tasks (object_type , task_id, in_progress, tx_id) values ('Shampoo', ?, ?, txid_current());";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {

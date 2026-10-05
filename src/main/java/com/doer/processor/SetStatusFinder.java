@@ -36,18 +36,18 @@ import javax.lang.model.type.TypeMirror;
  * Finds constant statuses passed to {@link Task#setStatus(String)} in method
  * bodies and adds them to {@link DoerMethodInfo#emitList}.
  */
-public class SetStatusFinder {
+class SetStatusFinder {
 
     private final RoundEnvironment roundEnv;
     private final Trees trees;
     private List<DoerMethodInfo> methods;
 
-    public SetStatusFinder(RoundEnvironment roundEnv, ProcessingEnvironment processingEnv) {
+    SetStatusFinder(RoundEnvironment roundEnv, ProcessingEnvironment processingEnv) {
         this.roundEnv = roundEnv;
         this.trees = Trees.instance(processingEnv);
     }
 
-    public void updateDoerMethods(List<DoerMethodInfo> methods) {
+    void updateDoerMethods(List<DoerMethodInfo> methods) {
         this.methods = methods;
         for (Element element : roundEnv.getRootElements()) {
             if (element instanceof TypeElement) {

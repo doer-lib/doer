@@ -5,8 +5,7 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+@Target(ElementType.METHOD)
 @Retention(RetentionPolicy.CLASS)
-@Target({ ElementType.METHOD, ElementType.TYPE })
-public @interface DoerConcurrency {
-    int value();
+public @interface ExceptionDescriber {
 }
