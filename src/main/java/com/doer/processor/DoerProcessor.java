@@ -31,7 +31,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.annotation.processing.AbstractProcessor;
-import javax.annotation.processing.Messager;
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.Processor;
 import javax.annotation.processing.RoundEnvironment;
@@ -81,8 +80,8 @@ public class DoerProcessor extends AbstractProcessor {
 
     // Filled by process() in the round with doer annotations
     private final List<DoerMethodInfo> doerMethods = new ArrayList<>();
-    private final List<TaskDataLoaderInfo> loaders = new ArrayList<>();
-    private final List<TaskDataSaverInfo> savers = new ArrayList<>();
+    private final List<TypedMethodInfo> loaders = new ArrayList<>();
+    private final List<TypedMethodInfo> savers = new ArrayList<>();
     private final List<ExceptionDescriberInfo> describers = new ArrayList<>();
     /** Declared @ConcurrencyLimit of each domain. */
     private final Map<String, Integer> limits = new HashMap<>();
@@ -156,7 +155,6 @@ public class DoerProcessor extends AbstractProcessor {
             analyzedClasses++;
             setStatusFinder.scanTopLevelType(e.getTypeElement());
         } else if (e.getKind() == TaskEvent.Kind.COMPILATION) {
-            // javac does not analyze the sources after errors in annotation processing; the warning is misleading then
             if (analyzedClasses == 0 && !errorRaised) {
                 processingEnv.getMessager().printMessage(Kind.WARNING, "doer.json and doer.dot do not "
                         + "contain the statuses set by Task.setStatus(...) in the code: the sources were not "
@@ -183,24 +181,19 @@ public class DoerProcessor extends AbstractProcessor {
         return false;
     }
 
-    // ---------------------------------------------------------------------------------------------------------
-    // Loading and validation of annotated methods
-
     private void loadDoerMethods(RoundEnvironment roundEnv) {
         Set<Element> elements = new LinkedHashSet<>(roundEnv.getElementsAnnotatedWith(AcceptStatus.class));
         elements.addAll(roundEnv.getElementsAnnotatedWith(AcceptStatuses.class));
 
         for (Element element : elements) {
-            if (!checkIsMethod(element, "AcceptStatus")) {
+            ExecutableType method = methodType(element, "AcceptStatus");
+            if (method == null) {
                 continue;
             }
             DoerMethodInfo info = new DoerMethodInfo();
             info.className = ownerClassName(element);
             info.methodName = element.getSimpleName().toString();
-            info.parameterTypes = ((ExecutableType) element.asType()).getParameterTypes()
-                    .stream()
-                    .map(Object::toString)
-                    .toList();
+            info.parameterTypes = method.getParameterTypes().stream().map(Object::toString).toList();
             for (AcceptStatus annotation : element.getAnnotationsByType(AcceptStatus.class)) {
                 validateStatus(annotation.value(), "@AcceptStatus value", element);
                 if (annotation.delay().isEmpty()) {
@@ -238,7 +231,7 @@ public class DoerProcessor extends AbstractProcessor {
                     .map(m -> "    " + m.className + "." + m.element)
                     .collect(Collectors.joining("\n"));
             for (DoerMethodInfo method : sorted) {
-                processingEnv.getMessager().printMessage(Kind.ERROR, "Status \"" + escape(status)
+                error("Status \"" + escape(status)
                         + "\" is accepted by more than one doer method; a status can be accepted by only one "
                         + "@AcceptStatus method:\n" + list, method.element);
             }
@@ -246,16 +239,10 @@ public class DoerProcessor extends AbstractProcessor {
     }
 
     private void loadRetryPolicy(DoerMethodInfo info, Element element) {
-        Messager messager = processingEnv.getMessager();
         RetryPolicy policy = element.getAnnotation(RetryPolicy.class);
         if (policy == null) {
             info.retryInterval = DEFAULT_RETRY_INTERVAL;
             info.retryDuration = DEFAULT_RETRY_DURATION;
-            messager.printMessage(Kind.WARNING, "Doer method " + info.methodName + " has no @"
-                    + RetryPolicy.class.getSimpleName() + ". On exception it is retried every 5 minutes for 1 day, "
-                    + "then its status is set to null.\n"
-                    + "To retry forever, add @" + RetryPolicy.class.getSimpleName() + "(interval = \"5m\")",
-                    element);
             return;
         }
         info.retryIntervalText = policy.interval();
@@ -270,7 +257,7 @@ public class DoerProcessor extends AbstractProcessor {
         if (!policy.fallbackStatus().isEmpty()) {
             validateStatus(policy.fallbackStatus(), "@RetryPolicy fallbackStatus", element);
             if (policy.duration().isEmpty()) {
-                messager.printMessage(Kind.ERROR, "@RetryPolicy fallbackStatus requires duration: without duration "
+                error("@RetryPolicy fallbackStatus requires duration: without duration "
                         + "the task is retried forever and fallbackStatus is never used.", element);
             }
             info.fallbackStatus = policy.fallbackStatus();
@@ -282,33 +269,30 @@ public class DoerProcessor extends AbstractProcessor {
         try {
             return parseDuration(text);
         } catch (IllegalArgumentException e) {
-            processingEnv.getMessager().printMessage(Kind.ERROR, what + " \"" + text + "\" is not a duration. "
+            error(what + " \"" + text + "\" is not a duration. "
                     + "Expected a number and a unit, e.g. \"5s\", \"10 min\", \"2h\", \"1 day\".", element);
             return null;
         }
     }
 
     private void validateStatus(String status, String what, Element element) {
-        Messager messager = processingEnv.getMessager();
         if (status.isEmpty()) {
-            messager.printMessage(Kind.ERROR, what + " must not be empty.", element);
+            error(what + " must not be empty.", element);
         } else if (!status.equals(status.strip())) {
-            messager.printMessage(Kind.ERROR, what + " \"" + escape(status)
-                    + "\" must not start or end with whitespace.", element);
+            error(what + " \"" + escape(status) + "\" must not start or end with whitespace.", element);
         } else if (status.length() > MAX_STATUS_LENGTH) {
-            messager.printMessage(Kind.ERROR, what + " \"" + escape(status) + "\" is " + status.length()
+            error(what + " \"" + escape(status) + "\" is " + status.length()
                     + " characters long; the maximum is " + MAX_STATUS_LENGTH + ".", element);
         }
     }
 
-    /** Reports an error and returns false when the annotated element is not a method. */
-    private boolean checkIsMethod(Element element, String annotationName) {
+    /** Type of the annotated method; reports an error and returns null when the element is not a method. */
+    private ExecutableType methodType(Element element, String annotationName) {
         if (element.getKind() == ElementKind.METHOD) {
-            return true;
+            return (ExecutableType) element.asType();
         }
-        processingEnv.getMessager().printMessage(Kind.ERROR,
-                annotationName + " annotation can be used only on public methods.", element);
-        return false;
+        error(annotationName + " annotation can be used only on public methods.", element);
+        return null;
     }
 
     /** Name of the class declaring the method; reports an error when the class is in the unnamed package. */
@@ -321,7 +305,7 @@ public class DoerProcessor extends AbstractProcessor {
                     "https://docs.oracle.com/javase/specs/jls/se11/html/jls-7.html#jls-7.5\n" +
                     "Please move your class %s to any package, so %s can import it.",
                     DoerService.class.getName(), className, DoerService.class.getName());
-            processingEnv.getMessager().printMessage(Kind.ERROR, message, method);
+            error(message, method);
         }
         return className;
     }
@@ -336,8 +320,10 @@ public class DoerProcessor extends AbstractProcessor {
         if (group != null) {
             return group.value();
         }
-        String derived = derivedDomainName(element);
-        return derived != null ? derived : resolveDomainName(element.getEnclosingElement());
+        if (element.getKind() == ElementKind.METHOD && element.getAnnotation(ConcurrencyLimit.class) == null) {
+            return resolveDomainName(element.getEnclosingElement());
+        }
+        return describeElement(element);
     }
 
     /**
@@ -367,7 +353,6 @@ public class DoerProcessor extends AbstractProcessor {
      * names given in {@code @ConcurrencyGroup} and {@code limits} with the declared limit of each domain.
      */
     private void loadConcurrencyDomains(RoundEnvironment roundEnv) {
-        Messager messager = processingEnv.getMessager();
         Elements elementUtils = processingEnv.getElementUtils();
         Set<String> usedDomains = new HashSet<>();
         Set<String> implicitDomains = new HashSet<>();
@@ -382,7 +367,7 @@ public class DoerProcessor extends AbstractProcessor {
         for (Element element : roundEnv.getElementsAnnotatedWith(ConcurrencyGroup.class)) {
             String name = element.getAnnotation(ConcurrencyGroup.class).value();
             if (name.trim().isEmpty()) {
-                messager.printMessage(Kind.ERROR, "@ConcurrencyGroup value must not be empty.", element);
+                error("@ConcurrencyGroup value must not be empty.", element);
                 continue;
             }
             namedDomains.add(name);
@@ -404,7 +389,7 @@ public class DoerProcessor extends AbstractProcessor {
                 }
             }
             if (kind != null) {
-                messager.printMessage(Kind.ERROR, "@ConcurrencyGroup(\"" + name + "\") uses the name of " + kind
+                error("@ConcurrencyGroup(\"" + name + "\") uses the name of " + kind
                         + " " + name + ", but no doer method runs in the implicit concurrency domain of that " + kind
                         + " (it is not a doer method or class, or it declares its own @ConcurrencyGroup).\n"
                         + "A class or method name can be used only to join an existing implicit domain. "
@@ -416,7 +401,7 @@ public class DoerProcessor extends AbstractProcessor {
         Map<String, List<Element>> limitElements = new TreeMap<>();
         for (Element element : roundEnv.getElementsAnnotatedWith(ConcurrencyLimit.class)) {
             if (element.getAnnotation(ConcurrencyLimit.class).value() < 1) {
-                messager.printMessage(Kind.ERROR, "@ConcurrencyLimit value must be at least 1.", element);
+                error("@ConcurrencyLimit value must be at least 1.", element);
                 continue;
             }
             limitElements.computeIfAbsent(resolveDomainName(element), k -> new ArrayList<>()).add(element);
@@ -431,16 +416,16 @@ public class DoerProcessor extends AbstractProcessor {
                         .map(e -> "    " + describeElement(e) + ": " + e.getAnnotation(ConcurrencyLimit.class).value())
                         .collect(Collectors.joining("\n"));
                 for (Element element : elements) {
-                    messager.printMessage(Kind.ERROR, "Different @ConcurrencyLimit values for concurrency domain \""
-                            + domainName + "\":\n" + list, element);
+                    error("Different @ConcurrencyLimit values for concurrency domain \"" + domainName + "\":\n"
+                            + list, element);
                 }
                 return;
             }
             limits.put(domainName, values.iterator().next());
             if (!usedDomains.contains(domainName)) {
                 for (Element element : elements) {
-                    messager.printMessage(Kind.WARNING, "@ConcurrencyLimit has no effect: no doer method runs in "
-                            + "concurrency domain \"" + domainName + "\".", element);
+                    warning("@ConcurrencyLimit has no effect: no doer method runs in concurrency domain \""
+                            + domainName + "\".", element);
                 }
             }
         });
@@ -448,60 +433,58 @@ public class DoerProcessor extends AbstractProcessor {
 
     private void loadLoaders(RoundEnvironment roundEnv) {
         for (Element element : roundEnv.getElementsAnnotatedWith(TaskDataLoader.class)) {
-            if (!checkIsMethod(element, TaskDataLoader.class.getName())) {
+            ExecutableType method = methodType(element, TaskDataLoader.class.getName());
+            if (method == null) {
                 continue;
             }
-            ExecutableType executableType = (ExecutableType) element.asType();
-            List<? extends TypeMirror> args = executableType.getParameterTypes();
+            List<? extends TypeMirror> args = method.getParameterTypes();
             if (args.size() != 1 || !Task.class.getName().equals(args.get(0).toString())) {
-                processingEnv.getMessager().printMessage(Kind.ERROR, TaskDataLoader.class.getName()
-                        + " should have exactly 1 argument of type " + Task.class.getName(), element);
+                error(TaskDataLoader.class.getName() + " should have exactly 1 argument of type "
+                        + Task.class.getName(), element);
                 continue;
             }
-            loaders.add(new TaskDataLoaderInfo(ownerClassName(element), element.getSimpleName().toString(),
-                    executableType.getReturnType().toString()));
+            loaders.add(new TypedMethodInfo(ownerClassName(element), element.getSimpleName().toString(),
+                    method.getReturnType().toString()));
         }
     }
 
     private void loadSavers(RoundEnvironment roundEnv) {
         for (Element element : roundEnv.getElementsAnnotatedWith(TaskDataSaver.class)) {
-            if (!checkIsMethod(element, TaskDataSaver.class.getName())) {
+            ExecutableType method = methodType(element, TaskDataSaver.class.getName());
+            if (method == null) {
                 continue;
             }
-            ExecutableType executableType = (ExecutableType) element.asType();
-            List<? extends TypeMirror> args = executableType.getParameterTypes();
+            List<? extends TypeMirror> args = method.getParameterTypes();
             if (args.size() != 2 || !Task.class.getName().equals(args.get(0).toString())
-                    || executableType.getReturnType().getKind() != TypeKind.VOID) {
-                processingEnv.getMessager().printMessage(Kind.ERROR, TaskDataSaver.class.getName()
+                    || method.getReturnType().getKind() != TypeKind.VOID) {
+                error(TaskDataSaver.class.getName()
                         + " should have exactly 2 arguments: Task and the task data to save, and should return void.",
                         element);
                 continue;
             }
-            savers.add(new TaskDataSaverInfo(ownerClassName(element), element.getSimpleName().toString(),
+            savers.add(new TypedMethodInfo(ownerClassName(element), element.getSimpleName().toString(),
                     args.get(1).toString()));
         }
     }
 
     private void loadExceptionDescribers(RoundEnvironment roundEnv) {
-        Messager messager = processingEnv.getMessager();
         Types types = processingEnv.getTypeUtils();
         for (Element element : roundEnv.getElementsAnnotatedWith(ExceptionDescriber.class)) {
-            if (!checkIsMethod(element, ExceptionDescriber.class.getName())) {
+            ExecutableType method = methodType(element, ExceptionDescriber.class.getName());
+            if (method == null) {
                 continue;
             }
-            ExecutableType executableType = (ExecutableType) element.asType();
-            List<? extends TypeMirror> args = executableType.getParameterTypes();
+            List<? extends TypeMirror> args = method.getParameterTypes();
             if (args.size() != 3 || !Task.class.getName().equals(args.get(0).toString())
                     || !"jakarta.json.JsonObjectBuilder".equals(args.get(2).toString())
-                    || executableType.getReturnType().getKind() != TypeKind.VOID) {
-                messager.printMessage(Kind.ERROR,
-                        ExceptionDescriber.class.getName()
-                                + " should mark void method that have exactly 3 arguments: Task, Exception and JsonObjectBuilder\n"
-                                + "Example:\n"
-                                + "@" + ExceptionDescriber.class.getName() + "\n"
-                                + "public void myDescriber(Task task, Exception e, JsonObjectBuilder builder) {\n"
-                                + "}",
-                        element);
+                    || method.getReturnType().getKind() != TypeKind.VOID) {
+                error("@" + ExceptionDescriber.class.getSimpleName() + " method should return void and have exactly "
+                        + "3 parameters: Task, the exception type it describes (Throwable or any subclass of it) "
+                        + "and JsonObjectBuilder.\n"
+                        + "Example:\n"
+                        + "@" + ExceptionDescriber.class.getName() + "\n"
+                        + "public void describeSqlException(Task task, SQLException e, JsonObjectBuilder builder) {\n"
+                        + "}", element);
                 continue;
             }
             String className = ownerClassName(element);
@@ -511,7 +494,7 @@ public class DoerProcessor extends AbstractProcessor {
             if (types.asElement(exType) instanceof TypeElement exElement && exElement.getKind() == ElementKind.CLASS) {
                 typeParents.addAll(extractParentClasses(types, exElement.getSuperclass()));
             } else {
-                messager.printMessage(Kind.ERROR, "Second parameter of @" + ExceptionDescriber.class.getSimpleName()
+                error("Second parameter of @" + ExceptionDescriber.class.getSimpleName()
                         + " annotated method " + methodName + " should be of Throwable type", element);
             }
             describers.add(new ExceptionDescriberInfo(className, methodName, exType.toString(), typeParents));
@@ -540,10 +523,7 @@ public class DoerProcessor extends AbstractProcessor {
         return result;
     }
 
-    // ---------------------------------------------------------------------------------------------------------
-    // _GeneratedDoerService
-
-    void generateDoerService() throws IOException {
+    private void generateDoerService() throws IOException {
         Map<String, String> shortcuts = createTypeShortcuts();
         Map<String, String> fieldNames = createFieldNames();
         List<String> beans = beanClassNames().distinct().sorted().toList();
@@ -723,7 +703,7 @@ public class DoerProcessor extends AbstractProcessor {
     private void generateLoad(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
         out.println("    @Override");
         out.println("    protected Object _load(Task task, Class<?> type) throws Exception {");
-        for (TaskDataLoaderInfo loader : firstByType(loaders).values()) {
+        for (TypedMethodInfo loader : firstByType(loaders).values()) {
             if (isPlainClassType(loader.type())) {
                 out.println("        if (" + shortcuts.get(loader.type()) + ".class.equals(type)) {");
                 out.println("            return " + fieldNames.get(loader.className()) + "." + loader.methodName()
@@ -738,7 +718,7 @@ public class DoerProcessor extends AbstractProcessor {
     private void generateSave(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
         out.println("    @Override");
         out.println("    protected void _save(Task task, Class<?> type, Object data) throws Exception {");
-        for (TaskDataSaverInfo saver : firstByType(savers).values()) {
+        for (TypedMethodInfo saver : firstByType(savers).values()) {
             if (isPlainClassType(saver.type())) {
                 String typeName = shortcuts.get(saver.type());
                 out.println("        if (" + typeName + ".class.equals(type)) {");
@@ -752,8 +732,8 @@ public class DoerProcessor extends AbstractProcessor {
     }
 
     private void generateRunTask(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
-        Map<String, TaskDataLoaderInfo> loadersByType = firstByType(loaders);
-        Map<String, TaskDataSaverInfo> saversByType = firstByType(savers);
+        Map<String, TypedMethodInfo> loadersByType = firstByType(loaders);
+        Map<String, TypedMethodInfo> saversByType = firstByType(savers);
         Set<String> missingLoadersReported = new HashSet<>();
         int maxNumberOfParams = doerMethods.stream().mapToInt(m -> m.parameterTypes.size()).max().orElse(0);
 
@@ -762,15 +742,16 @@ public class DoerProcessor extends AbstractProcessor {
         out.println("    public void runTask(Task task) throws Exception {");
         out.println("        Object[] args = new Object[" + maxNumberOfParams + "];");
         out.println("        String status = task.getStatus();");
-        List<DoerMethodInfo> sortedDoerMethods = new ArrayList<>(doerMethods);
-        sortedDoerMethods.sort(Comparator.comparing((DoerMethodInfo m) -> m.domainName)
-                .thenComparing(m -> m.methodName)
-                .thenComparing(m -> m.parameterTypes.toString()));
+        List<DoerMethodInfo> sortedDoerMethods = doerMethods.stream()
+                .sorted(Comparator.comparing((DoerMethodInfo m) -> m.domainName)
+                        .thenComparing(m -> m.methodName)
+                        .thenComparing(m -> m.parameterTypes.toString()))
+                .toList();
         for (int i = 0; i < sortedDoerMethods.size(); i++) {
             DoerMethodInfo info = sortedDoerMethods.get(i);
             List<String> params = info.parameterTypes;
             String condition = info.acceptList.stream()
-                    .map(a -> "\"" + escape(a.status()) + "\".equals(status)")
+                    .map(a -> jstr(a.status()) + ".equals(status)")
                     .collect(Collectors.joining(" ||\n                "));
             out.println((i == 0 ? "       " : " else") + " if (" + condition + ") {");
 
@@ -780,18 +761,17 @@ public class DoerProcessor extends AbstractProcessor {
                 if (paramClass.equals(Task.class.getName())) {
                     continue;
                 }
-                TaskDataLoaderInfo loader = loadersByType.get(paramClass);
+                TypedMethodInfo loader = loadersByType.get(paramClass);
                 if (loader != null) {
                     out.println("                    args[" + p + "] = " + fieldNames.get(loader.className()) + "."
                             + loader.methodName() + "(task);");
                     continue;
                 }
                 if (missingLoadersReported.add(paramClass)) {
-                    processingEnv.getMessager().printMessage(Kind.ERROR,
-                            "No @" + TaskDataLoader.class.getSimpleName() + " found for argument " + p + "\n"
-                                    + "Please declare loader method:\n"
-                                    + "@" + TaskDataLoader.class.getName() + "\n"
-                                    + "public " + paramClass + " method(" + Task.class.getName() + " task) {}\n",
+                    error("No @" + TaskDataLoader.class.getSimpleName() + " found for argument " + p + "\n"
+                            + "Please declare loader method:\n"
+                            + "@" + TaskDataLoader.class.getName() + "\n"
+                            + "public " + paramClass + " method(" + Task.class.getName() + " task) {}\n",
                             info.element);
                 }
                 out.println("                    args[" + p + "] = null;");
@@ -808,17 +788,16 @@ public class DoerProcessor extends AbstractProcessor {
             out.println("                    return null;");
             out.println("                }, () -> {");
             for (int p = params.size() - 1; p >= 0; p--) {
-                TaskDataSaverInfo saver = saversByType.get(params.get(p));
+                TypedMethodInfo saver = saversByType.get(params.get(p));
                 if (saver != null && !params.get(p).equals(Task.class.getName())) {
                     out.println("                    " + fieldNames.get(saver.className()) + "." + saver.methodName()
                             + "(task, (" + shortcuts.get(params.get(p)) + ")args[" + p + "]);");
                 }
             }
-            String fallbackStatusLiteral = info.fallbackStatus == null ? "null" : jstr(info.fallbackStatus);
             out.println("                    return null;");
-            out.println("                }, \"" + simpleName(info.className) + "\", \"" + info.methodName + "\",");
+            out.println("                }, " + jstr(simpleName(info.className)) + ", " + jstr(info.methodName) + ",");
             out.println("                    " + createDurationLiteral(info.retryDuration) + ", "
-                    + fallbackStatusLiteral + ");");
+                    + jstr(info.fallbackStatus) + ");");
             out.print("        }");
         }
         out.println();
@@ -846,9 +825,6 @@ public class DoerProcessor extends AbstractProcessor {
         });
         out.println("    }");
     }
-
-    // ---------------------------------------------------------------------------------------------------------
-    // SQL
 
     private void generateCreateSchemaSql() throws IOException {
         try (PrintWriter out = openResource("CreateSchema.sql")) {
@@ -888,7 +864,7 @@ public class DoerProcessor extends AbstractProcessor {
      * failing statuses (one select per retry interval); finally all in-progress tasks. Each select except the
      * last has a LIMIT parameter, in this order.
      */
-    void generateSelectTaskSql() throws IOException {
+    private void generateSelectTaskSql() throws IOException {
         List<String> chunks = new ArrayList<>();
         for (List<DoerMethodInfo> methods : groupMethodsByDomain(doerMethods).values()) {
             List<String> selects = new ArrayList<>();
@@ -944,14 +920,11 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    String createSqlValues(List<String> values) {
+    private static String createSqlValues(List<String> values) {
         return values.stream()
                 .map(v -> "  '" + v.replace("'", "''") + "'")
                 .collect(Collectors.joining(",\n"));
     }
-
-    // ---------------------------------------------------------------------------------------------------------
-    // doer.json and doer.dot
 
     private void generateDoerJson() throws IOException {
         try (PrintWriter out = openResource("doer.json")) {
@@ -972,8 +945,7 @@ public class DoerProcessor extends AbstractProcessor {
                     .toList());
             out.println("    ],");
             out.println("    \"doer_methods\": [");
-            List<DoerMethodInfo> sortedMethods = new ArrayList<>(doerMethods);
-            sortedMethods.sort(DoerMethodInfo.BY_SIGNATURE);
+            List<DoerMethodInfo> sortedMethods = doerMethods.stream().sorted(DoerMethodInfo.BY_SIGNATURE).toList();
             for (int i = 0; i < sortedMethods.size(); i++) {
                 printDoerMethodJson(out, sortedMethods.get(i));
                 out.println("        }" + (i < sortedMethods.size() - 1 ? "," : ""));
@@ -986,7 +958,9 @@ public class DoerProcessor extends AbstractProcessor {
             printTypedMethods(out, new TreeMap<>(firstByType(savers)).values());
             out.println("    ],");
             out.println("    \"exception_describers\": [");
-            printTypedMethods(out, describers);
+            printTypedMethods(out, describers.stream()
+                    .map(d -> new TypedMethodInfo(d.className(), d.methodName(), d.type()))
+                    .toList());
             out.println("    ]");
             out.println("}");
         }
@@ -1034,7 +1008,7 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    private void printTypedMethods(PrintWriter out, Collection<? extends TypedMethodInfo> methods) {
+    private void printTypedMethods(PrintWriter out, Collection<TypedMethodInfo> methods) {
         printJsonEntries(out, methods.stream()
                 .map(m -> String.format("        {%s: %s, %s: %s, %s: %s}",
                         jstr("type"), jstr(m.type()),
@@ -1079,8 +1053,7 @@ public class DoerProcessor extends AbstractProcessor {
                         ];
                     """);
 
-            List<DoerMethodInfo> sortedDoerMethods = new ArrayList<>(doerMethods);
-            sortedDoerMethods.sort(DoerMethodInfo.BY_SIGNATURE);
+            List<DoerMethodInfo> sortedDoerMethods = doerMethods.stream().sorted(DoerMethodInfo.BY_SIGNATURE).toList();
 
             Map<DoerMethodInfo, String> methodNodeNames = new HashMap<>();
             int domainIndex = 0;
@@ -1144,8 +1117,9 @@ public class DoerProcessor extends AbstractProcessor {
             out.println("edge [arrowhead=\"vee\",fontname=\"Helvetica\",fontsize=\"8\",penwidth=0.8];");
             for (DoerMethodInfo method : sortedDoerMethods) {
                 String methodNodeName = methodNodeNames.get(method);
-                List<Accept> acceptList = new ArrayList<>(method.acceptList);
-                acceptList.sort(Comparator.comparing(Accept::status));
+                List<Accept> acceptList = method.acceptList.stream()
+                        .sorted(Comparator.comparing(Accept::status))
+                        .toList();
                 for (Accept accept : acceptList) {
                     String statusNodeName = statusNodeNames.get(accept.status());
                     if (accept.delay() != null) {
@@ -1188,8 +1162,13 @@ public class DoerProcessor extends AbstractProcessor {
         return method.hasRetryPolicy() && method.retryDurationText != null;
     }
 
-    // ---------------------------------------------------------------------------------------------------------
-    // Helpers
+    private void error(String message, Element element) {
+        processingEnv.getMessager().printMessage(Kind.ERROR, message, element);
+    }
+
+    private void warning(String message, Element element) {
+        processingEnv.getMessager().printMessage(Kind.WARNING, message, element);
+    }
 
     private PrintWriter openResource(String name) throws IOException {
         return new PrintWriter(processingEnv.getFiler()
@@ -1228,8 +1207,8 @@ public class DoerProcessor extends AbstractProcessor {
     }
 
     /** The first method for each type, in the order of the methods. */
-    private static <T extends TypedMethodInfo> Map<String, T> firstByType(List<T> methods) {
-        Map<String, T> result = new LinkedHashMap<>();
+    private static Map<String, TypedMethodInfo> firstByType(List<TypedMethodInfo> methods) {
+        Map<String, TypedMethodInfo> result = new LinkedHashMap<>();
         methods.forEach(m -> result.putIfAbsent(m.type(), m));
         return result;
     }
@@ -1237,13 +1216,13 @@ public class DoerProcessor extends AbstractProcessor {
     /** Classes injected into the generated service, with duplicates. */
     private Stream<String> beanClassNames() {
         return Stream.of(doerMethods.stream().map(m -> m.className),
-                        loaders.stream().map(TaskDataLoaderInfo::className),
-                        savers.stream().map(TaskDataSaverInfo::className),
+                        loaders.stream().map(TypedMethodInfo::className),
+                        savers.stream().map(TypedMethodInfo::className),
                         describers.stream().map(ExceptionDescriberInfo::className))
                 .flatMap(s -> s);
     }
 
-    protected String createDurationLiteral(Duration duration) {
+    private static String createDurationLiteral(Duration duration) {
         if (duration == null) {
             return "null";
         } else if (duration.isZero()) {
@@ -1260,7 +1239,7 @@ public class DoerProcessor extends AbstractProcessor {
         return "Duration.ofSeconds(" + seconds + ")";
     }
 
-    protected Duration parseDuration(String duration) {
+    private static Duration parseDuration(String duration) {
         Matcher matcher = DURATION_PATTERN.matcher(duration);
         if (!matcher.matches()) {
             throw new IllegalArgumentException("Failed to parse duration");
@@ -1285,8 +1264,8 @@ public class DoerProcessor extends AbstractProcessor {
         Stream.of(beanClassNames(),
                         doerMethods.stream().flatMap(m -> m.parameterTypes.stream()),
                         describers.stream().map(ExceptionDescriberInfo::type),
-                        Stream.concat(loaders.stream().map(TaskDataLoaderInfo::type),
-                                savers.stream().map(TaskDataSaverInfo::type)).filter(this::isPlainClassType))
+                        Stream.concat(loaders.stream().map(TypedMethodInfo::type),
+                                savers.stream().map(TypedMethodInfo::type)).filter(this::isPlainClassType))
                 .flatMap(s -> s)
                 .filter(type -> !shortcuts.containsKey(type))
                 .forEach(type -> {
