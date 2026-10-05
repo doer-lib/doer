@@ -1,8 +1,7 @@
 package com.doer.processor;
 
 import com.doer.AcceptStatus;
-import com.doer.DoerConcurrency;
-import com.doer.OnException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -14,19 +13,29 @@ class DoerMethodInfo {
     List<String> parameterTypes = new ArrayList<>();
 
     List<AcceptStatus> acceptList = new ArrayList<>();
-    OnException onException;
-    DoerConcurrency concurrency;
+
+    /** Null when the method has no {@code @RetryPolicy} (defaults are used). */
+    String retryIntervalText;
+    String retryDurationText;
+    Duration retryInterval;
+    /** Null means retry forever. */
+    Duration retryDuration;
+    /** Status set when retryDuration has passed; null means the status is set to null. */
+    String fallbackStatus;
+
+    /** Resolved concurrency domain name. */
+    String domainName;
 
     List<String> emitList = new ArrayList<>();
 
     Element element;
 
+    boolean hasRetryPolicy() {
+        return retryIntervalText != null;
+    }
+
     public String getDomainName() {
-        if (concurrency == null) {
-            return className;
-        } else {
-            return className + "." + methodName;
-        }
+        return domainName;
     }
 
     @Override

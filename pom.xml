@@ -7,7 +7,7 @@
 
     <groupId>io.github.doer-lib</groupId>
     <artifactId>doer</artifactId>
-    <version>0.0.17-SNAPSHOT</version>
+    <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
     <name>io.github.doer-lib:doer</name>

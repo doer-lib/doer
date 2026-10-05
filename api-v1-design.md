@@ -1,6 +1,6 @@
 # Public API names for v1
 
-Status: proposal
+Status: implemented
 
 v1 is the last chance to rename public types without a deprecation cycle. This document lists every public type in `com.doer`, the package users code against, points out where the current names are inconsistent, and proposes one naming scheme for all of them.
 
@@ -154,16 +154,16 @@ Usage:
 - **Field names.** Inside `@RetryPolicy` the `retry` prefix is redundant, so the fields are just `interval` and `duration`. Both use the plain duration format of `AcceptStatus.delay`, which replaces the `"every 5s during 10s"` mini-language.
 - **`interval` is required.** A retry policy without an interval says nothing, and a default would hide the choice.
 - **Compile-time check:** `fallbackStatus` without `duration` is an error, because it would never be used. Today `setStatus` is required even when there is no `during`, and then it is silently ignored.
-- **`duration` without `fallbackStatus`** sets the status to `null` when the duration has passed, so the task stops being processed. This is the same behaviour that v1 will probably use for methods without the annotation (see below), with the interval and duration chosen by the user.
+- **`duration` without `fallbackStatus`** sets the status to `null` when the duration has passed, so the task stops being processed. This is the same behaviour that v1 uses for methods without the annotation (see below), with the interval and duration chosen by the user.
 - `fallbackStatus` replaces `setStatus`: it says when the status is used, and `setStatus` reads like a method call.
 
-### Methods without `@RetryPolicy` (probable behaviour change)
+### Methods without `@RetryPolicy` (behaviour change)
 
 In 0.x, a doer method without `@OnException` is retried every 5 minutes forever.
 
-In v1 it will probably be retried for a fixed time only (interval and time to be decided). After that, Doer sets the task status to `null`. No doer method accepts `null`, so the task stops being processed. Like any status change, this one is written to `task_logs`.
+In v1 it is retried every 5 minutes for 1 day. After that, Doer sets the task status to `null`. No doer method accepts `null`, so the task stops being processed. Like any status change, this one is written to `task_logs`. The processor warns about every doer method without `@RetryPolicy`.
 
-Retrying forever then has to be asked for explicitly. To keep the 0.x behaviour, annotate the method with:
+Retrying forever has to be asked for explicitly. To keep the 0.x behaviour, annotate the method with:
 
 ```java
 @RetryPolicy(interval = "5m")    // no duration: retry every 5 minutes, forever
@@ -218,7 +218,7 @@ Without `@ConcurrencyGroup`, every v1 program gets the same domains as in 0.x.
 ### Joining a domain
 
 - **Methods and classes with the same `@ConcurrencyGroup` share one domain**: one limit, one set of queues, across all of them.
-- **An explicit name may equal a derived name.** `@ConcurrencyGroup("com.example.OrderProcessor")` on a method of another class joins the default domain of class `com.example.OrderProcessor`. This is intended, and it is the reason the example above uses a class FQN.
+- **An explicit name may equal a derived name, but only to join an existing implicit domain.** `@ConcurrencyGroup("com.example.OrderProcessor")` on a method of another class joins the default domain of class `com.example.OrderProcessor`. This is intended, and it is the reason the example above uses a class FQN. If that implicit domain does not exist (the class declares its own `@ConcurrencyGroup`, or none of its doer methods runs in the class domain), compilation fails. The same applies to a `Class.method` name: that method must be a doer method with its own `@ConcurrencyLimit` and no `@ConcurrencyGroup`.
 - **The limit can be declared once.** It is enough to put `@ConcurrencyLimit` on one member of the domain; the others join it with `@ConcurrencyGroup` alone.
 - **If the limit is declared in several places, it must be the same.** If two `@ConcurrencyLimit` annotations apply to the same domain with different values, compilation fails and the error lists all of them. Shared constants keep them in sync:
 
@@ -264,6 +264,19 @@ No public method returns a `ConcurrencyDomain`, so it is public API that nobody 
 
 If it stays public, add `DoerService.getConcurrencyDomains()` and rename `getValue()` to `getLimit()`, so the runtime view matches `@ConcurrencyLimit`.
 
+## Compile-time checks
+
+The processor fails compilation when:
+
+- a status in `@AcceptStatus.value` or `@RetryPolicy.fallbackStatus` is empty (an empty `fallbackStatus` means `null` and is allowed), starts or ends with whitespace, or is longer than 50 characters (the size of `tasks.status`);
+- `@AcceptStatus.delay`, `@RetryPolicy.interval` or `@RetryPolicy.duration` is not a duration;
+- `@RetryPolicy.fallbackStatus` is set without `duration`;
+- two `@ConcurrencyLimit` annotations of one domain have different values, or a value is less than 1;
+- `@ConcurrencyGroup` is empty, or uses a class or method name whose implicit domain does not exist;
+- a doer method has a parameter of a type without a `@TaskDataLoader` (reported once per type).
+
+It warns about every doer method without `@RetryPolicy`, and about a `@ConcurrencyLimit` whose domain has no doer methods.
+
 ## Updater interfaces
 
 ```java
@@ -297,7 +310,7 @@ There is no common base exception. `DoerService` methods also throw `SQLExceptio
 ## Migration
 
 - All renames are source-incompatible, which v1 allows. Annotations have `CLASS` retention and the generated service is regenerated on recompilation, so for them there is nothing to keep at runtime. The interfaces are runtime types: a library compiled against 0.x that calls `facilitateCoordinatedUpdate` with `DoerTaskConsumer` or `DoerUpdater` fails at runtime with v1 until it is recompiled.
-- If v1 stops retrying unannotated doer methods forever (see "Methods without `@RetryPolicy`"), every doer method that relies on endless retries needs `@RetryPolicy(interval = "5m")`. The renames break compilation, but this change does not, so the processor should warn about every doer method without `@RetryPolicy` (in the last 0.x release about methods without `@OnException`, in v1 about methods without `@RetryPolicy`). The release notes must call it out as well.
+- v1 stops retrying unannotated doer methods after 1 day (see "Methods without `@RetryPolicy`"), so every doer method that relies on endless retries needs `@RetryPolicy(interval = "5m")`. The renames break compilation, but this change does not, so the processor warns about every doer method without `@RetryPolicy`. The release notes must call it out as well.
 - Processor error messages that name annotations must use the new names (they currently also say `DoerParameterLoader`, a name that does not exist).
 - Optional: in the last 0.x release, have the processor accept both old and new annotations and warn on the old ones. That gives users one release to migrate with compiler guidance.
 - The `doer.json` format changes, and tools that read it need updating with the release:
