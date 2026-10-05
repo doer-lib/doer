@@ -238,7 +238,7 @@ public class QuarkusITCase {
     }
 
     @Test
-    void unload_should_happen_in_the_same_transaction_with_task_stop() {
+    void save_should_happen_in_the_same_transaction_with_task_stop() {
         resetServer();
         long taskId = pushTask("Car need polishing");
         assertEquals("Car is polished", waitTaskStatus(taskId, "Car is polished"));
@@ -327,7 +327,7 @@ public class QuarkusITCase {
     }
 
     @Test
-    void coordinated_update_should_load_and_unload_in_the_same_transaction() {
+    void coordinated_update_should_load_and_save_in_the_same_transaction() {
         resetServer();
         long taskId = pushTask("Parked");
 
@@ -456,7 +456,7 @@ public class QuarkusITCase {
     }
 
     @Test
-    void on_exception_extra_json_appender_should_append_to_ext() throws Exception {
+    void exception_describer_should_add_details_to_extra_json() throws Exception {
         resetServer();
         long taskId1 = pushTask("Should send email");
         long taskId2 = pushTask("Should check email");
@@ -491,7 +491,7 @@ public class QuarkusITCase {
     }
 
     @Test
-    void onException_should_setStatus_on_retry_timeout_elapsed() throws Exception {
+    void retryPolicy_should_set_fallbackStatus_when_duration_elapsed() throws Exception {
         resetServer();
         long taskId = pushTask("Should check email");
         Instant deadline = Instant.now().plus(Duration.ofSeconds(11));

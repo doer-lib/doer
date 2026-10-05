@@ -3,10 +3,10 @@ package com.doer;
 import java.time.Duration;
 import java.util.List;
 
-public interface ConcurrencyDomain {
+interface ConcurrencyDomain {
     String getName();
 
-    int getValue();
+    int getLimit();
 
     List<String> getStatuses();
 

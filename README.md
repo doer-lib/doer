@@ -60,7 +60,7 @@ This example is part of the **Doer Tutorial** [https://github.com/doer-lib/doert
 
 ```java
 @AcceptStatus(GOODS_RESERVED)
-@OnException(retry = "every 5s during 10s", setStatus = PAYMENT_FAILED)
+@RetryPolicy(interval = "5s", duration = "10s", fallbackStatus = PAYMENT_FAILED)
 public void payOrder(Task task, Order order) {
     Check check = bank.processPayment(order);
     order.setPaymentTransactionId(check.transactionId());
@@ -74,7 +74,7 @@ public void reportNoPaymentForOrder(Task task, Order order) {
 }
 
 @AcceptStatus(ORDER_PAID)
-@OnException(retry = "every 5s during 5s", setStatus = ORDER_NOT_SHIPPED)
+@RetryPolicy(interval = "5s", duration = "5s", fallbackStatus = ORDER_NOT_SHIPPED)
 public void shipOrder(Task task, Order order) {
     TrackId trackId = warehouse.shipTheOrder(order);
     order.setDeliveryTrackingId(trackId.token());

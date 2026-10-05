@@ -1,7 +1,10 @@
 package com.doer.processor;
 
-class DoerLoaderInfo {
+import java.util.List;
+
+class ExceptionDescriberInfo {
     String type;
+    List<String> typeParents;
     String className;
     String methodName;
 

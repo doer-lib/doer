@@ -178,7 +178,7 @@ public class GeneratorITCase {
                 "package demo.test;\n" +
                 "import com.doer.*;\n" +
                 "public class DemoClassLoader {\n" +
-                "    @DoerLoader\n" +
+                "    @TaskDataLoader\n" +
                 "    public DemoClass loadDemoClass(Task task) {\n" +
                 "        System.out.println(\"---load-DemoClass-for-\" + task.getStatus() + \"---\");\n"
                 +
@@ -227,7 +227,7 @@ public class GeneratorITCase {
     }
 
     @Test
-    void javac__should_use_unloader() throws Exception {
+    void javac__should_use_saver() throws Exception {
         String code = "package demo.test;\n" +
                 "import com.doer.*;\n" +
                 "import java.sql.*;\n" +
@@ -257,12 +257,12 @@ public class GeneratorITCase {
                 "    public void doerMethod(Task task, String data) {\n" +
                 "        System.out.println(\"---\" + task.getStatus() + \"---\" + data + \"---\");\n" +
                 "    }\n" +
-                "    @DoerLoader\n" +
+                "    @TaskDataLoader\n" +
                 "    public String loaderMethod(Task task) {\n" +
                 "        System.out.println(\"---load-String-for-\" + task.getStatus() + \"---\");\n" +
                 "        return \"d2\";\n" +
                 "    }\n" +
-                "    @DoerUnloader\n" +
+                "    @TaskDataSaver\n" +
                 "    public void unloderMethod(Task task, String data) {\n" +
                 "        System.out.println(\"---unload-String-for-\" + task.getStatus() + \"---\" + data + \"---\");\n"
                 +
@@ -280,7 +280,7 @@ public class GeneratorITCase {
     }
 
     @Test
-    void javac__should_generate_load_and_unload() throws Exception {
+    void javac__should_generate_load_and_save() throws Exception {
         String code = "package demo.test;\n" +
                 "import com.doer.*;\n" +
                 "import com.doer.generated._GeneratedDoerService;\n" +
@@ -288,7 +288,7 @@ public class GeneratorITCase {
                 "    public static void main(String[] args) throws Exception {\n" +
                 "        var doer = new _GeneratedDoerService() {\n" +
                 "            void test(Task task, Class<?> type) throws Exception {\n" +
-                "                _unload(task, type, _load(task, type));\n" +
+                "                _save(task, type, _load(task, type));\n" +
                 "            }\n" +
                 "        };\n" +
                 "        doer._inject_main(new Main());\n" +
@@ -301,12 +301,12 @@ public class GeneratorITCase {
                 "            System.out.println(\"---\" + e.getMessage() + \"---\");\n" +
                 "        }\n" +
                 "    }\n" +
-                "    @DoerLoader\n" +
+                "    @TaskDataLoader\n" +
                 "    public String loaderMethod(Task task) {\n" +
                 "        System.out.println(\"---load-String-for-\" + task.getStatus() + \"---\");\n" +
                 "        return \"d2\";\n" +
                 "    }\n" +
-                "    @DoerUnloader\n" +
+                "    @TaskDataSaver\n" +
                 "    public void unloderMethod(Task task, String data) {\n" +
                 "        System.out.println(\"---unload-String-\" + data + \"---\");\n" +
                 "    }\n" +
@@ -319,7 +319,7 @@ public class GeneratorITCase {
         String result = exec(0, dir, "java -cp ? demo.test.Main", doerJackartaClasses);
 
         assertEquals("---load-String-for-A---\n---unload-String-d2---\n" +
-                "---No @DoerLoader for java.lang.Integer---\n", result);
+                "---No @TaskDataLoader for java.lang.Integer---\n", result);
     }
 
     @Test
@@ -453,7 +453,7 @@ public class GeneratorITCase {
                 "import com.doer.*;\n" +
                 "import demo.test.Driver;\n" +
                 "public class Car {\n" +
-                "    @DoerLoader\n" +
+                "    @TaskDataLoader\n" +
                 "    public Driver inviteDriver(Task task) {\n" +
                 "        System.out.println(\" Inviting driver\");\n" +
                 "        return new Driver();\n" +
@@ -476,12 +476,12 @@ public class GeneratorITCase {
                 "        System.out.println(\"  Washing the car (\" + task.getStatus() + \")\");\n" +
                 "        task.setStatus(\"Car wash complete\");\n" +
                 "    }\n" +
-                "    @DoerLoader\n" +
+                "    @TaskDataLoader\n" +
                 "    public Soap loadSoap(Task task) {\n" +
                 "        System.out.println(\" Loading soap\");\n" +
                 "        return new Soap();\n" +
                 "    }\n" +
-                "    @DoerUnloader\n" +
+                "    @TaskDataSaver\n" +
                 "    public void putCarToReadyQueue(Task task, Car car) {\n" +
                 "        System.out.println(\" Putting car in ready queue\");\n" +
                 "    }\n" +
@@ -497,12 +497,12 @@ public class GeneratorITCase {
                 "        System.out.println(\"  Drinking coffee\");\n" +
                 "        task.setStatus(\"Driver is happy with the coffee\");\n" +
                 "    }\n" +
-                "    @DoerLoader\n" +
+                "    @TaskDataLoader\n" +
                 "    public Washer callFreeWasher(Task task) {\n" +
                 "        System.out.println(\" Washer! Please help to new customer!\");\n" +
                 "        return new Washer();\n" +
                 "    }\n" +
-                "    @DoerUnloader\n" +
+                "    @TaskDataSaver\n" +
                 "    public void releaseFreeWasher(Task task, Washer washer) {\n" +
                 "        System.out.println(\" Thank you, washer!\");\n" +
                 "    }\n" +
@@ -513,12 +513,12 @@ public class GeneratorITCase {
                 "package demo.test;\n" +
                 "import com.doer.*;\n" +
                 "public class CheckIn {\n" +
-                "    @DoerLoader\n" +
+                "    @TaskDataLoader\n" +
                 "    public Car takeACar(Task task) {\n" +
                 "        System.out.println(\" Taking customers car\");\n" +
                 "        return new Car();\n" +
                 "    }\n" +
-                "    @DoerUnloader\n" +
+                "    @TaskDataSaver\n" +
                 "    public void checkoutDriver(Task task, Driver driver) {\n" +
                 "        System.out.println(\" Checkout.\");\n" +
                 "    }\n" +
@@ -530,11 +530,11 @@ public class GeneratorITCase {
                 "import com.doer.*;\n" +
                 "import jakarta.json.JsonObjectBuilder;\n" +
                 "public class ExceptionMapper {\n" +
-                "    @DoerExtraJson\n" +
+                "    @ExceptionDescriber\n" +
                 "    public void appendException1(Task task, Exception ex, JsonObjectBuilder builder) {\n" +
                 "        builder.add(\"appendException1\", 1);\n" +
                 "    }\n" +
-                "    @DoerExtraJson\n" +
+                "    @ExceptionDescriber\n" +
                 "    public void appendRuntimeException2(Task task, RuntimeException ex, JsonObjectBuilder builder) {\n" +
                 "        builder.add(\"appendRuntimeException2\", 2);\n" +
                 "    }\n" +
@@ -833,6 +833,230 @@ public class GeneratorITCase {
         List<String> list = with(doerJson)
                 .get("doer_methods[0].emits");
         assertEquals(Arrays.asList("ST1_1_value", "ST2_2_value"), list);
+    }
+
+    @Test
+    void javac__should_list_all_concurrency_domains() throws Exception {
+        String orders = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "@ConcurrencyGroup(\"orders\")\n" +
+                "@ConcurrencyLimit(5)\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void accept(Task task) {}\n" +
+                "}\n" +
+                "";
+        String payments = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Payments {\n" +
+                "    @ConcurrencyGroup(\"orders\")\n" +
+                "    @AcceptStatus(\"B\")\n" +
+                "    @RetryPolicy(interval = \"5s\", duration = \"10 min\", fallbackStatus = \"Payment failed\")\n" +
+                "    public void pay(Task task) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"C\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void refund(Task task) {}\n" +
+                "}\n" +
+                "";
+        String shipping = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Shipping {\n" +
+                "    @ConcurrencyGroup(\"demo.test.Payments\")\n" +
+                "    @AcceptStatus(\"D\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void ship(Task task) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"E\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void track(Task task) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), orders.getBytes(UTF_8));
+        Files.write(dir.resolve("Payments.java"), payments.getBytes(UTF_8));
+        Files.write(dir.resolve("Shipping.java"), shipping.getBytes(UTF_8));
+
+        javac(0, "Orders.java", "Payments.java", "Shipping.java");
+
+        File doerJson = new File(dir.toFile(), "classes/com/doer/generated/doer.json");
+        assertEquals(Arrays.asList("demo.test.Payments", "demo.test.Shipping", "orders"),
+                with(doerJson).getList("domains.name"));
+        assertEquals(Arrays.asList(2, 2, 5), with(doerJson).getList("domains.limit"));
+        assertEquals(Arrays.asList(false, true, false), with(doerJson).getList("domains.implicit"));
+        assertEquals(Arrays.asList("orders", "orders", "demo.test.Payments", "demo.test.Payments",
+                "demo.test.Shipping"), with(doerJson).getList("doer_methods.domain"));
+        assertEquals("5s", with(doerJson).getString("doer_methods[1].interval"));
+        assertEquals("10 min", with(doerJson).getString("doer_methods[1].duration"));
+        assertEquals("Payment failed", with(doerJson).getString("doer_methods[1].fallback_status"));
+    }
+
+    @Test
+    void javac__should_fail_on_different_limits_of_one_domain() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "@ConcurrencyGroup(\"orders\")\n" +
+                "@ConcurrencyLimit(3)\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void accept(Task task) {}\n" +
+                "\n" +
+                "    @ConcurrencyGroup(\"orders\")\n" +
+                "    @ConcurrencyLimit(5)\n" +
+                "    @AcceptStatus(\"B\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void pay(Task task) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        String messages = javac(1, "Orders.java");
+
+        assertTrue(messages.contains("Different @ConcurrencyLimit values for concurrency domain \"orders\""),
+                messages);
+        assertTrue(messages.contains("demo.test.Orders: 3"), messages);
+        assertTrue(messages.contains("demo.test.Orders.pay: 5"), messages);
+    }
+
+    @Test
+    void javac__should_fail_on_class_name_group_without_implicit_domain() throws Exception {
+        String processor = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "@ConcurrencyGroup(\"orders\")\n" +
+                "public class OrderProcessor {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void accept(Task task) {}\n" +
+                "}\n" +
+                "";
+        String payments = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Payments {\n" +
+                "    @ConcurrencyGroup(\"demo.test.OrderProcessor\")\n" +
+                "    @AcceptStatus(\"B\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void pay(Task task) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("OrderProcessor.java"), processor.getBytes(UTF_8));
+        Files.write(dir.resolve("Payments.java"), payments.getBytes(UTF_8));
+
+        String messages = javac(1, "OrderProcessor.java", "Payments.java");
+
+        assertTrue(messages.contains("@ConcurrencyGroup(\"demo.test.OrderProcessor\") uses the name of class "
+                + "demo.test.OrderProcessor, but no doer method runs in the implicit concurrency domain"), messages);
+    }
+
+    @Test
+    void javac__should_fail_on_invalid_retry_policy() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    @RetryPolicy(interval = \"5s\", fallbackStatus = \"Failed\")\n" +
+                "    public void accept(Task task) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"B\")\n" +
+                "    @RetryPolicy(interval = \"every 5s\")\n" +
+                "    public void pay(Task task) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        String messages = javac(1, "Orders.java");
+
+        assertTrue(messages.contains("@RetryPolicy fallbackStatus requires duration"), messages);
+        assertTrue(messages.contains("@RetryPolicy interval \"every 5s\" is not a duration"), messages);
+    }
+
+    @Test
+    void javac__should_fail_on_invalid_statuses() throws Exception {
+        String longStatus = "S".repeat(51);
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void empty(Task task) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\" A\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void whitespace(Task task) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"" + longStatus + "\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void tooLong(Task task) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"C\")\n" +
+                "    @RetryPolicy(interval = \"5m\", duration = \"1h\", fallbackStatus = \"B \")\n" +
+                "    public void fallback(Task task) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        String messages = javac(1, "Orders.java");
+
+        assertTrue(messages.contains("@AcceptStatus value must not be empty."), messages);
+        assertTrue(messages.contains("@AcceptStatus value \" A\" must not start or end with whitespace."),
+                messages);
+        assertTrue(messages.contains("@AcceptStatus value \"" + longStatus + "\" is 51 characters long; "
+                + "the maximum is 50."), messages);
+        assertTrue(messages.contains("@RetryPolicy fallbackStatus \"B \" must not start or end with whitespace."),
+                messages);
+    }
+
+    @Test
+    void javac__should_fail_when_task_data_has_no_loader() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void accept(Task task, Integer order) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        String messages = javac(1, "Orders.java");
+
+        assertTrue(messages.contains("No @TaskDataLoader found for argument 1"), messages);
+    }
+
+    @Test
+    void javac__should_warn_and_use_default_retry_policy() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    public void accept(Task task) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        String messages = javac(0, "Orders.java");
+
+        assertTrue(messages.contains("Doer method accept has no @RetryPolicy"), messages);
+        String service = new String(Files.readAllBytes(
+                dir.resolve("classes/com/doer/generated/_GeneratedDoerService.java")), UTF_8);
+        assertTrue(service.contains("Duration.ofDays(1), null);"), service);
+    }
+
+    /** Compiles the files with DoerProcessor and returns the compiler messages. */
+    private String javac(int expectedStatus, String... files) throws Exception {
+        exec(expectedStatus, dir, "javac -J-ea -Xstdout javac.txt -processor com.doer.processor.DoerProcessor "
+                + "-cp ? -d classes " + String.join(" ", files), doerJackarta);
+        return new String(Files.readAllBytes(dir.resolve("javac.txt")), UTF_8);
     }
 
 }

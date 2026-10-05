@@ -1,10 +1,7 @@
 package com.doer.processor;
 
-import java.util.List;
-
-class DoerExtraJsonInfo {
+class TaskDataSaverInfo {
     String type;
-    List<String> typeParents;
     String className;
     String methodName;
 

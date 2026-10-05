@@ -1,12 +1,12 @@
 package tst.demo;
 
 import com.doer.AcceptStatus;
-import com.doer.DoerConcurrency;
-import com.doer.OnException;
+import com.doer.ConcurrencyLimit;
+import com.doer.RetryPolicy;
 import com.doer.Task;
 import jakarta.enterprise.context.Dependent;
 
-@DoerConcurrency(10)
+@ConcurrencyLimit(10)
 @Dependent
 public class Cafeteria {
     @AcceptStatus("Customer wants to make an order")
@@ -26,7 +26,7 @@ public class Cafeteria {
         task.setStatus("Selected bubblegum");
     }
 
-    @DoerConcurrency(2)
+    @ConcurrencyLimit(2)
     @AcceptStatus("Selected bubblegum")
     public void payForBubbleGum(Task task) {
         task.setStatus("Bubblegum payed");
@@ -50,7 +50,7 @@ public class Cafeteria {
     }
 
     @AcceptStatus("Should check email")
-    @OnException(retry = "every 2 sec during 10 seconds", setStatus = "Email check failed")
+    @RetryPolicy(interval = "2 sec", duration = "10 seconds", fallbackStatus = "Email check failed")
     public void checkEmail(Task task, Car car) {
         throw new RuntimeException("Check email failed");
     }

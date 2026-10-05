@@ -2,11 +2,11 @@ package tst.demo;
 
 import com.doer.*;
 import com.doer.AcceptStatus;
-import com.doer.DoerConcurrency;
+import com.doer.ConcurrencyLimit;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.json.JsonObjectBuilder;
 
-@DoerConcurrency(1)
+@ConcurrencyLimit(1)
 @ApplicationScoped
 public class PhoneBooth {
     @AcceptStatus("Need call taxi")
@@ -22,7 +22,7 @@ public class PhoneBooth {
         task.setStatus("Cleanup finished");
     }
 
-    @DoerExtraJson
+    @ExceptionDescriber
     public void appendRuntimeExceptionJson(Task task, RuntimeException e, JsonObjectBuilder builder) {
         builder.add("e2", "RuntimeException");
     }

@@ -329,7 +329,7 @@ public class DoerServiceITCase {
     }
 
     @Test
-    void facilitateCoordinatedUpdate__should_load_and_unload_parameter() throws Exception {
+    void facilitateCoordinatedUpdate__should_load_and_save_task_data() throws Exception {
         Utils.sqlUpdate("INSERT INTO tasks (id, status) VALUES (807, 'A')");
         List<String> received = new ArrayList<>();
 
@@ -339,8 +339,8 @@ public class DoerServiceITCase {
         });
 
         assertEquals(Arrays.asList("loaded-A"), received);
-        // unloader runs after the task is written (version bumped from 0 to 1)
-        assertEquals(Arrays.asList("loaded-A@v1"), service.tst_unloaded);
+        // saver runs after the task is written (version bumped from 0 to 1)
+        assertEquals(Arrays.asList("loaded-A@v1"), service.tst_saved);
         assertEquals("B", service.loadTask(807).getStatus());
     }
 
@@ -418,21 +418,21 @@ public class DoerServiceITCase {
             return null;
         }
 
-        // Loader/unloader for String: loads "loaded-<status>", records what was unloaded
-        List<String> tst_unloaded = new ArrayList<>();
+        // Loader/saver for String: loads "loaded-<status>", records what was saved
+        List<String> tst_saved = new ArrayList<>();
 
         @Override
         protected Object _load(Task task, Class<?> type) throws Exception {
             if (String.class.equals(type)) {
                 return "loaded-" + task.getStatus();
             }
-            throw new IllegalArgumentException("No @DoerLoader for " + type.getName());
+            throw new IllegalArgumentException("No @TaskDataLoader for " + type.getName());
         }
 
         @Override
-        protected void _unload(Task task, Class<?> type, Object data) throws Exception {
+        protected void _save(Task task, Class<?> type, Object data) throws Exception {
             if (String.class.equals(type)) {
-                tst_unloaded.add(data + "@v" + task.getVersion());
+                tst_saved.add(data + "@v" + task.getVersion());
             }
         }
 

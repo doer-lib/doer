@@ -244,7 +244,7 @@ public abstract class DoerService {
 
     private void updateAndBumpVersionOrThrow(Task task) throws SQLException {
         if (!updateAndBumpVersion(task)) {
-            throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
+            throw new TaskVersionConflictException(task.getId());
         }
     }
 
@@ -269,7 +269,7 @@ public abstract class DoerService {
         return tasks;
     }
 
-    protected void setupConcurrencyDomain(String name, int concurrency, Map<String, Duration> delays, Map<String, Duration> retryDelays) {
+    protected void setupConcurrencyDomain(String name, int limit, Map<String, Duration> delays, Map<String, Duration> retryDelays) {
         HashSet<String> keys = new HashSet<>(delays.keySet());
         keys.addAll(retryDelays.keySet());
         List<String> statuses = new CopyOnWriteArrayList<>(keys);
@@ -277,7 +277,7 @@ public abstract class DoerService {
 
         ConcurrencyDomainImpl domain = new ConcurrencyDomainImpl();
         domain.domainName = name;
-        domain.numberOfTasksToRunSimultaneously = concurrency;
+        domain.numberOfTasksToRunSimultaneously = limit;
         domain.statuses = statuses;
         domain.delays = new HashMap<>(delays);
         domain.retryDelays = new HashMap<>(retryDelays);
@@ -378,7 +378,7 @@ public abstract class DoerService {
                     for (ConcurrencyDomainImpl domain : domains) {
                         if (domain.getStatuses().contains(task.getStatus())) {
                             domain.putTaskToQueue(task);
-                            if (domain.numberOfTasksInProgress < domain.getValue()) {
+                            if (domain.numberOfTasksInProgress < domain.getLimit()) {
                                 executor.execute(() -> processNextTask(domain));
                             }
                             return;
@@ -436,7 +436,7 @@ public abstract class DoerService {
                 return;
             }
             for (ConcurrencyDomainImpl domain : domains) {
-                if (domain.numberOfTasksInProgress < domain.getValue()) {
+                if (domain.numberOfTasksInProgress < domain.getLimit()) {
                     executor.execute(() -> processNextTask(domain));
                 }
             }
@@ -689,7 +689,7 @@ public abstract class DoerService {
 
     public abstract void runInTransaction(Callable<Object> code) throws Exception;
 
-    public void callDoerMethod(Task task, Callable<Object> loader, Callable<Object> caller, Callable<Object> unloader,
+    public void callDoerMethod(Task task, Callable<Object> loader, Callable<Object> caller, Callable<Object> saver,
             String className, String methodName, Duration errorTimeout, String onErrorStatus) throws Exception {
         String initialStatus = task.getStatus();
         long t0 = System.currentTimeMillis();
@@ -713,17 +713,17 @@ public abstract class DoerService {
                     task.setFailingSince(null);
                     task.setInProgress(false);
                     updateAndBumpVersionOrThrow(task);
-                    unloader.call();
+                    saver.call();
                     int t = (int) (System.currentTimeMillis() - t0);
                     writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, null, null, t);
                     return null;
                 });
                 return;
-            } catch (OptimisticLockException e) {
+            } catch (TaskVersionConflictException e) {
                 throw e;
             } catch (Exception e) {
                 exception = e;
-                LOG.log(Level.WARNING, "Unloader error", e);
+                LOG.log(Level.WARNING, "Task data saver error", e);
             }
         }
         Exception finalException = exception;
@@ -764,22 +764,22 @@ public abstract class DoerService {
      * @throws TaskInProgressException still in progress after waitDuration, and allowHijacking is false
      */
     public Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
-            DoerTaskConsumer updater) throws Exception {
+            TaskUpdater updater) throws Exception {
         Objects.requireNonNull(updater, "updater");
         return facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, null,
-                (task, data) -> updater.apply(task));
+                (task, data) -> updater.update(task));
     }
 
     /**
-     * Same as {@link #facilitateCoordinatedUpdate(long, Duration, boolean, DoerTaskConsumer)}, but when
-     * {@code klazz} is not null, the second argument of {@code updater} is loaded with the {@link DoerLoader}
-     * for {@code klazz} before the update, and saved with the {@link DoerUnloader} for {@code klazz} (if
+     * Same as {@link #facilitateCoordinatedUpdate(long, Duration, boolean, TaskUpdater)}, but when
+     * {@code dataType} is not null, the second argument of {@code updater} is loaded with the {@link TaskDataLoader}
+     * for {@code dataType} before the update, and saved with the {@link TaskDataSaver} for {@code dataType} (if
      * declared) after the task is written, in the same transaction.
      *
-     * @throws IllegalArgumentException no {@link DoerLoader} for {@code klazz}
+     * @throws IllegalArgumentException no {@link TaskDataLoader} for {@code dataType}
      */
     public <T> Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
-            Class<T> klazz, DoerUpdater<T> updater) throws Exception {
+            Class<T> dataType, TaskAndDataUpdater<T> updater) throws Exception {
         Objects.requireNonNull(updater, "updater");
         CallerInfo caller = StackWalker.getInstance()
                 .walk(frames -> frames
@@ -794,7 +794,7 @@ public abstract class DoerService {
         while (true) {
             long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
             boolean isLastAttempt = remainingMs <= 0;
-            Task task = attemptCoordinatedUpdate(taskId, isLastAttempt, allowHijacking, klazz, updater,
+            Task task = attemptCoordinatedUpdate(taskId, isLastAttempt, allowHijacking, dataType, updater,
                     caller.className(), caller.methodName());
             if (task != null) {
                 triggerTaskReloadFromDb(taskId);
@@ -808,13 +808,13 @@ public abstract class DoerService {
 
     /**
      * One transaction: locks the task row, writes the hijack log (if hijacked), loads, calls
-     * {@code updater}, writes the task, unloads and writes the task log.
+     * {@code updater}, writes the task, saves the data and writes the task log.
      *
      * @param allowInProgressRowLock when false, an in-progress row is not locked and null is returned
      * @return the committed task, or null when the task is in progress and allowInProgressRowLock is false
      */
     private <T> Task attemptCoordinatedUpdate(long taskId, boolean allowInProgressRowLock, boolean allowHijacking,
-            Class<T> klazz, DoerUpdater<T> updater, String className, String methodName) throws Exception {
+            Class<T> dataType, TaskAndDataUpdater<T> updater, String className, String methodName) throws Exception {
         Task[] result = new Task[1];
         self.runInTransaction(() -> {
             Task task = selectTaskForUpdate(taskId, allowInProgressRowLock);
@@ -836,13 +836,13 @@ public abstract class DoerService {
             }
             String initialStatus = task.getStatus();
             long t0 = System.currentTimeMillis();
-            T data = klazz == null ? null : klazz.cast(_load(task, klazz));
-            updater.applyUpdate(task, data);
+            T data = dataType == null ? null : dataType.cast(_load(task, dataType));
+            updater.update(task, data);
             task.setInProgress(false);
             task.setFailingSince(null);
             updateAndBumpVersionOrThrow(task);
-            if (klazz != null) {
-                _unload(task, klazz, data);
+            if (dataType != null) {
+                _save(task, dataType, data);
             }
             int t = (int) (System.currentTimeMillis() - t0);
             writeTaskLog(taskId, initialStatus, task.getStatus(), className, methodName, null, null, t);
@@ -853,17 +853,17 @@ public abstract class DoerService {
     }
 
     /**
-     * Loads with the {@link DoerLoader} for {@code type}. Implemented by the generated service.
+     * Loads with the {@link TaskDataLoader} for {@code type}. Implemented by the generated service.
      *
-     * @throws IllegalArgumentException no {@link DoerLoader} for {@code type}
+     * @throws IllegalArgumentException no {@link TaskDataLoader} for {@code type}
      */
     protected abstract Object _load(Task task, Class<?> type) throws Exception;
 
     /**
-     * Saves {@code data} with the {@link DoerUnloader} for {@code type}, if declared; otherwise does nothing.
+     * Saves {@code data} with the {@link TaskDataSaver} for {@code type}, if declared; otherwise does nothing.
      * Implemented by the generated service.
      */
-    protected abstract void _unload(Task task, Class<?> type, Object data) throws Exception;
+    protected abstract void _save(Task task, Class<?> type, Object data) throws Exception;
 
     /**
      * Locks the task row in the current transaction.
@@ -984,7 +984,7 @@ public abstract class DoerService {
         try {
             runTask(task);
             processedSuccessfully = true;
-        } catch (OptimisticLockException e) {
+        } catch (TaskVersionConflictException e) {
             // Other node or facilitateCoordinatedUpdate changed this task. Reload it from db
             taskChangedConcurrently = true;
         } catch (Exception e) {
@@ -1002,14 +1002,14 @@ public abstract class DoerService {
                     ConcurrencyDomainImpl newDomain = selectConcurrencyDomain(task.getStatus());
                     if (newDomain != null) {
                         newDomain.putTaskToQueue(task);
-                        int nNew = newDomain.getValue() - domain.numberOfTasksInProgress;
+                        int nNew = newDomain.getLimit() - domain.numberOfTasksInProgress;
                         for (int i = 0; i < nNew; i++) {
                             executor.execute(() -> processNextTask(newDomain));
                             nextProcessingStarted = true;
                         }
                     }
                     if (newDomain != domain) {
-                        int nOld = domain.getValue() - domain.numberOfTasksInProgress;
+                        int nOld = domain.getLimit() - domain.numberOfTasksInProgress;
                         for (int i = 0; i < nOld; i++) {
                             executor.execute(() -> processNextTask(domain));
                             nextProcessingStarted = true;
