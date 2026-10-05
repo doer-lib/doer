@@ -2,6 +2,9 @@ package com.doer.processor;
 
 import com.doer.*;
 import com.google.auto.service.AutoService;
+import com.sun.source.util.JavacTask;
+import com.sun.source.util.TaskEvent;
+import com.sun.source.util.TaskListener;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.time.Duration;
@@ -28,6 +31,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.Messager;
+import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.Processor;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
@@ -58,6 +62,45 @@ public class DoerProcessor extends AbstractProcessor {
     /** Retry duration of a doer method without {@code @RetryPolicy}. */
     static final Duration DEFAULT_RETRY_DURATION = Duration.ofDays(1);
 
+    // Filled by process() in the round with doer annotations
+    private final List<DoerMethodInfo> doerMethods = new ArrayList<>();
+    private final List<TaskDataLoaderInfo> loaders = new ArrayList<>();
+    private final List<TaskDataSaverInfo> savers = new ArrayList<>();
+    private final List<ExceptionDescriberInfo> describers = new ArrayList<>();
+    /** Declared @ConcurrencyLimit of each domain. */
+    private final Map<String, Integer> limits = new HashMap<>();
+    /** Domain names given in @ConcurrencyGroup. */
+    private final Set<String> namedDomains = new HashSet<>();
+    /** Created in init(); adds the statuses set in code to doerMethods. */
+    private SetStatusFinder setStatusFinder;
+    /**
+     * Set by process() when it generated _GeneratedDoerService; false when there are no doer annotations or test
+     * code is being compiled. The lists above can be empty in both cases, so they cannot tell this.
+     */
+    private boolean doerAnnotationsProcessed;
+    /** Number of ANALYZE task events; 0 when javac did not compile the sources (e.g. -proc:only). */
+    private int analyzedClasses;
+
+    /**
+     * doer.json and doer.dot need the statuses passed to Task.setStatus, which {@link SetStatusFinder} reads from
+     * attributed method bodies. So they are generated after javac has attributed the classes (task events),
+     * not during annotation processing: attributing them from the processor, before the generated classes exist,
+     * breaks compilation of anonymous classes on javac 17-25. Without attribution (e.g. javac -proc:only) they are
+     * generated without these statuses, with a warning.
+     */
+    @Override
+    public synchronized void init(ProcessingEnvironment processingEnv) {
+        super.init(processingEnv);
+        setStatusFinder = new SetStatusFinder(processingEnv, doerMethods);
+        JavacTask.instance(processingEnv).addTaskListener(new TaskListener() {
+            @Override
+            public void finished(TaskEvent e) {
+                onJavacTaskFinished(e);
+            }
+
+        });
+    }
+
     @Override
     public SourceVersion getSupportedSourceVersion() {
         return SourceVersion.latest();
@@ -70,24 +113,20 @@ public class DoerProcessor extends AbstractProcessor {
                 if (isTestFilesAreBeingCompiling()) {
                     return false;
                 }
-                List<DoerMethodInfo> doerMethods = loadDoerMethods(roundEnv);
-                List<TaskDataLoaderInfo> loaders = loadLoaders(roundEnv);
-                List<TaskDataSaverInfo> savers = loadSavers(roundEnv);
-                List<ExceptionDescriberInfo> describers = loadExceptionDescribers(roundEnv);
-                Set<String> namedDomains = new HashSet<>();
-                Map<String, Integer> limits = loadConcurrencyDomains(roundEnv, doerMethods, namedDomains);
+                loadDoerMethods(roundEnv);
+                loadLoaders(roundEnv);
+                loadSavers(roundEnv);
+                loadExceptionDescribers(roundEnv);
+                loadConcurrencyDomains(roundEnv);
 
-                generateDoerService(doerMethods, loaders, savers, describers, limits);
+                generateDoerService();
 
                 generateCreateSchemaSql();
-                generateSelectTaskSql(doerMethods);
-                generateCreateIndexSql(doerMethods);
+                generateSelectTaskSql();
+                generateCreateIndexSql();
 
-                SetStatusFinder finder = new SetStatusFinder(roundEnv, processingEnv);
-                finder.updateDoerMethods(doerMethods);
-
-                generateDoerJson(doerMethods, loaders, savers, describers, limits, namedDomains);
-                generateDoerDot(doerMethods);
+                // doer.json and doer.dot are generated when compilation has finished (see init)
+                doerAnnotationsProcessed = true;
 
                 return true;
             }
@@ -96,6 +135,28 @@ public class DoerProcessor extends AbstractProcessor {
         }
 
         return false;
+    }
+
+    private void onJavacTaskFinished(TaskEvent e) {
+        if (!doerAnnotationsProcessed) {
+            return;
+        }
+        if (e.getKind() == TaskEvent.Kind.ANALYZE) {
+            analyzedClasses++;
+            setStatusFinder.scanTopLevelType(e.getTypeElement());
+        } else if (e.getKind() == TaskEvent.Kind.COMPILATION) {
+            if (analyzedClasses == 0) {
+                processingEnv.getMessager().printMessage(Kind.WARNING, "doer.json and doer.dot do not "
+                        + "contain the statuses set by Task.setStatus(...) in the code: the sources were not "
+                        + "compiled (for example, javac -proc:only), so method bodies could not be analyzed.");
+            }
+            try {
+                generateDoerJson();
+                generateDoerDot();
+            } catch (IOException ex) {
+                throw new RuntimeException(ex);
+            }
+        }
     }
 
     private boolean isTestFilesAreBeingCompiling() {
@@ -110,8 +171,7 @@ public class DoerProcessor extends AbstractProcessor {
         return false;
     }
 
-    private List<DoerMethodInfo> loadDoerMethods(RoundEnvironment roundEnv) {
-        List<DoerMethodInfo> result = new ArrayList<>();
+    private void loadDoerMethods(RoundEnvironment roundEnv) {
         Set<Element> elements = new HashSet<>();
         elements.addAll(roundEnv.getElementsAnnotatedWith(AcceptStatus.class));
         elements.addAll(roundEnv.getElementsAnnotatedWith(AcceptStatuses.class));
@@ -142,10 +202,8 @@ public class DoerProcessor extends AbstractProcessor {
             loadRetryPolicy(info, element);
             info.domainName = resolveDomainName(element);
             info.element = element;
-            result.add(info);
+            doerMethods.add(info);
         }
-
-        return result;
     }
 
     private void loadRetryPolicy(DoerMethodInfo info, Element element) {
@@ -245,10 +303,9 @@ public class DoerProcessor extends AbstractProcessor {
 
     /**
      * Validates {@code @ConcurrencyGroup} and {@code @ConcurrencyLimit}, fills {@code namedDomains} with the
-     * names given in {@code @ConcurrencyGroup}, and returns the declared limit of each domain.
+     * names given in {@code @ConcurrencyGroup} and {@code limits} with the declared limit of each domain.
      */
-    private Map<String, Integer> loadConcurrencyDomains(RoundEnvironment roundEnv, List<DoerMethodInfo> doerMethods,
-            Set<String> namedDomains) {
+    private void loadConcurrencyDomains(RoundEnvironment roundEnv) {
         Messager messager = processingEnv.getMessager();
         Elements elementUtils = processingEnv.getElementUtils();
         Set<String> usedDomains = new HashSet<>();
@@ -304,7 +361,6 @@ public class DoerProcessor extends AbstractProcessor {
             }
             limitElements.computeIfAbsent(resolveDomainName(element), k -> new ArrayList<>()).add(element);
         }
-        Map<String, Integer> limits = new HashMap<>();
         for (Map.Entry<String, List<Element>> entry : limitElements.entrySet()) {
             String domainName = entry.getKey();
             List<Element> elements = entry.getValue();
@@ -330,7 +386,6 @@ public class DoerProcessor extends AbstractProcessor {
                 }
             }
         }
-        return limits;
     }
 
     private void checkUnnamedPackageError(Element element, String className) {
@@ -345,9 +400,8 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    private List<TaskDataLoaderInfo> loadLoaders(RoundEnvironment roundEnv) {
+    private void loadLoaders(RoundEnvironment roundEnv) {
         Messager messager = processingEnv.getMessager();
-        List<TaskDataLoaderInfo> result = new ArrayList<>();
         Set<Element> elements = new HashSet<>();
         elements.addAll(roundEnv.getElementsAnnotatedWith(TaskDataLoader.class));
         for (Element element : elements) {
@@ -370,14 +424,12 @@ public class DoerProcessor extends AbstractProcessor {
             info.methodName = element.getSimpleName().toString();
             info.type = ((ExecutableType) element.asType()).getReturnType().toString();
             // ((TypeElement)((DeclaredType)args.get(0)).asElement()).getQualifiedName()
-            result.add(info);
+            loaders.add(info);
         }
-        return result;
     }
 
-    private List<TaskDataSaverInfo> loadSavers(RoundEnvironment roundEnv) {
+    private void loadSavers(RoundEnvironment roundEnv) {
         Messager messager = processingEnv.getMessager();
-        List<TaskDataSaverInfo> result = new ArrayList<>();
         Set<Element> elements = new HashSet<>();
         elements.addAll(roundEnv.getElementsAnnotatedWith(TaskDataSaver.class));
         for (Element element : elements) {
@@ -401,15 +453,13 @@ public class DoerProcessor extends AbstractProcessor {
             checkUnnamedPackageError(element, info.className);
             info.methodName = element.getSimpleName().toString();
             info.type = args.get(1).toString();
-            result.add(info);
+            savers.add(info);
         }
-        return result;
     }
 
-    private List<ExceptionDescriberInfo> loadExceptionDescribers(RoundEnvironment roundEnv) {
+    private void loadExceptionDescribers(RoundEnvironment roundEnv) {
         Messager messager = processingEnv.getMessager();
         Types types = processingEnv.getTypeUtils();
-        List<ExceptionDescriberInfo> result = new ArrayList<>();
         Set<Element> elements = new HashSet<>();
         elements.addAll(roundEnv.getElementsAnnotatedWith(ExceptionDescriber.class));
         for (Element element : elements) {
@@ -450,14 +500,14 @@ public class DoerProcessor extends AbstractProcessor {
                 messager.printMessage(Kind.ERROR, "Second parameter of @" + ExceptionDescriber.class.getSimpleName()
                         + " annotated method " + info.methodName + " should be of Throwable type", element);
             }
-            result.add(info);
+            describers.add(info);
         }
 
         HashSet<String> describerTypes = new HashSet<>();
-        for (ExceptionDescriberInfo info : result) {
+        for (ExceptionDescriberInfo info : describers) {
             describerTypes.add(info.type);
         }
-        for (ExceptionDescriberInfo info : result) {
+        for (ExceptionDescriberInfo info : describers) {
             Iterator<String> iterator = info.typeParents.iterator();
             while (iterator.hasNext()) {
                 if (!describerTypes.contains(iterator.next())) {
@@ -466,7 +516,7 @@ public class DoerProcessor extends AbstractProcessor {
             }
         }
         // Base classes comes first, then alphabetically ordered by class name
-        Collections.sort(result, (a, b) -> {
+        Collections.sort(describers, (a, b) -> {
             if (a.typeParents.contains(b.type)) {
                 return 1;
             } else if (b.typeParents.contains(a.type)) {
@@ -475,7 +525,6 @@ public class DoerProcessor extends AbstractProcessor {
                 return a.type.compareTo(b.type);
             }
         });
-        return result;
     }
 
     private List<String> extractParentClasses(Types types, TypeMirror typeMirror) {
@@ -488,11 +537,9 @@ public class DoerProcessor extends AbstractProcessor {
         return result;
     }
 
-    void generateDoerService(List<DoerMethodInfo> doerMethods, List<TaskDataLoaderInfo> loaders,
-            List<TaskDataSaverInfo> savers, List<ExceptionDescriberInfo> describers, Map<String, Integer> limits)
-            throws IOException {
-        HashMap<String, String> shortcuts = createTypeShortcuts(doerMethods, loaders, savers, describers);
-        HashMap<String, String> fieldNames = createFieldNames(doerMethods, loaders, savers, describers);
+    void generateDoerService() throws IOException {
+        HashMap<String, String> shortcuts = createTypeShortcuts();
+        HashMap<String, String> fieldNames = createFieldNames();
 
         Stream<String> classes1 = doerMethods.stream().map(s -> s.className);
         Stream<String> classes2 = loaders.stream().map(s -> s.className);
@@ -836,7 +883,7 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    void generateSelectTaskSql(List<DoerMethodInfo> doerMethods) throws IOException {
+    void generateSelectTaskSql() throws IOException {
         Map<String, List<DoerMethodInfo>> domains = groupMethodsByDomain(doerMethods);
 
         FileObject selectTaskSql = processingEnv.getFiler()
@@ -921,9 +968,9 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    private Map<String, List<DoerMethodInfo>> groupMethodsByDomain(List<DoerMethodInfo> doerMethods) {
+    private Map<String, List<DoerMethodInfo>> groupMethodsByDomain(List<DoerMethodInfo> methods) {
         Map<String, List<DoerMethodInfo>> domains = new HashMap<>();
-        for (DoerMethodInfo method : doerMethods) {
+        for (DoerMethodInfo method : methods) {
             // Methods added by SetStatusFinder are not doer methods and have no domain; group them by class
             String domainName = (method.domainName != null ? method.domainName : method.className);
             domains.computeIfAbsent(domainName, k -> new ArrayList<>()).add(method);
@@ -964,7 +1011,7 @@ public class DoerProcessor extends AbstractProcessor {
         return result;
     }
 
-    private void generateCreateIndexSql(List<DoerMethodInfo> doerMethods) throws IOException {
+    private void generateCreateIndexSql() throws IOException {
         FileObject selectTaskSql = processingEnv.getFiler()
                 .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", "CreateIndexes.sql");
 
@@ -1028,9 +1075,7 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    private void generateDoerJson(List<DoerMethodInfo> doerMethods, List<TaskDataLoaderInfo> loaders,
-            List<TaskDataSaverInfo> savers, List<ExceptionDescriberInfo> describers, Map<String, Integer> limits,
-            Set<String> namedDomains) throws IOException {
+    private void generateDoerJson() throws IOException {
         FileObject doerJson = processingEnv.getFiler()
                 .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", "doer.json");
         try (PrintWriter out = new PrintWriter(doerJson.openWriter())) {
@@ -1200,7 +1245,7 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    private void generateDoerDot(List<DoerMethodInfo> doerMethods) throws IOException {
+    private void generateDoerDot() throws IOException {
         String[][] colors = {
                 // color, fillcolor, fontcolor
                 {"#343A40", "#E9ECEF", "#212529"},
@@ -1436,8 +1481,7 @@ public class DoerProcessor extends AbstractProcessor {
         return String.join(",\n", escapedValues);
     }
 
-    private HashMap<String, String> createTypeShortcuts(List<DoerMethodInfo> doerMethods, List<TaskDataLoaderInfo> loaders,
-            List<TaskDataSaverInfo> savers, List<ExceptionDescriberInfo> describers) {
+    private HashMap<String, String> createTypeShortcuts() {
         Elements elementUtils = processingEnv.getElementUtils();
         HashMap<String, String> shortnames = new HashMap<>();
         shortnames.put("com.doer.Task", "Task");
@@ -1503,8 +1547,7 @@ public class DoerProcessor extends AbstractProcessor {
         return !type.contains("<") && processingEnv.getElementUtils().getTypeElement(type) != null;
     }
 
-    private HashMap<String, String> createFieldNames(List<DoerMethodInfo> doerMethods, List<TaskDataLoaderInfo> loaders,
-            List<TaskDataSaverInfo> savers, List<ExceptionDescriberInfo> describers) {
+    private HashMap<String, String> createFieldNames() {
         Elements elementUtils = processingEnv.getElementUtils();
         HashMap<String, String> fieldNames = new HashMap<>();
         Stream<String> classes1 = doerMethods.stream().map(s -> s.className);
