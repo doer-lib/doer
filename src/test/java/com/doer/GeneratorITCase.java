@@ -1016,6 +1016,46 @@ public class GeneratorITCase {
     }
 
     @Test
+    void javac__should_fail_when_status_is_accepted_by_several_methods() throws Exception {
+        String orders = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void accept(Task task) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"B\")\n" +
+                "    @AcceptStatus(\"C\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void pay(Task task) {}\n" +
+                "}\n" +
+                "";
+        String payments = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Payments {\n" +
+                "    @AcceptStatus(\"B\")\n" +
+                "    @AcceptStatus(\"D\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void pay(Task task) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), orders.getBytes(UTF_8));
+        Files.write(dir.resolve("Payments.java"), payments.getBytes(UTF_8));
+
+        String messages = javac(1, "Orders.java", "Payments.java");
+
+        assertTrue(messages.contains("Status \"B\" is accepted by more than one doer method"), messages);
+        assertTrue(messages.contains("demo.test.Orders.pay(com.doer.Task)"), messages);
+        assertTrue(messages.contains("demo.test.Payments.pay(com.doer.Task)"), messages);
+        assertFalse(messages.contains("Status \"A\""), messages);
+        assertFalse(messages.contains("Status \"C\""), messages);
+        assertFalse(messages.contains("Status \"D\""), messages);
+        assertFalse(messages.contains("do not contain the statuses set by Task.setStatus"), messages);
+    }
+
+    @Test
     void javac__should_fail_when_task_data_has_no_loader() throws Exception {
         String code = "" +
                 "package demo.test;\n" +

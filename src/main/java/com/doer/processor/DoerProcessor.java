@@ -97,6 +97,8 @@ public class DoerProcessor extends AbstractProcessor {
     private boolean doerAnnotationsProcessed;
     /** Number of ANALYZE task events; 0 when javac did not compile the sources (e.g. -proc:only). */
     private int analyzedClasses;
+    /** True when a compile error was reported before or during annotation processing. */
+    private boolean errorRaised;
 
     /**
      * doer.json and doer.dot need the statuses passed to Task.setStatus, which {@link SetStatusFinder} reads from
@@ -124,6 +126,7 @@ public class DoerProcessor extends AbstractProcessor {
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+        errorRaised |= roundEnv.errorRaised();
         if (annotations.isEmpty() || isCompilingTests()) {
             return false;
         }
@@ -153,7 +156,8 @@ public class DoerProcessor extends AbstractProcessor {
             analyzedClasses++;
             setStatusFinder.scanTopLevelType(e.getTypeElement());
         } else if (e.getKind() == TaskEvent.Kind.COMPILATION) {
-            if (analyzedClasses == 0) {
+            // javac does not analyze the sources after errors in annotation processing; the warning is misleading then
+            if (analyzedClasses == 0 && !errorRaised) {
                 processingEnv.getMessager().printMessage(Kind.WARNING, "doer.json and doer.dot do not "
                         + "contain the statuses set by Task.setStatus(...) in the code: the sources were not "
                         + "compiled (for example, javac -proc:only), so method bodies could not be analyzed.");
@@ -214,6 +218,31 @@ public class DoerProcessor extends AbstractProcessor {
             info.element = element;
             doerMethods.add(info);
         }
+        checkStatusesAcceptedOnce();
+    }
+
+    /** Reports an error on every doer method that accepts a status also accepted by another doer method. */
+    private void checkStatusesAcceptedOnce() {
+        Map<String, Set<DoerMethodInfo>> methodsByStatus = new TreeMap<>();
+        for (DoerMethodInfo method : doerMethods) {
+            for (Accept accept : method.acceptList) {
+                methodsByStatus.computeIfAbsent(accept.status(), k -> new LinkedHashSet<>()).add(method);
+            }
+        }
+        methodsByStatus.forEach((status, methods) -> {
+            if (methods.size() < 2) {
+                return;
+            }
+            List<DoerMethodInfo> sorted = methods.stream().sorted(DoerMethodInfo.BY_SIGNATURE).toList();
+            String list = sorted.stream()
+                    .map(m -> "    " + m.className + "." + m.element)
+                    .collect(Collectors.joining("\n"));
+            for (DoerMethodInfo method : sorted) {
+                processingEnv.getMessager().printMessage(Kind.ERROR, "Status \"" + escape(status)
+                        + "\" is accepted by more than one doer method; a status can be accepted by only one "
+                        + "@AcceptStatus method:\n" + list, method.element);
+            }
+        });
     }
 
     private void loadRetryPolicy(DoerMethodInfo info, Element element) {
