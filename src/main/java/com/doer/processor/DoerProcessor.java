@@ -1,6 +1,7 @@
 package com.doer.processor;
 
 import com.doer.*;
+import com.doer.processor.DoerMethodInfo.Accept;
 import com.google.auto.service.AutoService;
 import com.sun.source.util.JavacTask;
 import com.sun.source.util.TaskEvent;
@@ -10,21 +11,21 @@ import java.io.PrintWriter;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.LinkedList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -45,7 +46,6 @@ import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
 import javax.lang.model.util.Types;
 import javax.tools.Diagnostic.Kind;
-import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
 import javax.tools.StandardLocation;
 
@@ -61,6 +61,23 @@ public class DoerProcessor extends AbstractProcessor {
     static final Duration DEFAULT_RETRY_INTERVAL = Duration.ofMinutes(5);
     /** Retry duration of a doer method without {@code @RetryPolicy}. */
     static final Duration DEFAULT_RETRY_DURATION = Duration.ofDays(1);
+
+    private static final Pattern DURATION_PATTERN = Pattern.compile("\\s*(\\d+)\\s*(\\w+)\\s*");
+    /** Types used by the generated service besides the beans and their data types. */
+    private static final List<String> GENERATED_SERVICE_TYPES = List.of(
+            "com.doer.Task", "com.doer.DoerService", "com.doer.TaskUpdater", "com.doer.TaskAndDataUpdater",
+            "java.lang.Override", "java.lang.Exception", "java.lang.Throwable",
+            "jakarta.transaction.Transactional", "jakarta.inject.Inject",
+            "jakarta.enterprise.context.ApplicationScoped", "jakarta.annotation.Generated",
+            "jakarta.json.JsonObjectBuilder", "jakarta.json.JsonObject", "jakarta.json.JsonArrayBuilder",
+            "jakarta.json.JsonArray", "jakarta.json.Json", "jakarta.json.JsonWriterFactory",
+            "jakarta.json.JsonWriter", "jakarta.json.stream.JsonGenerator",
+            "java.util.concurrent.Callable", "java.util.concurrent.Executor", "javax.sql.DataSource",
+            "java.sql.SQLException", "java.io.IOException", "java.io.StringWriter", "java.util.List",
+            "java.util.HashMap", "java.time.Duration");
+    /** Names of parameters and locals of the generated service that would hide a bean field. */
+    private static final Set<String> RESERVED_FIELD_NAMES = Set.of(
+            "task", "status", "args", "dataSource", "data", "type", "updater", "exception", "builder");
 
     // Filled by process() in the round with doer annotations
     private final List<DoerMethodInfo> doerMethods = new ArrayList<>();
@@ -97,7 +114,6 @@ public class DoerProcessor extends AbstractProcessor {
             public void finished(TaskEvent e) {
                 onJavacTaskFinished(e);
             }
-
         });
     }
 
@@ -108,33 +124,25 @@ public class DoerProcessor extends AbstractProcessor {
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+        if (annotations.isEmpty() || isCompilingTests()) {
+            return false;
+        }
+        loadDoerMethods(roundEnv);
+        loadLoaders(roundEnv);
+        loadSavers(roundEnv);
+        loadExceptionDescribers(roundEnv);
+        loadConcurrencyDomains(roundEnv);
         try {
-            if (!annotations.isEmpty()) {
-                if (isTestFilesAreBeingCompiling()) {
-                    return false;
-                }
-                loadDoerMethods(roundEnv);
-                loadLoaders(roundEnv);
-                loadSavers(roundEnv);
-                loadExceptionDescribers(roundEnv);
-                loadConcurrencyDomains(roundEnv);
-
-                generateDoerService();
-
-                generateCreateSchemaSql();
-                generateSelectTaskSql();
-                generateCreateIndexSql();
-
-                // doer.json and doer.dot are generated when compilation has finished (see init)
-                doerAnnotationsProcessed = true;
-
-                return true;
-            }
+            generateDoerService();
+            generateCreateSchemaSql();
+            generateSelectTaskSql();
+            generateCreateIndexSql();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-
-        return false;
+        // doer.json and doer.dot are generated when compilation has finished (see init)
+        doerAnnotationsProcessed = true;
+        return true;
     }
 
     private void onJavacTaskFinished(TaskEvent e) {
@@ -159,9 +167,9 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    private boolean isTestFilesAreBeingCompiling() {
-        Elements elementUtils = processingEnv.getElementUtils();
-        TypeElement typeElement = elementUtils.getTypeElement("com.doer.generated._GeneratedDoerService");
+    private boolean isCompilingTests() {
+        TypeElement typeElement = processingEnv.getElementUtils()
+                .getTypeElement("com.doer.generated._GeneratedDoerService");
         if (typeElement != null) {
             String message = "The class _GeneratedDoerService is already present in dependencies. Looks like " +
                     "DoerProcessor is called during test code compilation, and should not generate any extra code";
@@ -171,33 +179,35 @@ public class DoerProcessor extends AbstractProcessor {
         return false;
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // Loading and validation of annotated methods
+
     private void loadDoerMethods(RoundEnvironment roundEnv) {
-        Set<Element> elements = new HashSet<>();
-        elements.addAll(roundEnv.getElementsAnnotatedWith(AcceptStatus.class));
+        Set<Element> elements = new LinkedHashSet<>(roundEnv.getElementsAnnotatedWith(AcceptStatus.class));
         elements.addAll(roundEnv.getElementsAnnotatedWith(AcceptStatuses.class));
 
         for (Element element : elements) {
-            if (element.getKind() != ElementKind.METHOD) {
-                processingEnv.getMessager().printMessage(Kind.ERROR,
-                        "AcceptStatus annotation can be used only on public methods.", element);
+            if (!checkIsMethod(element, "AcceptStatus")) {
                 continue;
             }
             DoerMethodInfo info = new DoerMethodInfo();
-            info.className = element.getEnclosingElement().asType().toString();
-            checkUnnamedPackageError(element, info.className);
+            info.className = ownerClassName(element);
             info.methodName = element.getSimpleName().toString();
             info.parameterTypes = ((ExecutableType) element.asType()).getParameterTypes()
                     .stream()
                     .map(Object::toString)
-                    .collect(Collectors.toList());
+                    .toList();
             for (AcceptStatus annotation : element.getAnnotationsByType(AcceptStatus.class)) {
                 validateStatus(annotation.value(), "@AcceptStatus value", element);
-                if (!"".equals(annotation.delay())
-                        && parseAnnotationDuration(annotation.delay(), "@AcceptStatus delay", element) == null) {
-                    // Compilation fails anyway; skip it so that code generation does not parse it again
+                if (annotation.delay().isEmpty()) {
+                    info.acceptList.add(new Accept(annotation.value(), null, null));
                     continue;
                 }
-                info.acceptList.add(annotation);
+                Duration delay = parseAnnotationDuration(annotation.delay(), "@AcceptStatus delay", element);
+                // Compilation fails when the delay is invalid; skip it so that code generation does not use it
+                if (delay != null) {
+                    info.acceptList.add(new Accept(annotation.value(), annotation.delay(), delay));
+                }
             }
             loadRetryPolicy(info, element);
             info.domainName = resolveDomainName(element);
@@ -212,7 +222,6 @@ public class DoerProcessor extends AbstractProcessor {
         if (policy == null) {
             info.retryInterval = DEFAULT_RETRY_INTERVAL;
             info.retryDuration = DEFAULT_RETRY_DURATION;
-            info.fallbackStatus = null;
             messager.printMessage(Kind.WARNING, "Doer method " + info.methodName + " has no @"
                     + RetryPolicy.class.getSimpleName() + ". On exception it is retried every 5 minutes for 1 day, "
                     + "then its status is set to null.\n"
@@ -225,13 +234,13 @@ public class DoerProcessor extends AbstractProcessor {
         if (info.retryInterval == null) {
             info.retryInterval = DEFAULT_RETRY_INTERVAL;
         }
-        if (!"".equals(policy.duration())) {
+        if (!policy.duration().isEmpty()) {
             info.retryDurationText = policy.duration();
             info.retryDuration = parseAnnotationDuration(policy.duration(), "@RetryPolicy duration", element);
         }
-        if (!"".equals(policy.fallbackStatus())) {
+        if (!policy.fallbackStatus().isEmpty()) {
             validateStatus(policy.fallbackStatus(), "@RetryPolicy fallbackStatus", element);
-            if ("".equals(policy.duration())) {
+            if (policy.duration().isEmpty()) {
                 messager.printMessage(Kind.ERROR, "@RetryPolicy fallbackStatus requires duration: without duration "
                         + "the task is retried forever and fallbackStatus is never used.", element);
             }
@@ -263,6 +272,31 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
+    /** Reports an error and returns false when the annotated element is not a method. */
+    private boolean checkIsMethod(Element element, String annotationName) {
+        if (element.getKind() == ElementKind.METHOD) {
+            return true;
+        }
+        processingEnv.getMessager().printMessage(Kind.ERROR,
+                annotationName + " annotation can be used only on public methods.", element);
+        return false;
+    }
+
+    /** Name of the class declaring the method; reports an error when the class is in the unnamed package. */
+    private String ownerClassName(Element method) {
+        String className = method.getEnclosingElement().asType().toString();
+        if (!className.contains(".")) {
+            String message = String.format("Class in unnamed package\n" +
+                    "%s can not import classes from default package.\n" +
+                    "See chapter 7.5 Import Declarations in Java Spec " +
+                    "https://docs.oracle.com/javase/specs/jls/se11/html/jls-7.html#jls-7.5\n" +
+                    "Please move your class %s to any package, so %s can import it.",
+                    DoerService.class.getName(), className, DoerService.class.getName());
+            processingEnv.getMessager().printMessage(Kind.ERROR, message, method);
+        }
+        return className;
+    }
+
     /**
      * Name of the concurrency domain a doer method (or a class) runs in. The first rule that applies wins:
      * method's {@code @ConcurrencyGroup}, {@code Class.method} when the method has {@code @ConcurrencyLimit},
@@ -285,15 +319,13 @@ public class DoerProcessor extends AbstractProcessor {
         if (element.getAnnotation(ConcurrencyGroup.class) != null) {
             return null;
         }
-        if (element.getKind() == ElementKind.METHOD) {
-            if (element.getAnnotation(ConcurrencyLimit.class) != null) {
-                return element.getEnclosingElement().asType().toString() + "." + element.getSimpleName();
-            }
+        if (element.getKind() == ElementKind.METHOD && element.getAnnotation(ConcurrencyLimit.class) == null) {
             return derivedDomainName(element.getEnclosingElement());
         }
-        return element.asType().toString();
+        return describeElement(element);
     }
 
+    /** {@code Class.method} for a method, the class name for a class. */
     private String describeElement(Element element) {
         if (element.getKind() == ElementKind.METHOD) {
             return element.getEnclosingElement().asType().toString() + "." + element.getSimpleName();
@@ -330,25 +362,24 @@ public class DoerProcessor extends AbstractProcessor {
             }
             // A name that equals a class or Class.method name may only join the implicit domain of that
             // class or method, and only when that domain exists.
-            TypeElement type = elementUtils.getTypeElement(name);
-            String what = null;
-            if (type != null) {
-                what = "class " + name;
+            String kind = null;
+            if (elementUtils.getTypeElement(name) != null) {
+                kind = "class";
             } else if (name.contains(".")) {
                 String className = name.substring(0, name.lastIndexOf('.'));
                 String methodName = name.substring(name.lastIndexOf('.') + 1);
                 TypeElement owner = elementUtils.getTypeElement(className);
                 if (owner != null && owner.getEnclosedElements().stream().anyMatch(e ->
                         e.getKind() == ElementKind.METHOD && e.getSimpleName().contentEquals(methodName))) {
-                    what = "method " + name;
+                    kind = "method";
                 }
             }
-            if (what != null) {
-                messager.printMessage(Kind.ERROR, "@ConcurrencyGroup(\"" + name + "\") uses the name of " + what
-                        + ", but no doer method runs in the implicit concurrency domain of that " + what.split(" ")[0]
+            if (kind != null) {
+                messager.printMessage(Kind.ERROR, "@ConcurrencyGroup(\"" + name + "\") uses the name of " + kind
+                        + " " + name + ", but no doer method runs in the implicit concurrency domain of that " + kind
                         + " (it is not a doer method or class, or it declares its own @ConcurrencyGroup).\n"
                         + "A class or method name can be used only to join an existing implicit domain. "
-                        + "Use the @ConcurrencyGroup name of that " + what.split(" ")[0]
+                        + "Use the @ConcurrencyGroup name of that " + kind
                         + " or a name that is not a class or method name.", element);
             }
         }
@@ -361,9 +392,7 @@ public class DoerProcessor extends AbstractProcessor {
             }
             limitElements.computeIfAbsent(resolveDomainName(element), k -> new ArrayList<>()).add(element);
         }
-        for (Map.Entry<String, List<Element>> entry : limitElements.entrySet()) {
-            String domainName = entry.getKey();
-            List<Element> elements = entry.getValue();
+        limitElements.forEach((domainName, elements) -> {
             elements.sort(Comparator.comparing(this::describeElement));
             Set<Integer> values = elements.stream()
                     .map(e -> e.getAnnotation(ConcurrencyLimit.class).value())
@@ -376,7 +405,7 @@ public class DoerProcessor extends AbstractProcessor {
                     messager.printMessage(Kind.ERROR, "Different @ConcurrencyLimit values for concurrency domain \""
                             + domainName + "\":\n" + list, element);
                 }
-                continue;
+                return;
             }
             limits.put(domainName, values.iterator().next());
             if (!usedDomains.contains(domainName)) {
@@ -385,96 +414,57 @@ public class DoerProcessor extends AbstractProcessor {
                             + "concurrency domain \"" + domainName + "\".", element);
                 }
             }
-        }
-    }
-
-    private void checkUnnamedPackageError(Element element, String className) {
-        if (!className.contains(".")) {
-            String message = String.format("Class in unnamed package\n" +
-                    "%s can not import classes from default package.\n" +
-                    "See chapter 7.5 Import Declarations in Java Spec " +
-                    "https://docs.oracle.com/javase/specs/jls/se11/html/jls-7.html#jls-7.5\n" +
-                    "Please move your class %s to any package, so %s can import it.",
-                    DoerService.class.getName(), className, DoerService.class.getName());
-            processingEnv.getMessager().printMessage(Kind.ERROR, message, element);
-        }
+        });
     }
 
     private void loadLoaders(RoundEnvironment roundEnv) {
-        Messager messager = processingEnv.getMessager();
-        Set<Element> elements = new HashSet<>();
-        elements.addAll(roundEnv.getElementsAnnotatedWith(TaskDataLoader.class));
-        for (Element element : elements) {
-            if (element.getKind() != ElementKind.METHOD) {
-                messager.printMessage(Kind.ERROR,
-                        TaskDataLoader.class.getName() + " annotation can be used only on public methods.", element);
+        for (Element element : roundEnv.getElementsAnnotatedWith(TaskDataLoader.class)) {
+            if (!checkIsMethod(element, TaskDataLoader.class.getName())) {
                 continue;
             }
             ExecutableType executableType = (ExecutableType) element.asType();
             List<? extends TypeMirror> args = executableType.getParameterTypes();
             if (args.size() != 1 || !Task.class.getName().equals(args.get(0).toString())) {
-                messager.printMessage(Kind.ERROR, TaskDataLoader.class.getName()
-                        + " should have exactly 1 argument of type " +
-                        Task.class.getName(), element);
+                processingEnv.getMessager().printMessage(Kind.ERROR, TaskDataLoader.class.getName()
+                        + " should have exactly 1 argument of type " + Task.class.getName(), element);
                 continue;
             }
-            TaskDataLoaderInfo info = new TaskDataLoaderInfo();
-            info.className = element.getEnclosingElement().asType().toString();
-            checkUnnamedPackageError(element, info.className);
-            info.methodName = element.getSimpleName().toString();
-            info.type = ((ExecutableType) element.asType()).getReturnType().toString();
-            // ((TypeElement)((DeclaredType)args.get(0)).asElement()).getQualifiedName()
-            loaders.add(info);
+            loaders.add(new TaskDataLoaderInfo(ownerClassName(element), element.getSimpleName().toString(),
+                    executableType.getReturnType().toString()));
         }
     }
 
     private void loadSavers(RoundEnvironment roundEnv) {
-        Messager messager = processingEnv.getMessager();
-        Set<Element> elements = new HashSet<>();
-        elements.addAll(roundEnv.getElementsAnnotatedWith(TaskDataSaver.class));
-        for (Element element : elements) {
-            if (element.getKind() != ElementKind.METHOD) {
-                messager.printMessage(Kind.ERROR,
-                        TaskDataSaver.class.getName() + " annotation can be used only on public methods.", element);
+        for (Element element : roundEnv.getElementsAnnotatedWith(TaskDataSaver.class)) {
+            if (!checkIsMethod(element, TaskDataSaver.class.getName())) {
                 continue;
             }
             ExecutableType executableType = (ExecutableType) element.asType();
             List<? extends TypeMirror> args = executableType.getParameterTypes();
             if (args.size() != 2 || !Task.class.getName().equals(args.get(0).toString())
-                    || ((ExecutableType) element.asType()).getReturnType().getKind() != TypeKind.VOID) {
-                messager.printMessage(Kind.ERROR,
-                        TaskDataSaver.class.getName()
-                                + " should have exactly 2 arguments: Task and the task data to save, and should return void.",
+                    || executableType.getReturnType().getKind() != TypeKind.VOID) {
+                processingEnv.getMessager().printMessage(Kind.ERROR, TaskDataSaver.class.getName()
+                        + " should have exactly 2 arguments: Task and the task data to save, and should return void.",
                         element);
                 continue;
             }
-            TaskDataSaverInfo info = new TaskDataSaverInfo();
-            info.className = element.getEnclosingElement().asType().toString();
-            checkUnnamedPackageError(element, info.className);
-            info.methodName = element.getSimpleName().toString();
-            info.type = args.get(1).toString();
-            savers.add(info);
+            savers.add(new TaskDataSaverInfo(ownerClassName(element), element.getSimpleName().toString(),
+                    args.get(1).toString()));
         }
     }
 
     private void loadExceptionDescribers(RoundEnvironment roundEnv) {
         Messager messager = processingEnv.getMessager();
         Types types = processingEnv.getTypeUtils();
-        Set<Element> elements = new HashSet<>();
-        elements.addAll(roundEnv.getElementsAnnotatedWith(ExceptionDescriber.class));
-        for (Element element : elements) {
-            if (element.getKind() != ElementKind.METHOD) {
-                messager.printMessage(Kind.ERROR,
-                        ExceptionDescriber.class.getName() + " annotation can be used only on public methods.", element);
+        for (Element element : roundEnv.getElementsAnnotatedWith(ExceptionDescriber.class)) {
+            if (!checkIsMethod(element, ExceptionDescriber.class.getName())) {
                 continue;
             }
             ExecutableType executableType = (ExecutableType) element.asType();
             List<? extends TypeMirror> args = executableType.getParameterTypes();
-
-            String jsonObjectBuilder = "jakarta.json.JsonObjectBuilder";
             if (args.size() != 3 || !Task.class.getName().equals(args.get(0).toString())
-                    || !jsonObjectBuilder.equals(args.get(2).toString())
-                    || ((ExecutableType) element.asType()).getReturnType().getKind() != TypeKind.VOID) {
+                    || !"jakarta.json.JsonObjectBuilder".equals(args.get(2).toString())
+                    || executableType.getReturnType().getKind() != TypeKind.VOID) {
                 messager.printMessage(Kind.ERROR,
                         ExceptionDescriber.class.getName()
                                 + " should mark void method that have exactly 3 arguments: Task, Exception and JsonObjectBuilder\n"
@@ -485,84 +475,58 @@ public class DoerProcessor extends AbstractProcessor {
                         element);
                 continue;
             }
+            String className = ownerClassName(element);
+            String methodName = element.getSimpleName().toString();
             TypeMirror exType = args.get(1);
-            ExceptionDescriberInfo info = new ExceptionDescriberInfo();
-            info.className = element.getEnclosingElement().asType().toString();
-            checkUnnamedPackageError(element, info.className);
-            info.methodName = element.getSimpleName().toString();
-            info.type = exType.toString();
-            info.typeParents = new LinkedList<>();
-            Element exElement = types.asElement(exType);
-            if (exElement != null && exElement.getKind() == ElementKind.CLASS) {
-                TypeElement te = (TypeElement) exElement;
-                info.typeParents.addAll(extractParentClasses(types, te.getSuperclass()));
+            List<String> typeParents = new ArrayList<>();
+            if (types.asElement(exType) instanceof TypeElement exElement && exElement.getKind() == ElementKind.CLASS) {
+                typeParents.addAll(extractParentClasses(types, exElement.getSuperclass()));
             } else {
                 messager.printMessage(Kind.ERROR, "Second parameter of @" + ExceptionDescriber.class.getSimpleName()
-                        + " annotated method " + info.methodName + " should be of Throwable type", element);
+                        + " annotated method " + methodName + " should be of Throwable type", element);
             }
-            describers.add(info);
+            describers.add(new ExceptionDescriberInfo(className, methodName, exType.toString(), typeParents));
         }
 
-        HashSet<String> describerTypes = new HashSet<>();
-        for (ExceptionDescriberInfo info : describers) {
-            describerTypes.add(info.type);
-        }
-        for (ExceptionDescriberInfo info : describers) {
-            Iterator<String> iterator = info.typeParents.iterator();
-            while (iterator.hasNext()) {
-                if (!describerTypes.contains(iterator.next())) {
-                    iterator.remove();
-                }
-            }
-        }
+        Set<String> describerTypes = describers.stream().map(ExceptionDescriberInfo::type).collect(Collectors.toSet());
+        describers.forEach(d -> d.typeParents().removeIf(t -> !describerTypes.contains(t)));
         // Base classes comes first, then alphabetically ordered by class name
-        Collections.sort(describers, (a, b) -> {
-            if (a.typeParents.contains(b.type)) {
+        describers.sort((a, b) -> {
+            if (a.typeParents().contains(b.type())) {
                 return 1;
-            } else if (b.typeParents.contains(a.type)) {
+            } else if (b.typeParents().contains(a.type())) {
                 return -1;
             } else {
-                return a.type.compareTo(b.type);
+                return a.type().compareTo(b.type());
             }
         });
     }
 
     private List<String> extractParentClasses(Types types, TypeMirror typeMirror) {
-        ArrayList<String> result = new ArrayList<>();
+        List<String> result = new ArrayList<>();
         result.add(typeMirror.toString());
-        Element el = types.asElement(typeMirror);
-        if (el != null && el.getKind() == ElementKind.CLASS) {
-            result.addAll(extractParentClasses(types, ((TypeElement) el).getSuperclass()));
+        if (types.asElement(typeMirror) instanceof TypeElement element && element.getKind() == ElementKind.CLASS) {
+            result.addAll(extractParentClasses(types, element.getSuperclass()));
         }
         return result;
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // _GeneratedDoerService
+
     void generateDoerService() throws IOException {
-        HashMap<String, String> shortcuts = createTypeShortcuts();
-        HashMap<String, String> fieldNames = createFieldNames();
+        Map<String, String> shortcuts = createTypeShortcuts();
+        Map<String, String> fieldNames = createFieldNames();
+        List<String> beans = beanClassNames().distinct().sorted().toList();
 
-        Stream<String> classes1 = doerMethods.stream().map(s -> s.className);
-        Stream<String> classes2 = loaders.stream().map(s -> s.className);
-        Stream<String> classes3 = savers.stream().map(s -> s.className);
-        Stream<String> classes4 = describers.stream().map(s -> s.className);
-        List<String> beans = Stream.of(classes1, classes2, classes3, classes4).flatMap(i -> i)
-                .distinct()
-                .sorted()
-                .collect(Collectors.toList());
-
-        Set<String> missingLoadersReported = new HashSet<>();
-
-        JavaFileObject builderFile = processingEnv.getFiler()
-                .createSourceFile("com.doer.generated._GeneratedDoerService");
-        try (PrintWriter out = new PrintWriter(builderFile.openWriter())) {
+        JavaFileObject file = processingEnv.getFiler().createSourceFile("com.doer.generated._GeneratedDoerService");
+        try (PrintWriter out = new PrintWriter(file.openWriter())) {
             out.println("package com.doer.generated;");
-            List<String> names = new ArrayList<>(shortcuts.keySet());
-            Collections.sort(names);
-            for (String fullName : names) {
-                if (!fullName.equals(shortcuts.get(fullName))) {
+            new TreeMap<>(shortcuts).forEach((fullName, shortName) -> {
+                if (!fullName.equals(shortName)) {
                     out.println("import " + fullName + ";");
                 }
-            }
+            });
             out.println();
             out.println("@ApplicationScoped");
             out.println("@Generated(value = \"" + getClass().getName() + "\", date = \"" + LocalDate.now() + "\")");
@@ -571,677 +535,489 @@ public class DoerProcessor extends AbstractProcessor {
             for (String bean : beans) {
                 out.println("    " + shortcuts.get(bean) + " " + fieldNames.get(bean) + ";");
             }
-            out.println();
-            out.println("    public _GeneratedDoerService() {");
-            out.println("        super();");
-            out.println("        initializeDomains();");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Inject");
-            out.println("    public void setSelfReference(DoerService self) {");
-            out.println("        super.setSelfReference(self);");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Inject");
-            out.println("    public void setDataSource(DataSource dataSource) {");
-            out.println("        super.setDataSource(dataSource);");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Inject");
-            out.println("    public void setExecutor(Executor executor) {");
-            out.println("        super.setExecutor(executor);");
-            out.println("    }");
-            out.println();
+            out.print("""
+
+                        public _GeneratedDoerService() {
+                            super();
+                            initializeDomains();
+                        }
+
+                        @Override
+                        @Inject
+                        public void setSelfReference(DoerService self) {
+                            super.setSelfReference(self);
+                        }
+
+                        @Override
+                        @Inject
+                        public void setDataSource(DataSource dataSource) {
+                            super.setDataSource(dataSource);
+                        }
+
+                        @Override
+                        @Inject
+                        public void setExecutor(Executor executor) {
+                            super.setExecutor(executor);
+                        }
+
+                    """);
             for (String bean : beans) {
                 out.println("    @Inject");
-                out.println("    public void _inject_" + fieldNames.get(bean) +
-                        "(" + shortcuts.get(bean) + " value) {");
+                out.println("    public void _inject_" + fieldNames.get(bean) + "(" + shortcuts.get(bean) + " value) {");
                 out.println("        this." + fieldNames.get(bean) + " = value;");
                 out.println("    }");
                 out.println();
             }
-            out.println("    @Override");
-            out.println("    @Transactional(value = Transactional.TxType.REQUIRES_NEW, rollbackOn = Exception.class)");
-            out.println("    public void runInTransaction(Callable<Object> code) throws Exception {");
-            out.println("        code.call();");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Transactional(Transactional.TxType.REQUIRED)");
-            out.println("    public int resetStalledInProgressTasks(Duration timeout) throws SQLException {");
-            out.println("        return super.resetStalledInProgressTasks(timeout);");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Transactional(Transactional.TxType.NOT_SUPPORTED)");
-            out.println("    public void reloadTasksFromDb() {");
-            out.println("        super.reloadTasksFromDb();");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Transactional(Transactional.TxType.REQUIRED)");
-            out.println(
-                    "    public List<Task> loadTasksFromDatabase(List<Integer> limits) throws SQLException, IOException {");
-            out.println("        return super.loadTasksFromDatabase(limits);");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    public String createExtraJson(Task task, Exception exception) {");
-            out.println("        JsonObjectBuilder builder = Json.createObjectBuilder();");
-            out.println("        try {");
-            out.println("            fillExtraJson(task, exception, builder);");
-            out.println("        } catch (Exception e) {");
-            out.println("            LOG.log(java.util.logging.Level.WARNING, \"ExtraJson creation error\", e);");
-            out.println("        }");
-            out.println("        JsonObject jsonObject = builder.build();");
-            out.println("        if (jsonObject.isEmpty()) {");
-            out.println("            return null;");
-            out.println("        }");
-            out.println("        HashMap<String, Object> config = new HashMap<>();");
-            out.println("        if (jsonObject.size() > 1) {");
-            out.println("            config.put(JsonGenerator.PRETTY_PRINTING, true);");
-            out.println("        }");
-            out.println("        JsonWriterFactory factory = Json.createWriterFactory(config);");
-            out.println("        StringWriter sw = new StringWriter();");
-            out.println("        try (JsonWriter writer = factory.createWriter(sw)) {");
-            out.println("            writer.writeObject(jsonObject);");
-            out.println("        }");
-            out.println("        return sw.toString();");
-            out.println("    }");
-            out.println();
-            out.println("    private void fillExtraJson(Task task, Throwable exception, JsonObjectBuilder builder) throws Exception {");
-            out.println("        if (exception == null) {");
-            out.println("            return;");
-            out.println("        }");
-            out.println();
-            out.println("        if (exception.getMessage() != null && !\"\".equals(exception.getMessage().trim())) {");
-            out.println("            builder.add(\"message\", limitTo1024(exception.getMessage().trim()));");
-            out.println("        }");
-            for (ExceptionDescriberInfo describer : describers) {
-                String exceptionType = shortcuts.get(describer.type);
-                String fieldName = fieldNames.get(describer.className);
-                out.println("        if (exception instanceof " + exceptionType + ") {");
-                out.println("            " + fieldName + "." + describer.methodName + "(task, (" + exceptionType
-                        + ") exception, builder);");
-                out.println("        }");
-            }
-            out.println();
-            out.println("        JsonObjectBuilder causeBuilder = Json.createObjectBuilder();");
-            out.println("        fillExtraJson(task, exception.getCause(), causeBuilder);");
-            out.println("        JsonObject causeExtraJson = causeBuilder.build();");
-            out.println("        if (!causeExtraJson.isEmpty()) {");
-            out.println("            builder.add(\"cause\", causeExtraJson);");
-            out.println("        }");
-            out.println("        JsonArrayBuilder arrayBuilder = Json.createArrayBuilder();");
-            out.println("        for (Throwable throwable : exception.getSuppressed()) {");
-            out.println("            JsonObjectBuilder supperssedBuilder = Json.createObjectBuilder();");
-            out.println("            fillExtraJson(task, throwable, supperssedBuilder);");
-            out.println("            JsonObject jsonObject = supperssedBuilder.build();");
-            out.println("            if (!jsonObject.isEmpty()) {");
-            out.println("                arrayBuilder.add(jsonObject);");
-            out.println("            }");
-            out.println("        }");
-            out.println("        JsonArray array = arrayBuilder.build();");
-            out.println("        if (!array.isEmpty()) {");
-            out.println("            builder.add(\"suppressed\", array);");
-            out.println("        }");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Transactional(Transactional.TxType.NEVER)");
-            out.println("    public Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,");
-            out.println("            TaskUpdater updater) throws Exception {");
-            out.println("        return super.facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, updater);");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Transactional(Transactional.TxType.NEVER)");
-            out.println("    public <T> Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,");
-            out.println("            Class<T> dataType, TaskAndDataUpdater<T> updater) throws Exception {");
-            out.println("        return super.facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, dataType, updater);");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    protected Object _load(Task task, Class<?> type) throws Exception {");
-            Set<String> generatedTypes = new HashSet<>();
-            for (TaskDataLoaderInfo loader : loaders) {
-                if (!isPlainClassType(loader.type) || !generatedTypes.add(loader.type)) {
-                    continue;
-                }
-                out.println("        if (" + shortcuts.get(loader.type) + ".class.equals(type)) {");
-                out.println("            return " + fieldNames.get(loader.className) + "." + loader.methodName + "(task);");
-                out.println("        }");
-            }
-            out.println("        throw new IllegalArgumentException(\"No @TaskDataLoader for \" + type.getName());");
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    protected void _save(Task task, Class<?> type, Object data) throws Exception {");
-            generatedTypes.clear();
-            for (TaskDataSaverInfo saver : savers) {
-                if (!isPlainClassType(saver.type) || !generatedTypes.add(saver.type)) {
-                    continue;
-                }
-                String typeName = shortcuts.get(saver.type);
-                out.println("        if (" + typeName + ".class.equals(type)) {");
-                out.println("            " + fieldNames.get(saver.className) + "." + saver.methodName
-                        + "(task, (" + typeName + ") data);");
-                out.println("            return;");
-                out.println("        }");
-            }
-            out.println("    }");
-            out.println();
-            out.println("    @Override");
-            out.println("    @Transactional(Transactional.TxType.NOT_SUPPORTED)");
-            out.println("    public void runTask(Task task) throws Exception {");
-            int maxNumberOfParam = doerMethods.stream()
-                    .mapToInt(s -> s.parameterTypes.size())
-                    .max()
-                    .orElse(0);
-            out.println("        Object[] args = new Object[" + maxNumberOfParam + "];");
-            out.println("        String status = task.getStatus();");
-            List<DoerMethodInfo> sortedDoerMethods = new ArrayList<>(doerMethods);
-            Comparator<DoerMethodInfo> methodsComparator = Comparator.comparing(DoerMethodInfo::getDomainName)
-                    .thenComparing(i -> i.methodName)
-                    .thenComparing(i -> i.parameterTypes.toString());
-            Collections.sort(sortedDoerMethods, methodsComparator);
-            for (int i = 0; i < sortedDoerMethods.size(); i++) {
-                DoerMethodInfo info = sortedDoerMethods.get(i);
-                if (i == 0) {
-                    out.print("       ");
-                } else {
-                    out.print(" else");
-                }
-
-                String firstStatus = info.acceptList.get(0).value();
-                out.print(" if (\"" + escape(firstStatus) + "\".equals(status)");
-                for (int extraStatusIndex = 1; extraStatusIndex < info.acceptList.size(); extraStatusIndex++) {
-                    String extraStatus = info.acceptList.get(extraStatusIndex).value();
-                    out.println(" ||");
-                    out.print("                \"" + escape(extraStatus) + "\".equals(status)");
-                }
-                out.println(") {");
-                String beanName = fieldNames.get(info.className);
-                String shortClassName = info.className.replaceAll(".*\\.", "");
-
-                String retryDurationLiteral = createDurationLiteral(info.retryDuration);
-                String fallbackStatusLiteral = (info.fallbackStatus == null ? "null"
-                        : "\"" + escape(info.fallbackStatus) + "\"");
-                out.println("            callDoerMethod(task, () -> {");
-                for (int paramIndex = 0; paramIndex < info.parameterTypes.size(); paramIndex++) {
-                    String paramClass = info.parameterTypes.get(paramIndex);
-                    if (!paramClass.equals(Task.class.getName())) {
-                        TaskDataLoaderInfo loader = loaders.stream()
-                                .filter(l -> l.type.equals(paramClass))
-                                .findFirst()
-                                .orElse(null);
-                        if (loader == null) {
-                            if (!missingLoadersReported.contains(paramClass)) {
-                                missingLoadersReported.add(paramClass);
-                                Messager messager = processingEnv.getMessager();
-                                messager.printMessage(Kind.ERROR,
-                                        "No @" + TaskDataLoader.class.getSimpleName() + " found for argument " + paramIndex
-                                                + "\n" +
-                                                "Please declare loader method:\n" +
-                                                "@" + TaskDataLoader.class.getName() + "\n" +
-                                                "public " + paramClass + " method(" + Task.class.getName()
-                                                + " task) {}\n",
-                                        info.element);
-                            }
-                            out.println("                    args[" + paramIndex + "] = " + null + ";");
-                        } else {
-                            String loaderBean = fieldNames.get(loader.className);
-                            out.println("                    args[" + paramIndex + "] = " + loaderBean + "."
-                                    + loader.methodName + "(task);");
+            out.print("""
+                        @Override
+                        @Transactional(value = Transactional.TxType.REQUIRES_NEW, rollbackOn = Exception.class)
+                        public void runInTransaction(Callable<Object> code) throws Exception {
+                            code.call();
                         }
-                    }
-                }
-                out.println("                    return null;");
-                out.println("                }, () -> {");
-                List<String> argumentCodes = new ArrayList<>();
-                for (int paramIndex = 0; paramIndex < info.parameterTypes.size(); paramIndex++) {
-                    String paramClass = info.parameterTypes.get(paramIndex);
-                    if (Task.class.getName().equals(paramClass)) {
-                        argumentCodes.add("task");
-                    } else {
-                        argumentCodes.add("(" + shortcuts.get(paramClass) + ")args[" + paramIndex + "]");
-                    }
-                }
-                out.println("                    " + beanName + "." + info.methodName + "("
-                        + String.join(", ", argumentCodes) + ");");
-                out.println("                    return null;");
-                out.println("                }, () -> {");
 
-                for (int paramIndex = info.parameterTypes.size() - 1; paramIndex >= 0; paramIndex--) {
-                    String paramClass = info.parameterTypes.get(paramIndex);
-                    if (!paramClass.equals(Task.class.getName())) {
-                        TaskDataSaverInfo saver = savers.stream()
-                                .filter(l -> l.type.equals(paramClass))
-                                .findFirst()
-                                .orElse(null);
-                        if (saver != null) {
-                            String saverBean = fieldNames.get(saver.className);
-                            out.println("                    " + saverBean + "." + saver.methodName +
-                                    "(task, (" + shortcuts.get(paramClass) + ")args[" + paramIndex + "]);");
+                        @Override
+                        @Transactional(Transactional.TxType.REQUIRED)
+                        public int resetStalledInProgressTasks(Duration timeout) throws SQLException {
+                            return super.resetStalledInProgressTasks(timeout);
                         }
-                    }
-                }
 
-                out.println("                    return null;");
-                out.println("                }, \"" + shortClassName + "\", \"" + info.methodName + "\",");
-                out.println("                    " + retryDurationLiteral + ", " +
-                        fallbackStatusLiteral + ");");
-                out.print("        }");
-            }
+                        @Override
+                        @Transactional(Transactional.TxType.NOT_SUPPORTED)
+                        public void reloadTasksFromDb() {
+                            super.reloadTasksFromDb();
+                        }
+
+                        @Override
+                        @Transactional(Transactional.TxType.REQUIRED)
+                        public List<Task> loadTasksFromDatabase(List<Integer> limits) throws SQLException, IOException {
+                            return super.loadTasksFromDatabase(limits);
+                        }
+
+                    """);
+            generateExtraJson(out, shortcuts, fieldNames);
+            out.print("""
+
+                        @Override
+                        @Transactional(Transactional.TxType.NEVER)
+                        public Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
+                                TaskUpdater updater) throws Exception {
+                            return super.facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, updater);
+                        }
+
+                        @Override
+                        @Transactional(Transactional.TxType.NEVER)
+                        public <T> Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
+                                Class<T> dataType, TaskAndDataUpdater<T> updater) throws Exception {
+                            return super.facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, dataType, updater);
+                        }
+
+                    """);
+            generateLoad(out, shortcuts, fieldNames);
             out.println();
-            out.println("    }");
+            generateSave(out, shortcuts, fieldNames);
             out.println();
-            out.println("    protected void initializeDomains() {");
-            Map<String, List<DoerMethodInfo>> domains = groupMethodsByDomain(doerMethods);
-            List<String> domainNames = new ArrayList<>(domains.keySet());
-            Collections.sort(domainNames);
-            for (String domainName : domainNames) {
-                Map<Duration, List<String>> byDelay = groupStatusesByDelay(domains.get(domainName));
-                List<Duration> delays = new ArrayList<>(byDelay.keySet());
-                Collections.sort(delays);
-
-                Map<Duration, List<String>> byRetryDelay = groupStatusesByRetryDelay(domains.get(domainName));
-                byRetryDelay.remove(DEFAULT_RETRY_INTERVAL);
-                List<Duration> retryDelays = new ArrayList<>(byRetryDelay.keySet());
-                Collections.sort(retryDelays);
-
-                out.println("        {");
-                out.println("            HashMap<String, Duration> delays = new HashMap<>();");
-                out.println("            HashMap<String, Duration> retryDelays = new HashMap<>();");
-                for (Duration delay : delays) {
-                    List<String> statuses = new ArrayList<>(byDelay.get(delay));
-                    Collections.sort(statuses);
-                    for (String status : statuses) {
-                        out.println("            delays.put(\"" + escape(status) + "\", " + createDurationLiteral(delay)
-                                + ");");
-                    }
-                }
-                for (Duration retryDelay : retryDelays) {
-                    List<String> statuses = new ArrayList<>(byRetryDelay.get(retryDelay));
-                    Collections.sort(statuses);
-                    for (String status : statuses) {
-                        out.println("            retryDelays.put(\"" + escape(status) + "\", "
-                                + createDurationLiteral(retryDelay) + ");");
-                    }
-                }
-                out.println("            setupConcurrencyDomain(\"" + domainName + "\", "
-                        + limits.getOrDefault(domainName, DEFAULT_LIMIT)
-                        + ", delays, retryDelays);");
-                out.println("        }");
-            }
-            out.println("    }");
+            generateRunTask(out, shortcuts, fieldNames);
+            out.println();
+            generateInitializeDomains(out);
             out.println();
             out.println("}");
         }
     }
 
-    void generateSelectTaskSql() throws IOException {
-        Map<String, List<DoerMethodInfo>> domains = groupMethodsByDomain(doerMethods);
+    private void generateExtraJson(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
+        out.print("""
+                    @Override
+                    public String createExtraJson(Task task, Exception exception) {
+                        JsonObjectBuilder builder = Json.createObjectBuilder();
+                        try {
+                            fillExtraJson(task, exception, builder);
+                        } catch (Exception e) {
+                            LOG.log(java.util.logging.Level.WARNING, "ExtraJson creation error", e);
+                        }
+                        JsonObject jsonObject = builder.build();
+                        if (jsonObject.isEmpty()) {
+                            return null;
+                        }
+                        HashMap<String, Object> config = new HashMap<>();
+                        if (jsonObject.size() > 1) {
+                            config.put(JsonGenerator.PRETTY_PRINTING, true);
+                        }
+                        JsonWriterFactory factory = Json.createWriterFactory(config);
+                        StringWriter sw = new StringWriter();
+                        try (JsonWriter writer = factory.createWriter(sw)) {
+                            writer.writeObject(jsonObject);
+                        }
+                        return sw.toString();
+                    }
 
-        FileObject selectTaskSql = processingEnv.getFiler()
-                .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", "SelectTasks.sql");
-        try (PrintWriter out = new PrintWriter(selectTaskSql.openWriter())) {
-            boolean firstBlock = true;
-            List<String> domainNames = new ArrayList<>(domains.keySet());
-            Collections.sort(domainNames);
-            for (String domainName : domainNames) {
-                List<String> asapStatuses = new ArrayList<>();
-                Map<Duration, List<String>> delayedStatuses = new LinkedHashMap<>();
-                for (DoerMethodInfo method : domains.get(domainName)) {
-                    for (AcceptStatus annotation : method.acceptList) {
-                        if ("".equals(annotation.delay())) {
-                            asapStatuses.add(annotation.value());
-                        } else {
-                            Duration duration = parseDuration(annotation.delay());
-                            if (!delayedStatuses.containsKey(duration)) {
-                                delayedStatuses.put(duration, new ArrayList<>());
+                    private void fillExtraJson(Task task, Throwable exception, JsonObjectBuilder builder) throws Exception {
+                        if (exception == null) {
+                            return;
+                        }
+
+                        if (exception.getMessage() != null && !"".equals(exception.getMessage().trim())) {
+                            builder.add("message", limitTo1024(exception.getMessage().trim()));
+                        }
+                """);
+        for (ExceptionDescriberInfo describer : describers) {
+            String exceptionType = shortcuts.get(describer.type());
+            out.println("        if (exception instanceof " + exceptionType + ") {");
+            out.println("            " + fieldNames.get(describer.className()) + "." + describer.methodName()
+                    + "(task, (" + exceptionType + ") exception, builder);");
+            out.println("        }");
+        }
+        out.print("""
+
+                        JsonObjectBuilder causeBuilder = Json.createObjectBuilder();
+                        fillExtraJson(task, exception.getCause(), causeBuilder);
+                        JsonObject causeExtraJson = causeBuilder.build();
+                        if (!causeExtraJson.isEmpty()) {
+                            builder.add("cause", causeExtraJson);
+                        }
+                        JsonArrayBuilder arrayBuilder = Json.createArrayBuilder();
+                        for (Throwable throwable : exception.getSuppressed()) {
+                            JsonObjectBuilder supperssedBuilder = Json.createObjectBuilder();
+                            fillExtraJson(task, throwable, supperssedBuilder);
+                            JsonObject jsonObject = supperssedBuilder.build();
+                            if (!jsonObject.isEmpty()) {
+                                arrayBuilder.add(jsonObject);
                             }
-                            delayedStatuses.get(duration).add(annotation.value());
+                        }
+                        JsonArray array = arrayBuilder.build();
+                        if (!array.isEmpty()) {
+                            builder.add("suppressed", array);
                         }
                     }
-                }
-                Map<Duration, List<String>> retryingStatuses = new LinkedHashMap<>();
-                for (DoerMethodInfo method : domains.get(domainName)) {
-                    Duration retryDuration = method.retryInterval;
-                    if (!retryingStatuses.containsKey(retryDuration)) {
-                        retryingStatuses.put(retryDuration, new ArrayList<>());
-                    }
-                    for (AcceptStatus annotation : method.acceptList) {
-                        retryingStatuses.get(retryDuration).add(annotation.value());
-                    }
-                }
-                Collections.sort(asapStatuses);
-                if (asapStatuses.size() > 0 || delayedStatuses.size() > 0) {
-                    if (!firstBlock) {
-                        out.println("UNION ALL");
-                    }
-                    firstBlock = false;
+                """);
+    }
 
-                    if (asapStatuses.size() > 0) {
-                        out.println(
-                                "(SELECT * FROM tasks WHERE NOT in_progress AND failing_since IS NULL AND status IN (");
-                        out.println(createSqlValues(asapStatuses));
-                        out.println(") ORDER BY created LIMIT ?)");
-                        out.println("UNION ALL");
-                    }
-                    List<Duration> delays = new ArrayList<>(delayedStatuses.keySet());
-                    Collections.sort(delays);
-                    for (Duration delay : delays) {
-                        List<String> delayed = delayedStatuses.get(delay);
-                        Collections.sort(delayed);
-                        out.println(
-                                "(SELECT * FROM tasks WHERE NOT in_progress AND failing_since IS NULL AND status IN (");
-                        out.println(createSqlValues(delayed));
-                        out.println(") ORDER BY modified LIMIT ?)");
-                        out.println("UNION ALL");
-                    }
-                    List<Duration> intervals = new ArrayList<>(retryingStatuses.keySet());
-                    Collections.sort(intervals);
-                    for (int i = 0; i < intervals.size(); i++) {
-                        Duration interval = intervals.get(i);
-                        List<String> retrying = retryingStatuses.get(interval);
-                        Collections.sort(retrying);
-                        out.println(
-                                "(SELECT * FROM tasks WHERE NOT in_progress AND failing_since IS NOT NULL AND status IN (");
-                        out.println(createSqlValues(retrying));
-                        out.println(") ORDER BY modified LIMIT ?)");
-                        if (i < intervals.size() - 1) {
-                            out.println("UNION ALL");
-                        }
-                    }
+    private void generateLoad(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
+        out.println("    @Override");
+        out.println("    protected Object _load(Task task, Class<?> type) throws Exception {");
+        for (TaskDataLoaderInfo loader : firstByType(loaders).values()) {
+            if (isPlainClassType(loader.type())) {
+                out.println("        if (" + shortcuts.get(loader.type()) + ".class.equals(type)) {");
+                out.println("            return " + fieldNames.get(loader.className()) + "." + loader.methodName()
+                        + "(task);");
+                out.println("        }");
+            }
+        }
+        out.println("        throw new IllegalArgumentException(\"No @TaskDataLoader for \" + type.getName());");
+        out.println("    }");
+    }
+
+    private void generateSave(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
+        out.println("    @Override");
+        out.println("    protected void _save(Task task, Class<?> type, Object data) throws Exception {");
+        for (TaskDataSaverInfo saver : firstByType(savers).values()) {
+            if (isPlainClassType(saver.type())) {
+                String typeName = shortcuts.get(saver.type());
+                out.println("        if (" + typeName + ".class.equals(type)) {");
+                out.println("            " + fieldNames.get(saver.className()) + "." + saver.methodName()
+                        + "(task, (" + typeName + ") data);");
+                out.println("            return;");
+                out.println("        }");
+            }
+        }
+        out.println("    }");
+    }
+
+    private void generateRunTask(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
+        Map<String, TaskDataLoaderInfo> loadersByType = firstByType(loaders);
+        Map<String, TaskDataSaverInfo> saversByType = firstByType(savers);
+        Set<String> missingLoadersReported = new HashSet<>();
+        int maxNumberOfParams = doerMethods.stream().mapToInt(m -> m.parameterTypes.size()).max().orElse(0);
+
+        out.println("    @Override");
+        out.println("    @Transactional(Transactional.TxType.NOT_SUPPORTED)");
+        out.println("    public void runTask(Task task) throws Exception {");
+        out.println("        Object[] args = new Object[" + maxNumberOfParams + "];");
+        out.println("        String status = task.getStatus();");
+        List<DoerMethodInfo> sortedDoerMethods = new ArrayList<>(doerMethods);
+        sortedDoerMethods.sort(Comparator.comparing((DoerMethodInfo m) -> m.domainName)
+                .thenComparing(m -> m.methodName)
+                .thenComparing(m -> m.parameterTypes.toString()));
+        for (int i = 0; i < sortedDoerMethods.size(); i++) {
+            DoerMethodInfo info = sortedDoerMethods.get(i);
+            List<String> params = info.parameterTypes;
+            String condition = info.acceptList.stream()
+                    .map(a -> "\"" + escape(a.status()) + "\".equals(status)")
+                    .collect(Collectors.joining(" ||\n                "));
+            out.println((i == 0 ? "       " : " else") + " if (" + condition + ") {");
+
+            out.println("            callDoerMethod(task, () -> {");
+            for (int p = 0; p < params.size(); p++) {
+                String paramClass = params.get(p);
+                if (paramClass.equals(Task.class.getName())) {
+                    continue;
                 }
-                out.println();
+                TaskDataLoaderInfo loader = loadersByType.get(paramClass);
+                if (loader != null) {
+                    out.println("                    args[" + p + "] = " + fieldNames.get(loader.className()) + "."
+                            + loader.methodName() + "(task);");
+                    continue;
+                }
+                if (missingLoadersReported.add(paramClass)) {
+                    processingEnv.getMessager().printMessage(Kind.ERROR,
+                            "No @" + TaskDataLoader.class.getSimpleName() + " found for argument " + p + "\n"
+                                    + "Please declare loader method:\n"
+                                    + "@" + TaskDataLoader.class.getName() + "\n"
+                                    + "public " + paramClass + " method(" + Task.class.getName() + " task) {}\n",
+                            info.element);
+                }
+                out.println("                    args[" + p + "] = null;");
             }
-            if (domainNames.size() > 0) {
-                out.println("UNION ALL");
+            out.println("                    return null;");
+            out.println("                }, () -> {");
+            List<String> argumentCodes = new ArrayList<>();
+            for (int p = 0; p < params.size(); p++) {
+                argumentCodes.add(Task.class.getName().equals(params.get(p)) ? "task"
+                        : "(" + shortcuts.get(params.get(p)) + ")args[" + p + "]");
             }
-            out.println("(SELECT * FROM tasks WHERE in_progress)");
-            out.println();
+            out.println("                    " + fieldNames.get(info.className) + "." + info.methodName + "("
+                    + String.join(", ", argumentCodes) + ");");
+            out.println("                    return null;");
+            out.println("                }, () -> {");
+            for (int p = params.size() - 1; p >= 0; p--) {
+                TaskDataSaverInfo saver = saversByType.get(params.get(p));
+                if (saver != null && !params.get(p).equals(Task.class.getName())) {
+                    out.println("                    " + fieldNames.get(saver.className()) + "." + saver.methodName()
+                            + "(task, (" + shortcuts.get(params.get(p)) + ")args[" + p + "]);");
+                }
+            }
+            String fallbackStatusLiteral = info.fallbackStatus == null ? "null" : jstr(info.fallbackStatus);
+            out.println("                    return null;");
+            out.println("                }, \"" + simpleName(info.className) + "\", \"" + info.methodName + "\",");
+            out.println("                    " + createDurationLiteral(info.retryDuration) + ", "
+                    + fallbackStatusLiteral + ");");
+            out.print("        }");
+        }
+        out.println();
+        out.println("    }");
+    }
+
+    private void generateInitializeDomains(PrintWriter out) {
+        out.println("    protected void initializeDomains() {");
+        groupMethodsByDomain(doerMethods).forEach((domainName, methods) -> {
+            Map<Duration, List<String>> delays = groupStatuses(methods,
+                    (m, a) -> a.delay() != null ? a.delay() : Duration.ZERO);
+            Map<Duration, List<String>> retryDelays = groupStatuses(methods, (m, a) -> m.retryInterval);
+            retryDelays.remove(DEFAULT_RETRY_INTERVAL);
+
+            out.println("        {");
+            out.println("            HashMap<String, Duration> delays = new HashMap<>();");
+            out.println("            HashMap<String, Duration> retryDelays = new HashMap<>();");
+            delays.forEach((delay, statuses) -> statuses.forEach(status -> out.println(
+                    "            delays.put(" + jstr(status) + ", " + createDurationLiteral(delay) + ");")));
+            retryDelays.forEach((delay, statuses) -> statuses.forEach(status -> out.println(
+                    "            retryDelays.put(" + jstr(status) + ", " + createDurationLiteral(delay) + ");")));
+            out.println("            setupConcurrencyDomain(" + jstr(domainName) + ", "
+                    + limits.getOrDefault(domainName, DEFAULT_LIMIT) + ", delays, retryDelays);");
+            out.println("        }");
+        });
+        out.println("    }");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // SQL
+
+    private void generateCreateSchemaSql() throws IOException {
+        try (PrintWriter out = openResource("CreateSchema.sql")) {
+            out.print("""
+
+                    CREATE SEQUENCE id_generator START WITH 1000 INCREMENT BY 1;
+
+                    CREATE TABLE tasks (
+                        id BIGINT DEFAULT nextval('id_generator'::regclass) PRIMARY KEY,
+                        created TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                        modified TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+                        status VARCHAR(%d),
+                        in_progress BOOLEAN NOT NULL DEFAULT FALSE,
+                        failing_since TIMESTAMP WITH TIME ZONE,
+                        version INTEGER NOT NULL default 0
+                    );
+
+                    CREATE TABLE task_logs (
+                        id BIGINT DEFAULT nextval('id_generator'::regclass) PRIMARY KEY,
+                        task_id BIGINT NOT NULL,
+                        created TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                        initial_status VARCHAR,
+                        final_status VARCHAR,
+                        class_name VARCHAR,
+                        method_name VARCHAR,
+                        duration_ms BIGINT,
+                        exception_type VARCHAR,
+                        extra_json JSON
+                    );
+
+                    """.formatted(MAX_STATUS_LENGTH));
         }
     }
 
-    private Map<String, List<DoerMethodInfo>> groupMethodsByDomain(List<DoerMethodInfo> methods) {
-        Map<String, List<DoerMethodInfo>> domains = new HashMap<>();
-        for (DoerMethodInfo method : methods) {
-            // Methods added by SetStatusFinder are not doer methods and have no domain; group them by class
-            String domainName = (method.domainName != null ? method.domainName : method.className);
-            domains.computeIfAbsent(domainName, k -> new ArrayList<>()).add(method);
+    /**
+     * Per domain: ready statuses (by created), then delayed statuses (by modified, one select per delay), then
+     * failing statuses (one select per retry interval); finally all in-progress tasks. Each select except the
+     * last has a LIMIT parameter, in this order.
+     */
+    void generateSelectTaskSql() throws IOException {
+        List<String> chunks = new ArrayList<>();
+        for (List<DoerMethodInfo> methods : groupMethodsByDomain(doerMethods).values()) {
+            List<String> selects = new ArrayList<>();
+            List<String> asapStatuses = methods.stream()
+                    .flatMap(m -> m.acceptList.stream())
+                    .filter(a -> a.delay() == null)
+                    .map(Accept::status)
+                    .sorted()
+                    .toList();
+            if (!asapStatuses.isEmpty()) {
+                selects.add(selectTasks("IS NULL", asapStatuses, "created"));
+            }
+            // A "0s" delay is still a delay here: such tasks are ordered by modified
+            groupStatuses(methods, (m, a) -> a.delay()).values()
+                    .forEach(statuses -> selects.add(selectTasks("IS NULL", statuses, "modified")));
+            groupStatuses(methods, (m, a) -> m.retryInterval).values()
+                    .forEach(statuses -> selects.add(selectTasks("IS NOT NULL", statuses, "modified")));
+            chunks.add(String.join("\nUNION ALL\n", selects) + "\n\n");
         }
-        return domains;
+        chunks.add("(SELECT * FROM tasks WHERE in_progress)\n\n");
+
+        try (PrintWriter out = openResource("SelectTasks.sql")) {
+            out.print(String.join("UNION ALL\n", chunks));
+        }
     }
 
-    private Map<Duration, List<String>> groupStatusesByDelay(List<DoerMethodInfo> methods) {
-        Map<Duration, List<String>> result = new HashMap<>();
-        for (DoerMethodInfo method : methods) {
-            for (AcceptStatus annotation : method.acceptList) {
-                Duration duration;
-                if ("".equals(annotation.delay())) {
-                    duration = Duration.ZERO;
-                } else {
-                    duration = parseDuration(annotation.delay());
-                }
-                if (!result.containsKey(duration)) {
-                    result.put(duration, new ArrayList<>());
-                }
-                result.get(duration).add(annotation.value());
-            }
-        }
-        return result;
-    }
-
-    private Map<Duration, List<String>> groupStatusesByRetryDelay(List<DoerMethodInfo> methods) {
-        Map<Duration, List<String>> result = new HashMap<>();
-        for (DoerMethodInfo method : methods) {
-            Duration retryDuration = method.retryInterval;
-            if (!result.containsKey(retryDuration)) {
-                result.put(retryDuration, new ArrayList<>());
-            }
-            for (AcceptStatus annotation : method.acceptList) {
-                result.get(retryDuration).add(annotation.value());
-            }
-        }
-        return result;
+    private String selectTasks(String failingSince, List<String> statuses, String orderBy) {
+        return "(SELECT * FROM tasks WHERE NOT in_progress AND failing_since " + failingSince + " AND status IN (\n"
+                + createSqlValues(statuses) + "\n"
+                + ") ORDER BY " + orderBy + " LIMIT ?)";
     }
 
     private void generateCreateIndexSql() throws IOException {
-        FileObject selectTaskSql = processingEnv.getFiler()
-                .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", "CreateIndexes.sql");
+        List<String> delayedStatuses = doerMethods.stream()
+                .flatMap(m -> m.acceptList.stream())
+                .filter(a -> a.delay() != null)
+                .map(Accept::status)
+                .sorted()
+                .toList();
 
-        List<String> delayedStatues = new ArrayList<>();
-        for (DoerMethodInfo method : doerMethods) {
-            for (AcceptStatus s : method.acceptList) {
-                if (!"".equals(s.delay())) {
-                    delayedStatues.add(s.value());
-                }
-            }
-        }
-
-        try (PrintWriter out = new PrintWriter(selectTaskSql.openWriter())) {
-            out.println("CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks (status, created);");
-            out.println(
-                    "CREATE INDEX IF NOT EXISTS tasks_failing_idx ON tasks (status, modified) WHERE failing_since IS NOT NULL;");
-            out.println(
-                    "CREATE INDEX IF NOT EXISTS tasks_in_progress_idx ON tasks (status) WHERE in_progress;");
-
-            if (!delayedStatues.isEmpty()) {
-                out.println(
-                        "CREATE INDEX IF NOT EXISTS tasks_delayed_idx ON tasks (status, modified) WHERE status IN (");
-                out.println(createSqlValues(delayedStatues));
+        try (PrintWriter out = openResource("CreateIndexes.sql")) {
+            out.print("""
+                    CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks (status, created);
+                    CREATE INDEX IF NOT EXISTS tasks_failing_idx ON tasks (status, modified) WHERE failing_since IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS tasks_in_progress_idx ON tasks (status) WHERE in_progress;
+                    """);
+            if (!delayedStatuses.isEmpty()) {
+                out.println("CREATE INDEX IF NOT EXISTS tasks_delayed_idx ON tasks (status, modified) WHERE status IN (");
+                out.println(createSqlValues(delayedStatuses));
                 out.println(");");
             }
             out.println();
         }
     }
 
-    private void generateCreateSchemaSql() throws IOException {
-        FileObject createSchemaSql = processingEnv.getFiler()
-                .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", "CreateSchema.sql");
-
-        try (PrintWriter out = new PrintWriter(createSchemaSql.openWriter())) {
-            out.println();
-            out.println("CREATE SEQUENCE id_generator START WITH 1000 INCREMENT BY 1;");
-            out.println();
-            out.println("CREATE TABLE tasks (");
-            out.println("    id BIGINT DEFAULT nextval('id_generator'::regclass) PRIMARY KEY,");
-            out.println("    created TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),");
-            out.println("    modified TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),");
-            out.println("    status VARCHAR(" + MAX_STATUS_LENGTH + "),");
-            out.println("    in_progress BOOLEAN NOT NULL DEFAULT FALSE,");
-            out.println("    failing_since TIMESTAMP WITH TIME ZONE,");
-            out.println("    version INTEGER NOT NULL default 0");
-            out.println(");");
-            out.println();
-            out.println("CREATE TABLE task_logs (");
-            out.println("    id BIGINT DEFAULT nextval('id_generator'::regclass) PRIMARY KEY,");
-            out.println("    task_id BIGINT NOT NULL,");
-            out.println("    created TIMESTAMP WITH TIME ZONE DEFAULT now(),");
-            out.println("    initial_status VARCHAR,");
-            out.println("    final_status VARCHAR,");
-            out.println("    class_name VARCHAR,");
-            out.println("    method_name VARCHAR,");
-            out.println("    duration_ms BIGINT,");
-            out.println("    exception_type VARCHAR,");
-            out.println("    extra_json JSON");
-            out.println(");");
-            out.println();
-        }
+    String createSqlValues(List<String> values) {
+        return values.stream()
+                .map(v -> "  '" + v.replace("'", "''") + "'")
+                .collect(Collectors.joining(",\n"));
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // doer.json and doer.dot
+
     private void generateDoerJson() throws IOException {
-        FileObject doerJson = processingEnv.getFiler()
-                .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", "doer.json");
-        try (PrintWriter out = new PrintWriter(doerJson.openWriter())) {
+        try (PrintWriter out = openResource("doer.json")) {
             out.println("{");
             out.println("    \"generator\": \"" + getClass().getName() + "\",");
             out.println("    \"generated\": \"" + Instant.now() + "\",");
             out.println("    \"domains\": [");
             // Same domains as the setupConcurrencyDomain calls in the generated service
-            List<String> domainNames = doerMethods.stream()
+            printJsonEntries(out, doerMethods.stream()
                     .filter(m -> !m.acceptList.isEmpty())
                     .map(m -> m.domainName)
                     .distinct()
                     .sorted()
-                    .collect(Collectors.toList());
-            for (String name : domainNames) {
-                boolean last = name.equals(domainNames.get(domainNames.size() - 1));
-                out.printf("        {%s: %s, %s: %s, %s: %s}%s%n",
-                        jstr("name"), jstr(name),
-                        jstr("limit"), limits.getOrDefault(name, DEFAULT_LIMIT),
-                        jstr("implicit"), !namedDomains.contains(name),
-                        (last ? "" : ","));
-            }
+                    .map(name -> String.format("        {%s: %s, %s: %s, %s: %s}",
+                            jstr("name"), jstr(name),
+                            jstr("limit"), limits.getOrDefault(name, DEFAULT_LIMIT),
+                            jstr("implicit"), !namedDomains.contains(name)))
+                    .toList());
             out.println("    ],");
             out.println("    \"doer_methods\": [");
             List<DoerMethodInfo> sortedMethods = new ArrayList<>(doerMethods);
-            Collections.sort(sortedMethods, Comparator
-                    .comparing((DoerMethodInfo m) -> m.className)
-                    .thenComparing(m -> m.methodName)
-                    .thenComparing(m -> m.parameterTypes.toString()));
-            for (DoerMethodInfo method : sortedMethods) {
-                boolean last = (sortedMethods.get(sortedMethods.size() - 1) == method);
-                out.println("        {");
-                if (method.domainName != null) {
-                    out.printf("            %s: %s,%n", jstr("domain"), jstr(method.domainName));
-                }
-                out.printf("            %s: %s, %s: %s,%n", jstr("class"), jstr(method.className), jstr("method"),
-                        jstr(method.methodName));
-                if (method.hasRetryPolicy()) {
-                    out.printf("            %s: %s,", jstr("interval"), jstr(method.retryIntervalText));
-                    if (method.retryDurationText != null) {
-                        out.printf(" %s: %s,", jstr("duration"), jstr(method.retryDurationText));
-                    }
-                    if (method.fallbackStatus != null) {
-                        out.printf(" %s: %s,", jstr("fallback_status"), jstr(method.fallbackStatus));
-                    }
-                    out.println();
-                }
-                out.print("            \"args\": [");
-                for (int i = 0; i < method.parameterTypes.size(); i++) {
-                    out.print(jstr(method.parameterTypes.get(i)));
-                    if (i < method.parameterTypes.size() - 1) {
-                        out.print(", ");
-                    }
-                }
-                out.println("],");
-                out.println("            \"accepts\": [");
-                List<String> statuses = new ArrayList<>();
-                Map<String, String> delays = new HashMap<>();
-                for (AcceptStatus s : method.acceptList) {
-                    statuses.add(s.value());
-                    if (!"".equals(s.delay())) {
-                        delays.put(s.value(), s.delay());
-                    }
-                }
-                Collections.sort(statuses);
-                for (int i = 0; i < statuses.size(); i++) {
-                    String status = statuses.get(i);
-                    out.printf("                {%s: %s", jstr("status"), jstr(status));
-                    if (delays.containsKey(status)) {
-                        out.printf(", %s: %s}", jstr("delay"), jstr(delays.get(status)));
-                    } else {
-                        out.print("}");
-                    }
-                    if (i >= statuses.size() - 1) {
-                        out.println();
-                    } else {
-                        out.println(",");
-                    }
-                }
-                out.println("            ],");
-                out.println("            \"emits\": [");
-                List<String> emits = new ArrayList<>(new HashSet<>(method.emitList));
-                Iterator<String> iterator = emits.iterator();
-                boolean emitsNull = false;
-                while (iterator.hasNext()) {
-                    if (iterator.next() == null) {
-                        emitsNull = true;
-                        iterator.remove();
-                    }
-                }
-                Collections.sort(emits);
-                for (String status : emits) {
-                    boolean lastStatus = status.equals(emits.get(emits.size() - 1));
-                    out.printf("                %s", jstr(status));
-                    if (!lastStatus) {
-                        out.print(",");
-                    }
-                    out.println();
-                }
-                if (emitsNull) {
-                    out.println("            ],");
-                    out.println("            \"emits_null\": true");
-                } else {
-                    out.println("            ]");
-                }
-                out.println("        }" + (last ? "" : ","));
+            sortedMethods.sort(DoerMethodInfo.BY_SIGNATURE);
+            for (int i = 0; i < sortedMethods.size(); i++) {
+                printDoerMethodJson(out, sortedMethods.get(i));
+                out.println("        }" + (i < sortedMethods.size() - 1 ? "," : ""));
             }
             out.println("    ],");
             out.println("    \"loaders\": [");
-            List<String> loaderTypes = new ArrayList<>();
-            HashMap<String, TaskDataLoaderInfo> loaderMap = new HashMap<>();
-            for (TaskDataLoaderInfo info : loaders) {
-                loaderTypes.add(info.type);
-                loaderMap.put(info.type, info);
-            }
-            Collections.sort(loaderTypes);
-            for (int i = 0; i < loaderTypes.size(); i++) {
-                TaskDataLoaderInfo loader = loaderMap.get(loaderTypes.get(i));
-                out.printf("        {%s: %s, %s: %s, %s: %s}",
-                        jstr("type"), jstr(loader.type),
-                        jstr("class"), jstr(loader.className),
-                        jstr("method"), jstr(loader.methodName));
-                if (i >= loaderTypes.size() - 1) {
-                    out.println();
-                } else {
-                    out.println(",");
-                }
-            }
+            printTypedMethods(out, new TreeMap<>(firstByType(loaders)).values());
             out.println("    ],");
             out.println("    \"savers\": [");
-
-            List<String> saverTypes = new ArrayList<>();
-            HashMap<String, TaskDataSaverInfo> saverMap = new HashMap<>();
-            for (TaskDataSaverInfo info : savers) {
-                saverTypes.add(info.type);
-                saverMap.put(info.type, info);
-            }
-            Collections.sort(saverTypes);
-            for (int i = 0; i < saverTypes.size(); i++) {
-                TaskDataSaverInfo saver = saverMap.get(saverTypes.get(i));
-                out.printf("        {%s: %s, %s: %s, %s: %s}",
-                        jstr("type"), jstr(saver.type),
-                        jstr("class"), jstr(saver.className),
-                        jstr("method"), jstr(saver.methodName));
-                if (i >= saverTypes.size() - 1) {
-                    out.println();
-                } else {
-                    out.println(",");
-                }
-            }
+            printTypedMethods(out, new TreeMap<>(firstByType(savers)).values());
             out.println("    ],");
             out.println("    \"exception_describers\": [");
-            for (int i = 0; i < describers.size(); i++) {
-                ExceptionDescriberInfo describer = describers.get(i);
-                out.printf("        {%s: %s, %s: %s, %s: %s}",
-                        jstr("type"), jstr(describer.type),
-                        jstr("class"), jstr(describer.className),
-                        jstr("method"), jstr(describer.methodName));
-                if (i >= describers.size() - 1) {
-                    out.println();
-                } else {
-                    out.println(",");
-                }
-            }
+            printTypedMethods(out, describers);
             out.println("    ]");
             out.println("}");
+        }
+    }
+
+    /** Prints a doer method object without its closing brace. */
+    private void printDoerMethodJson(PrintWriter out, DoerMethodInfo method) {
+        out.println("        {");
+        if (method.domainName != null) {
+            out.printf("            %s: %s,%n", jstr("domain"), jstr(method.domainName));
+        }
+        out.printf("            %s: %s, %s: %s,%n", jstr("class"), jstr(method.className), jstr("method"),
+                jstr(method.methodName));
+        if (method.hasRetryPolicy()) {
+            out.printf("            %s: %s,", jstr("interval"), jstr(method.retryIntervalText));
+            if (method.retryDurationText != null) {
+                out.printf(" %s: %s,", jstr("duration"), jstr(method.retryDurationText));
+            }
+            if (method.fallbackStatus != null) {
+                out.printf(" %s: %s,", jstr("fallback_status"), jstr(method.fallbackStatus));
+            }
+            out.println();
+        }
+        out.println("            \"args\": [" + method.parameterTypes.stream().map(DoerProcessor::jstr)
+                .collect(Collectors.joining(", ")) + "],");
+        out.println("            \"accepts\": [");
+        printJsonEntries(out, method.acceptList.stream()
+                .sorted(Comparator.comparing(Accept::status))
+                .map(a -> "                {" + jstr("status") + ": " + jstr(a.status())
+                        + (a.delay() != null ? ", " + jstr("delay") + ": " + jstr(a.delayText()) : "") + "}")
+                .toList());
+        out.println("            ],");
+        out.println("            \"emits\": [");
+        printJsonEntries(out, method.emitList.stream()
+                .filter(Objects::nonNull)
+                .distinct()
+                .sorted()
+                .map(status -> "                " + jstr(status))
+                .toList());
+        if (method.emitList.contains(null)) {
+            out.println("            ],");
+            out.println("            \"emits_null\": true");
+        } else {
+            out.println("            ]");
+        }
+    }
+
+    private void printTypedMethods(PrintWriter out, Collection<? extends TypedMethodInfo> methods) {
+        printJsonEntries(out, methods.stream()
+                .map(m -> String.format("        {%s: %s, %s: %s, %s: %s}",
+                        jstr("type"), jstr(m.type()),
+                        jstr("class"), jstr(m.className()),
+                        jstr("method"), jstr(m.methodName())))
+                .toList());
+    }
+
+    /** Prints the entries of a JSON array (or object), one per line, separated by commas. */
+    private void printJsonEntries(PrintWriter out, List<String> entries) {
+        if (!entries.isEmpty()) {
+            out.println(String.join(",\n", entries));
         }
     }
 
@@ -1259,52 +1035,36 @@ public class DoerProcessor extends AbstractProcessor {
                 {"#20C997", "#D8F3E8", "#116D5E"},
                 {"#FFC107", "#FFF9DB", "#856404"},
         };
-        FileObject doerJson = processingEnv.getFiler()
-                .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", "doer.dot");
-        try (PrintWriter out = new PrintWriter(doerJson.openWriter())) {
-            out.println("digraph alg {");
-            out.println("    rankdir=TD;");
-            out.println("    graph [overlap=true];");
-            out.println("    node [");
-            out.println("        fontname=Helvetica,");
-            out.println("        fontsize=10,");
-            out.println("        shape=box,");
-            out.println("        style=filled,");
-            out.println("        margin=\"0.1,0.1\",");
-            out.println("        height=0.3");
-            out.println("    ];");
-
-            AtomicInteger methodNodeIndexer = new AtomicInteger(100);
-            HashMap<DoerMethodInfo, String> methodNodeNames = new HashMap<>();
-            AtomicInteger statusNodeIndexer = new AtomicInteger(500);
-            HashMap<String, String> statusNodeNames = new HashMap<>();
-            HashMap<DoerMethodInfo, String> terminationStatusNodeNames = new HashMap<>();
+        try (PrintWriter out = openResource("doer.dot")) {
+            out.print("""
+                    digraph alg {
+                        rankdir=TD;
+                        graph [overlap=true];
+                        node [
+                            fontname=Helvetica,
+                            fontsize=10,
+                            shape=box,
+                            style=filled,
+                            margin="0.1,0.1",
+                            height=0.3
+                        ];
+                    """);
 
             List<DoerMethodInfo> sortedDoerMethods = new ArrayList<>(doerMethods);
-            sortedDoerMethods.sort(Comparator
-                    .comparing((DoerMethodInfo m) -> m.className)
-                    .thenComparing(m -> m.methodName)
-                    .thenComparing(m -> m.parameterTypes.toString()));
+            sortedDoerMethods.sort(DoerMethodInfo.BY_SIGNATURE);
 
-            Map<String, List<DoerMethodInfo>> domainMethods = groupMethodsByDomain(sortedDoerMethods);
-            List<String> sortedDomainNames = new ArrayList<>(domainMethods.keySet());
-            Collections.sort(sortedDomainNames);
-            for (int nameIndex = 0; nameIndex < sortedDomainNames.size(); nameIndex++) {
+            Map<DoerMethodInfo, String> methodNodeNames = new HashMap<>();
+            int domainIndex = 0;
+            for (List<DoerMethodInfo> domainMethods : groupMethodsByDomain(sortedDoerMethods).values()) {
+                String[] colorScheme = colors[domainIndex++ % colors.length];
                 out.println();
-                String[] colorScheme = colors[nameIndex % colors.length];
-                String borderColor = colorScheme[0];
-                String fillColor = colorScheme[1];
-                String fontColor = colorScheme[2];
                 out.printf("node [color=\"%s\", fillcolor=\"%s\", fontcolor=\"%s\"];%n",
-                        borderColor, fillColor, fontColor);
-
-                String domainName = sortedDomainNames.get(nameIndex);
-                for (DoerMethodInfo method : domainMethods.get(domainName)) {
-                    String fullName = method.className + "." + method.methodName;
-                    String nodeName = methodNodeNames.computeIfAbsent(method,
-                            key -> "m" + methodNodeIndexer.incrementAndGet());
+                        colorScheme[0], colorScheme[1], colorScheme[2]);
+                for (DoerMethodInfo method : domainMethods) {
+                    String nodeName = "m" + (101 + methodNodeNames.size());
+                    methodNodeNames.put(method, nodeName);
                     out.printf("%s [label=\"%s\", tooltip=\"%s\"];%n",
-                            nodeName, method.methodName, fullName);
+                            nodeName, method.methodName, method.className + "." + method.methodName);
                 }
             }
 
@@ -1313,89 +1073,74 @@ public class DoerProcessor extends AbstractProcessor {
 
             Set<String> accepted = new HashSet<>();
             Set<String> emitted = new HashSet<>();
-            Set<String> onerror = new HashSet<>();
+            Set<String> onError = new HashSet<>();
             for (DoerMethodInfo method : sortedDoerMethods) {
                 emitted.addAll(method.emitList);
-                for (AcceptStatus acceptStatus : method.acceptList) {
-                    accepted.add(acceptStatus.value());
-                }
+                method.acceptList.forEach(a -> accepted.add(a.status()));
                 if (hasFallbackEdge(method) && method.fallbackStatus != null) {
-                    onerror.add(method.fallbackStatus);
+                    onError.add(method.fallbackStatus);
                 }
             }
             emitted.remove(null);
-            Set<String> allStatuses = new HashSet<>();
-            allStatuses.addAll(accepted);
+            Set<String> allStatuses = new HashSet<>(accepted);
             allStatuses.addAll(emitted);
-            allStatuses.addAll(onerror);
-            List<String> sortedStatuses = new ArrayList<>(allStatuses);
-            Comparator<String> comparator = Comparator.<String, Integer>comparing(s -> {
-                if (accepted.contains(s) && !emitted.contains(s) && !onerror.contains(s)) {
-                    return 1;
-                } else if (accepted.contains(s) && emitted.contains(s) && !onerror.contains(s)) {
-                    return 2;
-                } else if (accepted.contains(s) && emitted.contains(s) && onerror.contains(s)) {
-                    return 3;
-                } else if (accepted.contains(s) && !emitted.contains(s) && onerror.contains(s)) {
-                    return 4;
-                } else if (!accepted.contains(s) && emitted.contains(s) && !onerror.contains(s)) {
-                    return 5;
-                } else if (!accepted.contains(s) && emitted.contains(s) && onerror.contains(s)) {
-                    return 6;
-                } else if (!accepted.contains(s) && !emitted.contains(s) && onerror.contains(s)) {
-                    return 7;
-                } else {
-                    return 8;
-                }
-            }).thenComparing(s -> s);
-            sortedStatuses.sort(comparator);
+            allStatuses.addAll(onError);
+            // Accepted statuses first; within each group: only accepted/emitted, emitted, emitted and set on
+            // error, only set on error
+            Comparator<String> byRank = Comparator.comparingInt(s -> (accepted.contains(s) ? 0 : 4)
+                    + (onError.contains(s) ? (emitted.contains(s) ? 2 : 3) : (emitted.contains(s) ? 1 : 0)));
+            List<String> sortedStatuses = allStatuses.stream()
+                    .sorted(byRank.thenComparing(Comparator.naturalOrder()))
+                    .toList();
+            int statusNodeIndex = 500;
+            Map<String, String> statusNodeNames = new HashMap<>();
             for (String status : sortedStatuses) {
-                String nodeName = statusNodeNames.computeIfAbsent(status,
-                        key -> "s" + statusNodeIndexer.incrementAndGet());
+                String nodeName = "s" + (++statusNodeIndex);
+                statusNodeNames.put(status, nodeName);
                 out.printf("%s [label=\" \", tooltip=\"%s\"];%n", nodeName, escape(status));
             }
 
+            Map<DoerMethodInfo, String> terminationNodeNames = new HashMap<>();
             for (DoerMethodInfo method : sortedDoerMethods) {
                 if (method.emitList.contains(null) || (hasFallbackEdge(method) && method.fallbackStatus == null)) {
-                    String nodeName = terminationStatusNodeNames.computeIfAbsent(method,
-                            key -> "n" + statusNodeIndexer.incrementAndGet());
+                    String nodeName = "n" + (++statusNodeIndex);
+                    terminationNodeNames.put(method, nodeName);
                     out.printf("%s [label=\"❌\", shape=none, fillcolor=\"none\", fontcolor=\"red\", fontsize=20, tooltip=\"null\"];%n", nodeName);
                 }
             }
 
-            Set<String> errorOnlyStatuses = new HashSet<>(onerror);
+            Set<String> errorOnlyStatuses = new HashSet<>(onError);
             errorOnlyStatuses.removeAll(emitted);
             out.println();
             out.println("edge [arrowhead=\"vee\",fontname=\"Helvetica\",fontsize=\"8\",penwidth=0.8];");
             for (DoerMethodInfo method : sortedDoerMethods) {
                 String methodNodeName = methodNodeNames.get(method);
-                List<AcceptStatus> acceptList = new ArrayList<>(method.acceptList);
-                acceptList.sort(Comparator.comparing(AcceptStatus::value));
-                for (AcceptStatus acceptStatus : acceptList) {
-                    String status = acceptStatus.value();
-                    String statusNodeName = statusNodeNames.get(status);
-                    if (!"".equals(acceptStatus.delay())) {
-                        String label = "delay " + acceptStatus.delay();
-                        String toolTip = acceptStatus.delay();
+                List<Accept> acceptList = new ArrayList<>(method.acceptList);
+                acceptList.sort(Comparator.comparing(Accept::status));
+                for (Accept accept : acceptList) {
+                    String statusNodeName = statusNodeNames.get(accept.status());
+                    if (accept.delay() != null) {
                         out.printf("%s -> %s[arrowtail=dot,dir=both,label=\"%s\", tooltip=\"%s\"];%n",
-                                statusNodeName, methodNodeName, escape(label), escape(toolTip));
-                    } else if (errorOnlyStatuses.contains(status)) {
-                        out.printf("%s -> %s[color=\"red\"];%n",
-                                statusNodeName, methodNodeName);
+                                statusNodeName, methodNodeName, escape("delay " + accept.delayText()),
+                                escape(accept.delayText()));
+                    } else if (errorOnlyStatuses.contains(accept.status())) {
+                        out.printf("%s -> %s[color=\"red\"];%n", statusNodeName, methodNodeName);
                     } else {
                         out.printf("%s -> %s;%n", statusNodeName, methodNodeName);
                     }
                 }
-                List<String> emitList = new ArrayList<>(new HashSet<>(method.emitList));
-                emitList.sort(Comparator.nullsLast(Comparator.naturalOrder()));
+                List<String> emitList = method.emitList.stream()
+                        .distinct()
+                        .sorted(Comparator.nullsLast(Comparator.naturalOrder()))
+                        .toList();
                 for (String status : emitList) {
-                    String statusNodeName = (status != null ? statusNodeNames.get(status) :
-                            terminationStatusNodeNames.get(method));
+                    String statusNodeName = status != null ? statusNodeNames.get(status)
+                            : terminationNodeNames.get(method);
                     out.printf("%s -> %s;%n", methodNodeName, statusNodeName);
                 }
                 if (hasFallbackEdge(method)) {
-                    String statusNodeName = (method.fallbackStatus != null ? statusNodeNames.get(method.fallbackStatus)
-                            : terminationStatusNodeNames.get(method));
+                    String statusNodeName = method.fallbackStatus != null ? statusNodeNames.get(method.fallbackStatus)
+                            : terminationNodeNames.get(method);
                     String toolTip = "[after retry] every " + method.retryIntervalText
                             + " during " + method.retryDurationText;
                     out.printf("%s -> %s[color=\"red\", tooltip=\"%s\"];%n",
@@ -1414,132 +1159,118 @@ public class DoerProcessor extends AbstractProcessor {
         return method.hasRetryPolicy() && method.retryDurationText != null;
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // Helpers
+
+    private PrintWriter openResource(String name) throws IOException {
+        return new PrintWriter(processingEnv.getFiler()
+                .createResource(StandardLocation.CLASS_OUTPUT, "com.doer.generated", name)
+                .openWriter());
+    }
+
+    /** Groups doer methods by domain name, sorted by it. */
+    private Map<String, List<DoerMethodInfo>> groupMethodsByDomain(List<DoerMethodInfo> methods) {
+        Map<String, List<DoerMethodInfo>> domains = new TreeMap<>();
+        for (DoerMethodInfo method : methods) {
+            // Methods added by SetStatusFinder are not doer methods and have no domain; group them by class
+            String domainName = (method.domainName != null ? method.domainName : method.className);
+            domains.computeIfAbsent(domainName, k -> new ArrayList<>()).add(method);
+        }
+        return domains;
+    }
+
+    /**
+     * Groups the accepted statuses of the methods by the duration {@code key} returns for them; statuses with a
+     * null key are left out. Both the durations and the statuses of each duration are sorted.
+     */
+    private Map<Duration, List<String>> groupStatuses(List<DoerMethodInfo> methods,
+            BiFunction<DoerMethodInfo, Accept, Duration> key) {
+        Map<Duration, List<String>> result = new TreeMap<>();
+        for (DoerMethodInfo method : methods) {
+            for (Accept accept : method.acceptList) {
+                Duration duration = key.apply(method, accept);
+                if (duration != null) {
+                    result.computeIfAbsent(duration, k -> new ArrayList<>()).add(accept.status());
+                }
+            }
+        }
+        result.values().forEach(Collections::sort);
+        return result;
+    }
+
+    /** The first method for each type, in the order of the methods. */
+    private static <T extends TypedMethodInfo> Map<String, T> firstByType(List<T> methods) {
+        Map<String, T> result = new LinkedHashMap<>();
+        methods.forEach(m -> result.putIfAbsent(m.type(), m));
+        return result;
+    }
+
+    /** Classes injected into the generated service, with duplicates. */
+    private Stream<String> beanClassNames() {
+        return Stream.of(doerMethods.stream().map(m -> m.className),
+                        loaders.stream().map(TaskDataLoaderInfo::className),
+                        savers.stream().map(TaskDataSaverInfo::className),
+                        describers.stream().map(ExceptionDescriberInfo::className))
+                .flatMap(s -> s);
+    }
+
     protected String createDurationLiteral(Duration duration) {
         if (duration == null) {
             return "null";
         } else if (duration.isZero()) {
             return "Duration.ZERO";
-        } else {
-            long seconds = duration.getSeconds();
-            long secondsInDay = Duration.ofDays(1).getSeconds();
-            long secondsInHour = Duration.ofHours(1).getSeconds();
-            long secondsInMinute = Duration.ofMinutes(1).getSeconds();
-            if (seconds % secondsInDay == 0) {
-                return "Duration.ofDays(" + (seconds / secondsInDay) + ")";
-            } else if (seconds % secondsInHour == 0) {
-                return "Duration.ofHours(" + (seconds / secondsInHour) + ")";
-            } else if (seconds % secondsInMinute == 0) {
-                return "Duration.ofMinutes(" + (seconds / secondsInMinute) + ")";
-            } else {
-                return "Duration.ofSeconds(" + seconds + ")";
-            }
         }
+        long seconds = duration.getSeconds();
+        if (seconds % Duration.ofDays(1).getSeconds() == 0) {
+            return "Duration.ofDays(" + duration.toDays() + ")";
+        } else if (seconds % Duration.ofHours(1).getSeconds() == 0) {
+            return "Duration.ofHours(" + duration.toHours() + ")";
+        } else if (seconds % Duration.ofMinutes(1).getSeconds() == 0) {
+            return "Duration.ofMinutes(" + duration.toMinutes() + ")";
+        }
+        return "Duration.ofSeconds(" + seconds + ")";
     }
 
     protected Duration parseDuration(String duration) {
-        Matcher matcher = Pattern.compile("^\\s*(\\d+)\\s*(\\w+)\\s*$")
-                .matcher(duration);
-        if (!matcher.find()) {
+        Matcher matcher = DURATION_PATTERN.matcher(duration);
+        if (!matcher.matches()) {
             throw new IllegalArgumentException("Failed to parse duration");
         }
-        int amount = Integer.parseInt(matcher.group(1));
         String unit = matcher.group(2);
-        TimeUnit timeUnit;
-        switch (unit) {
-            case "s":
-            case "sec":
-            case "second":
-            case "seconds":
-                timeUnit = TimeUnit.SECONDS;
-                break;
-            case "m":
-            case "min":
-            case "minute":
-            case "minutes":
-                timeUnit = TimeUnit.MINUTES;
-                break;
-            case "h":
-            case "hour":
-            case "hours":
-                timeUnit = TimeUnit.HOURS;
-                break;
-            case "d":
-            case "day":
-            case "days":
-                timeUnit = TimeUnit.DAYS;
-                break;
-            default:
-                throw new IllegalArgumentException("Unknown duration unit type: " + unit);
-        }
-        return Duration.ofMillis(timeUnit.toMillis(amount));
+        ChronoUnit chronoUnit = switch (unit) {
+            case "s", "sec", "second", "seconds" -> ChronoUnit.SECONDS;
+            case "m", "min", "minute", "minutes" -> ChronoUnit.MINUTES;
+            case "h", "hour", "hours" -> ChronoUnit.HOURS;
+            case "d", "day", "days" -> ChronoUnit.DAYS;
+            default -> throw new IllegalArgumentException("Unknown duration unit type: " + unit);
+        };
+        return Duration.of(Integer.parseInt(matcher.group(1)), chronoUnit);
     }
 
-    String createSqlValues(List<String> values) {
-        List<String> escapedValues = values.stream()
-                .map(v -> "  '" + v.replaceAll("'", "''") + "'")
-                .collect(Collectors.toList());
-        return String.join(",\n", escapedValues);
-    }
-
-    private HashMap<String, String> createTypeShortcuts() {
+    /** Short names of the types used in the generated service; a full name when the short one is taken. */
+    private Map<String, String> createTypeShortcuts() {
         Elements elementUtils = processingEnv.getElementUtils();
-        HashMap<String, String> shortnames = new HashMap<>();
-        shortnames.put("com.doer.Task", "Task");
-        shortnames.put("com.doer.DoerService", "DoerService");
-        shortnames.put("java.lang.Override", "Override");
-        shortnames.put("java.lang.Exception", "Exception");
-        shortnames.put("java.lang.Throwable", "Throwable");
-        shortnames.put("jakarta.transaction.Transactional", "Transactional");
-        shortnames.put("jakarta.inject.Inject", "Inject");
-        shortnames.put("jakarta.enterprise.context.ApplicationScoped", "ApplicationScoped");
-        shortnames.put("jakarta.annotation.Generated", "Generated");
-        shortnames.put("jakarta.json.JsonObjectBuilder", "JsonObjectBuilder");
-        shortnames.put("jakarta.json.JsonObject", "JsonObject");
-        shortnames.put("jakarta.json.JsonArrayBuilder", "JsonArrayBuilder");
-        shortnames.put("jakarta.json.JsonArray", "JsonArray");
-        shortnames.put("jakarta.json.Json", "Json");
-        shortnames.put("jakarta.json.JsonWriterFactory", "JsonWriterFactory");
-        shortnames.put("jakarta.json.JsonWriter", "JsonWriter");
-        shortnames.put("jakarta.json.stream.JsonGenerator", "JsonGenerator");
+        Map<String, String> shortcuts = new HashMap<>();
+        GENERATED_SERVICE_TYPES.forEach(type -> shortcuts.put(type, simpleName(type)));
 
-        shortnames.put("java.util.concurrent.Callable", "Callable");
-        shortnames.put("javax.sql.DataSource", "DataSource");
-        shortnames.put("java.sql.Connection", "Connection");
-        shortnames.put("java.sql.SQLException", "SQLException");
-        shortnames.put("java.io.IOException", "IOException");
-        shortnames.put("java.util.List", "List");
-        shortnames.put("java.util.HashMap", "HashMap");
-        shortnames.put("java.util.Collections", "Collections");
-        shortnames.put("java.util.ArrayList", "ArrayList");
-        shortnames.put("java.io.StringWriter", "StringWriter");
-        shortnames.put("java.time.Duration", "Duration");
-        shortnames.put("java.util.concurrent.Executor", "Executor");
-        shortnames.put("com.doer.TaskUpdater", "TaskUpdater");
-        shortnames.put("com.doer.TaskAndDataUpdater", "TaskAndDataUpdater");
-
-        Stream<String> classes1 = doerMethods.stream().map(s -> s.className);
-        Stream<String> classes2 = loaders.stream().map(s -> s.className);
-        Stream<String> classes3 = savers.stream().map(s -> s.className);
-        Stream<String> classes4 = doerMethods.stream().flatMap(s -> s.parameterTypes.stream());
-        Stream<String> classes5 = describers.stream().flatMap(s -> Stream.of(s.type, s.className));
-        Stream<String> classes6 = Stream.concat(loaders.stream().map(s -> s.type), savers.stream().map(s -> s.type))
-                .filter(this::isPlainClassType);
-        Stream.of(classes1, classes2, classes3, classes4, classes5, classes6).flatMap(i -> i).forEach(cn -> {
-            if (!shortnames.containsKey(cn)) {
-                TypeElement element = elementUtils.getTypeElement(cn);
-                if (element == null) {
-                    processingEnv.getMessager().printMessage(Kind.ERROR, "Can not load type information about " + cn);
-                    return;
-                }
-                String name = element.getSimpleName().toString();
-                if (shortnames.values().contains(name)) {
-                    shortnames.put(cn, cn);
-                } else {
-                    shortnames.put(cn, name);
-                }
-            }
-        });
-        return shortnames;
+        Stream.of(beanClassNames(),
+                        doerMethods.stream().flatMap(m -> m.parameterTypes.stream()),
+                        describers.stream().map(ExceptionDescriberInfo::type),
+                        Stream.concat(loaders.stream().map(TaskDataLoaderInfo::type),
+                                savers.stream().map(TaskDataSaverInfo::type)).filter(this::isPlainClassType))
+                .flatMap(s -> s)
+                .filter(type -> !shortcuts.containsKey(type))
+                .forEach(type -> {
+                    TypeElement element = elementUtils.getTypeElement(type);
+                    if (element == null) {
+                        processingEnv.getMessager().printMessage(Kind.ERROR,
+                                "Can not load type information about " + type);
+                        return;
+                    }
+                    String name = element.getSimpleName().toString();
+                    shortcuts.put(type, shortcuts.containsValue(name) ? type : name);
+                });
+        return shortcuts;
     }
 
     /** Class without type arguments, so it can be used as a {@code X.class} literal. */
@@ -1547,55 +1278,45 @@ public class DoerProcessor extends AbstractProcessor {
         return !type.contains("<") && processingEnv.getElementUtils().getTypeElement(type) != null;
     }
 
-    private HashMap<String, String> createFieldNames() {
+    private Map<String, String> createFieldNames() {
         Elements elementUtils = processingEnv.getElementUtils();
-        HashMap<String, String> fieldNames = new HashMap<>();
-        Stream<String> classes1 = doerMethods.stream().map(s -> s.className);
-        Stream<String> classes2 = loaders.stream().map(s -> s.className);
-        Stream<String> classes3 = savers.stream().map(s -> s.className);
-        Stream<String> classes4 = describers.stream().map(s -> s.className);
-        Stream.of(classes1, classes2, classes3, classes4).flatMap(i -> i).forEach(cn -> {
-            if (!fieldNames.containsKey(cn)) {
-                TypeElement element = elementUtils.getTypeElement(cn);
-                fieldNames.put(cn, createFieldName(element.getSimpleName().toString(), fieldNames));
+        Map<String, String> fieldNames = new HashMap<>();
+        beanClassNames().forEach(className -> {
+            if (!fieldNames.containsKey(className)) {
+                String simpleName = elementUtils.getTypeElement(className).getSimpleName().toString();
+                fieldNames.put(className, createFieldName(simpleName, fieldNames));
             }
         });
         return fieldNames;
     }
 
-    private String createFieldName(String shortName, HashMap<String, String> fieldNames) {
-        List<String> notAllowedNames = Arrays.asList("task", "status", "args", "dataSource", "data", "type", "updater");
-        List<String> javaKeywords = Arrays.asList(
-                "abstract", "continue", "for", "new", "switch", "assert", "default", "goto", "package", "synchronized",
-                "boolean", "do", "if", "private", "this", "break", "double", "implements", "protected", "throw",
-                "byte", "else", "import", "public", "throws", "case", "enum", "instanceof", "return", "transient",
-                "catch", "extends", "int", "short", "try", "char", "final", "interface", "static", "void",
-                "class", "finally", "long", "strictfp", "volatile", "const", "float", "native", "super", "while");
-        String name = shortName.substring(0, 1).toLowerCase() + shortName.substring(1);
-        if (!(fieldNames.values().contains(name) || notAllowedNames.contains(name) || javaKeywords.contains(name))) {
+    private String createFieldName(String simpleName, Map<String, String> fieldNames) {
+        String name = simpleName.substring(0, 1).toLowerCase() + simpleName.substring(1);
+        if (!fieldNames.containsValue(name) && !RESERVED_FIELD_NAMES.contains(name) && !SourceVersion.isKeyword(name)) {
             return name;
         }
-        for (int i = 0; i < 10000; i++) {
+        for (int i = 0; ; i++) {
             String varName = "var" + i;
-            if (!fieldNames.values().contains(varName)) {
-                return name;
+            if (!fieldNames.containsValue(varName)) {
+                return varName;
             }
         }
-        throw new RuntimeException("Can not create field name");
     }
 
-    private String escape(String s) {
-        return s.replaceAll(Pattern.quote("\\"), "\\\\")
-                .replaceAll(Pattern.quote("\r"), "\\r")
-                .replaceAll(Pattern.quote("\n"), "\\n")
-                .replaceAll(Pattern.quote("\t"), "\\t");
+    private static String simpleName(String className) {
+        return className.substring(className.lastIndexOf('.') + 1);
     }
 
-    private String jstr(String s) {
-        if (s == null) {
-            return "null";
-        } else {
-            return "\"" + escape(s).replaceAll(Pattern.quote("\""), "\\\"") + "\"";
-        }
+    /** Escapes a string for a Java, JSON or DOT string literal. */
+    private static String escape(String s) {
+        return s.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t");
+    }
+
+    private static String jstr(String s) {
+        return s == null ? "null" : "\"" + escape(s) + "\"";
     }
 }
