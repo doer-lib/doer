@@ -23,7 +23,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 import javax.annotation.processing.ProcessingEnvironment;
-import javax.annotation.processing.RoundEnvironment;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
@@ -35,25 +34,29 @@ import javax.lang.model.type.TypeMirror;
 /**
  * Finds constant statuses passed to {@link Task#setStatus(String)} in method
  * bodies and adds them to {@link DoerMethodInfo#emitList}.
+ * <p>
+ * Must scan only classes that javac has already attributed (after the ANALYZE task event), so that
+ * {@link Trees#getElement} only reads symbols. Attributing method bodies from an annotation processor,
+ * before the classes it generates exist, breaks compilation of anonymous classes on javac 17-25.
  */
 class SetStatusFinder {
 
-    private final RoundEnvironment roundEnv;
     private final Trees trees;
-    private List<DoerMethodInfo> methods;
+    private final List<DoerMethodInfo> methods;
 
-    SetStatusFinder(RoundEnvironment roundEnv, ProcessingEnvironment processingEnv) {
-        this.roundEnv = roundEnv;
+    /** @param methods doer methods; methods that set a status but are not doer methods are added to it */
+    SetStatusFinder(ProcessingEnvironment processingEnv, List<DoerMethodInfo> methods) {
         this.trees = Trees.instance(processingEnv);
+        this.methods = methods;
     }
 
-    void updateDoerMethods(List<DoerMethodInfo> methods) {
-        this.methods = methods;
-        for (Element element : roundEnv.getRootElements()) {
-            if (element instanceof TypeElement) {
-                scanType((TypeElement) element);
-            }
+    /** Scans a top-level class with its nested classes. */
+    void scanTopLevelType(TypeElement type) {
+        if (type == null || trees.getPath(type) == null) {
+            // package-info and module-info have no class tree
+            return;
         }
+        scanType(type);
     }
 
     private void scanType(TypeElement type) {

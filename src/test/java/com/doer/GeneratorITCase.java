@@ -4,6 +4,7 @@ import static com.doer.Utils.exec;
 import static io.restassured.path.json.JsonPath.with;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
@@ -1047,15 +1048,40 @@ public class GeneratorITCase {
         String messages = javac(0, "Orders.java");
 
         assertTrue(messages.contains("Doer method accept has no @RetryPolicy"), messages);
+        assertFalse(messages.contains("do not contain the statuses set by Task.setStatus"), messages);
         String service = new String(Files.readAllBytes(
                 dir.resolve("classes/com/doer/generated/_GeneratedDoerService.java")), UTF_8);
         assertTrue(service.contains("Duration.ofDays(1), null);"), service);
     }
 
-    /** Compiles the files with DoerProcessor and returns the compiler messages. */
-    private String javac(int expectedStatus, String... files) throws Exception {
+    @Test
+    void javac__should_warn_that_proc_only_has_no_emits() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    @RetryPolicy(interval = \"5m\")\n" +
+                "    public void accept(Task task) {\n" +
+                "        task.setStatus(\"B\");\n" +
+                "    }\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        String messages = javac(0, "-proc:only", "Orders.java");
+
+        assertTrue(messages.contains("doer.json and doer.dot do not contain the statuses set by Task.setStatus"),
+                messages);
+        File doerJson = new File(dir.toFile(), "classes/com/doer/generated/doer.json");
+        assertEquals(Arrays.asList(), with(doerJson).getList("doer_methods[0].emits"));
+        assertTrue(new File(dir.toFile(), "classes/com/doer/generated/doer.dot").isFile());
+    }
+
+    /** Compiles with DoerProcessor (args are options and files) and returns the compiler messages. */
+    private String javac(int expectedStatus, String... args) throws Exception {
         exec(expectedStatus, dir, "javac -J-ea -Xstdout javac.txt -processor com.doer.processor.DoerProcessor "
-                + "-cp ? -d classes " + String.join(" ", files), doerJackarta);
+                + "-cp ? -d classes " + String.join(" ", args), doerJackarta);
         return new String(Files.readAllBytes(dir.resolve("javac.txt")), UTF_8);
     }
 
