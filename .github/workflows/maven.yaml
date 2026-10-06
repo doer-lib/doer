@@ -15,6 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Per-PR Maven repository cache: each PR build restores the latest cache of this PR and saves a new one
+      - name: Restore Maven repository
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: maven-pr-${{ github.event.pull_request.number }}-
+
       # Java27 is used to build library (but --release=17)
       - name: Set up JDK 27 (for building)
         uses: actions/setup-java@v6
@@ -35,3 +44,10 @@ jobs:
         run: mvn --version
       - name: Tests Java${{ matrix.version }} jakarta 10.0.0
         run: mvn -B --color=always verify
+
+      - name: Save Maven repository
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && matrix.version == 27 }}
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
