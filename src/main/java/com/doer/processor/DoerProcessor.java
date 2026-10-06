@@ -38,7 +38,10 @@ import javax.annotation.processing.SupportedAnnotationTypes;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
+import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.ExecutableType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
@@ -62,10 +65,17 @@ public class DoerProcessor extends AbstractProcessor {
     static final Duration DEFAULT_RETRY_DURATION = Duration.ofDays(1);
 
     private static final Pattern DURATION_PATTERN = Pattern.compile("\\s*(\\d+)\\s*(\\w+)\\s*");
-    /** Types used by the generated service besides the beans and their data types. */
-    private static final List<String> GENERATED_SERVICE_TYPES = List.of(
+    /** Names of parameters and locals of the generated service that would hide a bean field. */
+    private static final Set<String> RESERVED_FIELD_NAMES = Set.of(
+            "task", "status", "args", "dataSource", "data", "type", "updater", "exception", "builder");
+    /**
+     * Types the generated service refers to by short names. Includes the java.lang ones, because an import of
+     * a user class with the same short name would hide them.
+     */
+    private static final List<String> TYPES_USED_IN_GENERATED_CODE = List.of(
             "com.doer.Task", "com.doer.DoerService", "com.doer.TaskUpdater", "com.doer.TaskAndDataUpdater",
-            "java.lang.Override", "java.lang.Exception", "java.lang.Throwable",
+            "java.lang.Override", "java.lang.Exception", "java.lang.Throwable", "java.lang.String",
+            "java.lang.Object", "java.lang.Class", "java.lang.Integer", "java.lang.IllegalArgumentException",
             "jakarta.transaction.Transactional", "jakarta.inject.Inject",
             "jakarta.enterprise.context.ApplicationScoped", "jakarta.annotation.Generated",
             "jakarta.json.JsonObjectBuilder", "jakarta.json.JsonObject", "jakarta.json.JsonArrayBuilder",
@@ -74,9 +84,6 @@ public class DoerProcessor extends AbstractProcessor {
             "java.util.concurrent.Callable", "java.util.concurrent.Executor", "javax.sql.DataSource",
             "java.sql.SQLException", "java.io.IOException", "java.io.StringWriter", "java.util.List",
             "java.util.HashMap", "java.time.Duration");
-    /** Names of parameters and locals of the generated service that would hide a bean field. */
-    private static final Set<String> RESERVED_FIELD_NAMES = Set.of(
-            "task", "status", "args", "dataSource", "data", "type", "updater", "exception", "builder");
 
     // Filled by process() in the round with doer annotations
     private final List<DoerMethodInfo> doerMethods = new ArrayList<>();
@@ -186,14 +193,22 @@ public class DoerProcessor extends AbstractProcessor {
         elements.addAll(roundEnv.getElementsAnnotatedWith(AcceptStatuses.class));
 
         for (Element element : elements) {
-            ExecutableType method = methodType(element, "AcceptStatus");
-            if (method == null) {
+            if (methodType(element, "AcceptStatus") == null) {
+                continue;
+            }
+            List<String> parameterTypes = new ArrayList<>();
+            for (VariableElement parameter : ((ExecutableElement) element).getParameters()) {
+                parameterTypes.add(supportedDoerArgumentType(parameter.asType(),
+                        "parameter " + parameter.getSimpleName() + " of @AcceptStatus method", parameter));
+            }
+            String className = ownerClassName(element);
+            if (className == null || parameterTypes.contains(null)) {
                 continue;
             }
             DoerMethodInfo info = new DoerMethodInfo();
-            info.className = ownerClassName(element);
+            info.className = className;
             info.methodName = element.getSimpleName().toString();
-            info.parameterTypes = method.getParameterTypes().stream().map(Object::toString).toList();
+            info.parameterTypes = parameterTypes;
             for (AcceptStatus annotation : element.getAnnotationsByType(AcceptStatus.class)) {
                 validateStatus(annotation.value(), "@AcceptStatus value", element);
                 if (annotation.delay().isEmpty()) {
@@ -295,10 +310,55 @@ public class DoerProcessor extends AbstractProcessor {
         return null;
     }
 
-    /** Name of the class declaring the method; reports an error when the class is in the unnamed package. */
+    /**
+     * Name of the class when doer methods (@AcceptStatus methods) support the type as an argument, and so
+     * {@code @TaskDataLoader} and {@code @TaskDataSaver} support it too; otherwise reports an error and returns null.
+     * The generated code uses the class as {@code X} and as {@code X.class}.
+     */
+    private String supportedDoerArgumentType(TypeMirror type, String what, Element element) {
+        Types types = processingEnv.getTypeUtils();
+        if (type.getKind() == TypeKind.ERROR) {
+            error("Type " + type + " of " + what + " can not be resolved.", element);
+            return null;
+        }
+        String notSupported = "Type " + type + " of " + what + " is not supported by doer methods "
+                + "(@AcceptStatus methods). ";
+        if (type.getKind() != TypeKind.DECLARED || !types.isSameType(type, types.erasure(type))) {
+            error(notSupported + "Only classes without type arguments are supported, "
+                    + "e.g. Order, but not List<Order>, Order[] or int.", element);
+            return null;
+        }
+        TypeElement typeElement = (TypeElement) types.asElement(type);
+        String inaccessibility = inaccessibility(typeElement);
+        if (inaccessibility != null) {
+            error(notSupported + "The class " + inaccessibility + ", so the generated service in package "
+                    + "com.doer.generated can not refer to it.", element);
+            return null;
+        }
+        return typeElement.getQualifiedName().toString();
+    }
+
+    /** Why code in another package can not refer to the class; null when it can. */
+    private String inaccessibility(TypeElement type) {
+        if (processingEnv.getElementUtils().getPackageOf(type).isUnnamed()) {
+            return "is in the unnamed package";
+        }
+        for (Element e = type; e instanceof TypeElement t; e = t.getEnclosingElement()) {
+            if (!t.getModifiers().contains(Modifier.PUBLIC)) {
+                return t == type ? "is not public" : "is declared in not public class " + t.getQualifiedName();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Name of the class declaring the method; reports an error and returns null when the generated code can not
+     * refer to the class.
+     */
     private String ownerClassName(Element method) {
-        String className = method.getEnclosingElement().asType().toString();
-        if (!className.contains(".")) {
+        TypeElement owner = (TypeElement) method.getEnclosingElement();
+        String className = owner.getQualifiedName().toString();
+        if (processingEnv.getElementUtils().getPackageOf(owner).isUnnamed()) {
             String message = String.format("Class in unnamed package\n" +
                     "%s can not import classes from default package.\n" +
                     "See chapter 7.5 Import Declarations in Java Spec " +
@@ -306,6 +366,13 @@ public class DoerProcessor extends AbstractProcessor {
                     "Please move your class %s to any package, so %s can import it.",
                     DoerService.class.getName(), className, DoerService.class.getName());
             error(message, method);
+            return null;
+        }
+        String inaccessibility = inaccessibility(owner);
+        if (inaccessibility != null) {
+            error("Class " + className + " " + inaccessibility + ", so the generated service in package "
+                    + "com.doer.generated can not refer to it.", method);
+            return null;
         }
         return className;
     }
@@ -443,8 +510,13 @@ public class DoerProcessor extends AbstractProcessor {
                         + Task.class.getName(), element);
                 continue;
             }
-            loaders.add(new TypedMethodInfo(ownerClassName(element), element.getSimpleName().toString(),
-                    method.getReturnType().toString()));
+            String type = supportedDoerArgumentType(method.getReturnType(),
+                    "return value of @" + TaskDataLoader.class.getSimpleName() + " method", element);
+            String className = ownerClassName(element);
+            if (type == null || className == null) {
+                continue;
+            }
+            loaders.add(new TypedMethodInfo(className, element.getSimpleName().toString(), type));
         }
     }
 
@@ -462,8 +534,15 @@ public class DoerProcessor extends AbstractProcessor {
                         element);
                 continue;
             }
-            savers.add(new TypedMethodInfo(ownerClassName(element), element.getSimpleName().toString(),
-                    args.get(1).toString()));
+            VariableElement data = ((ExecutableElement) element).getParameters().get(1);
+            String type = supportedDoerArgumentType(data.asType(),
+                    "parameter " + data.getSimpleName() + " of @" + TaskDataSaver.class.getSimpleName() + " method",
+                    data);
+            String className = ownerClassName(element);
+            if (type == null || className == null) {
+                continue;
+            }
+            savers.add(new TypedMethodInfo(className, element.getSimpleName().toString(), type));
         }
     }
 
@@ -490,14 +569,31 @@ public class DoerProcessor extends AbstractProcessor {
             String className = ownerClassName(element);
             String methodName = element.getSimpleName().toString();
             TypeMirror exType = args.get(1);
-            List<String> typeParents = new ArrayList<>();
-            if (types.asElement(exType) instanceof TypeElement exElement && exElement.getKind() == ElementKind.CLASS) {
-                typeParents.addAll(extractParentClasses(types, exElement.getSuperclass()));
-            } else {
+            if (exType.getKind() == TypeKind.ERROR) {
+                error("Type " + exType + " of the second parameter of @" + ExceptionDescriber.class.getSimpleName()
+                        + " annotated method " + methodName + " can not be resolved.", element);
+                continue;
+            }
+            TypeMirror throwable = processingEnv.getElementUtils().getTypeElement(Throwable.class.getName()).asType();
+            if (exType.getKind() != TypeKind.DECLARED || !types.isAssignable(exType, throwable)) {
                 error("Second parameter of @" + ExceptionDescriber.class.getSimpleName()
                         + " annotated method " + methodName + " should be of Throwable type", element);
+                continue;
             }
-            describers.add(new ExceptionDescriberInfo(className, methodName, exType.toString(), typeParents));
+            TypeElement exElement = (TypeElement) types.asElement(exType);
+            String inaccessibility = inaccessibility(exElement);
+            if (inaccessibility != null) {
+                error("Exception class " + exElement.getQualifiedName() + " of the second parameter of @"
+                        + ExceptionDescriber.class.getSimpleName() + " annotated method " + methodName + " "
+                        + inaccessibility + ", so the generated service in package com.doer.generated can not "
+                        + "refer to it.", element);
+                continue;
+            }
+            if (className == null) {
+                continue;
+            }
+            describers.add(new ExceptionDescriberInfo(className, methodName, exElement.getQualifiedName().toString(),
+                    extractParentClasses(types, exElement.getSuperclass())));
         }
 
         Set<String> describerTypes = describers.stream().map(ExceptionDescriberInfo::type).collect(Collectors.toSet());
@@ -704,12 +800,10 @@ public class DoerProcessor extends AbstractProcessor {
         out.println("    @Override");
         out.println("    protected Object _load(Task task, Class<?> type) throws Exception {");
         for (TypedMethodInfo loader : firstByType(loaders).values()) {
-            if (isPlainClassType(loader.type())) {
-                out.println("        if (" + shortcuts.get(loader.type()) + ".class.equals(type)) {");
-                out.println("            return " + fieldNames.get(loader.className()) + "." + loader.methodName()
-                        + "(task);");
-                out.println("        }");
-            }
+            out.println("        if (" + shortcuts.get(loader.type()) + ".class.equals(type)) {");
+            out.println("            return " + fieldNames.get(loader.className()) + "." + loader.methodName()
+                    + "(task);");
+            out.println("        }");
         }
         out.println("        throw new IllegalArgumentException(\"No @TaskDataLoader for \" + type.getName());");
         out.println("    }");
@@ -719,14 +813,12 @@ public class DoerProcessor extends AbstractProcessor {
         out.println("    @Override");
         out.println("    protected void _save(Task task, Class<?> type, Object data) throws Exception {");
         for (TypedMethodInfo saver : firstByType(savers).values()) {
-            if (isPlainClassType(saver.type())) {
-                String typeName = shortcuts.get(saver.type());
-                out.println("        if (" + typeName + ".class.equals(type)) {");
-                out.println("            " + fieldNames.get(saver.className()) + "." + saver.methodName()
-                        + "(task, (" + typeName + ") data);");
-                out.println("            return;");
-                out.println("        }");
-            }
+            String typeName = shortcuts.get(saver.type());
+            out.println("        if (" + typeName + ".class.equals(type)) {");
+            out.println("            " + fieldNames.get(saver.className()) + "." + saver.methodName()
+                    + "(task, (" + typeName + ") data);");
+            out.println("            return;");
+            out.println("        }");
         }
         out.println("    }");
     }
@@ -1255,35 +1347,29 @@ public class DoerProcessor extends AbstractProcessor {
         return Duration.of(Integer.parseInt(matcher.group(1)), chronoUnit);
     }
 
-    /** Short names of the types used in the generated service; a full name when the short one is taken. */
+    /**
+     * Names the generated service uses for types: the short name for the first type claiming it, the full name for
+     * the later types with the same short name. The types used by the generated code itself claim their short names
+     * first, then the beans, the doer method parameters, the exception describers, the loaders and the savers.
+     */
     private Map<String, String> createTypeShortcuts() {
-        Elements elementUtils = processingEnv.getElementUtils();
         Map<String, String> shortcuts = new HashMap<>();
-        GENERATED_SERVICE_TYPES.forEach(type -> shortcuts.put(type, simpleName(type)));
-
-        Stream.of(beanClassNames(),
-                        doerMethods.stream().flatMap(m -> m.parameterTypes.stream()),
-                        describers.stream().map(ExceptionDescriberInfo::type),
-                        Stream.concat(loaders.stream().map(TypedMethodInfo::type),
-                                savers.stream().map(TypedMethodInfo::type)).filter(this::isPlainClassType))
-                .flatMap(s -> s)
-                .filter(type -> !shortcuts.containsKey(type))
-                .forEach(type -> {
-                    TypeElement element = elementUtils.getTypeElement(type);
-                    if (element == null) {
-                        processingEnv.getMessager().printMessage(Kind.ERROR,
-                                "Can not load type information about " + type);
-                        return;
-                    }
-                    String name = element.getSimpleName().toString();
-                    shortcuts.put(type, shortcuts.containsValue(name) ? type : name);
-                });
+        Set<String> takenNames = new HashSet<>();
+        TYPES_USED_IN_GENERATED_CODE.forEach(type -> claimShortName(type, shortcuts, takenNames));
+        beanClassNames().forEach(type -> claimShortName(type, shortcuts, takenNames));
+        doerMethods.forEach(m -> m.parameterTypes.forEach(type -> claimShortName(type, shortcuts, takenNames)));
+        describers.forEach(d -> claimShortName(d.type(), shortcuts, takenNames));
+        loaders.forEach(l -> claimShortName(l.type(), shortcuts, takenNames));
+        savers.forEach(s -> claimShortName(s.type(), shortcuts, takenNames));
         return shortcuts;
     }
 
-    /** Class without type arguments, so it can be used as a {@code X.class} literal. */
-    private boolean isPlainClassType(String type) {
-        return !type.contains("<") && processingEnv.getElementUtils().getTypeElement(type) != null;
+    /** Gives the type its short name when no other type has taken it yet, otherwise its full name. */
+    private static void claimShortName(String type, Map<String, String> shortcuts, Set<String> takenNames) {
+        if (!shortcuts.containsKey(type)) {
+            String name = simpleName(type);
+            shortcuts.put(type, takenNames.add(name) ? name : type);
+        }
     }
 
     private Map<String, String> createFieldNames() {

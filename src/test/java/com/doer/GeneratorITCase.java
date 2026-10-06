@@ -1074,6 +1074,200 @@ public class GeneratorITCase {
     }
 
     @Test
+    void javac__should_fail_on_task_data_types_that_are_not_plain_classes() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "import java.util.List;\n" +
+                "public class Orders {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    public void accept(Task task, List<String> names) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"B\")\n" +
+                "    public void pay(Task task, int amount) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"C\")\n" +
+                "    public void ship(Task task, String[] addresses) {}\n" +
+                "\n" +
+                "    @TaskDataLoader\n" +
+                "    public List<String> loadNames(Task task) {\n" +
+                "        return null;\n" +
+                "    }\n" +
+                "\n" +
+                "    @TaskDataSaver\n" +
+                "    public void saveAddresses(Task task, String[] addresses) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        String messages = javac(1, "Orders.java");
+
+        String notSupported = " is not supported by doer methods (@AcceptStatus methods). "
+                + "Only classes without type arguments are supported";
+        assertTrue(messages.contains("Type java.util.List<java.lang.String> of parameter names of @AcceptStatus "
+                + "method" + notSupported), messages);
+        assertTrue(messages.contains("Type int of parameter amount of @AcceptStatus method" + notSupported),
+                messages);
+        assertTrue(messages.contains("Type java.lang.String[] of parameter addresses of @AcceptStatus method"
+                + notSupported), messages);
+        assertTrue(messages.contains("Type java.util.List<java.lang.String> of return value of @TaskDataLoader "
+                + "method" + notSupported), messages);
+        assertTrue(messages.contains("Type java.lang.String[] of parameter addresses of @TaskDataSaver method"
+                + notSupported), messages);
+        assertFalse(messages.contains("No @TaskDataLoader found"), messages);
+    }
+
+    @Test
+    void javac__should_fail_on_classes_the_generated_service_can_not_refer_to() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders {\n" +
+                "    record CancellationContext(String reason) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    public void cancel(Task task, CancellationContext context) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"B\")\n" +
+                "    public void ship(Task task, Contexts.ShippingContext context) {}\n" +
+                "\n" +
+                "    @TaskDataLoader\n" +
+                "    public Contexts.ShippingContext loadShippingContext(Task task) {\n" +
+                "        return null;\n" +
+                "    }\n" +
+                "\n" +
+                "    @TaskDataLoader\n" +
+                "    public Hidden.PaymentContext loadPaymentContext(Task task) {\n" +
+                "        return null;\n" +
+                "    }\n" +
+                "\n" +
+                "    @ExceptionDescriber\n" +
+                "    public void describe(Task task, HiddenException e, jakarta.json.JsonObjectBuilder builder) {}\n" +
+                "}\n" +
+                "\n" +
+                "class HiddenException extends Exception {\n" +
+                "}\n" +
+                "\n" +
+                "interface Contexts {\n" +
+                "    record ShippingContext(String address) {}\n" +
+                "}\n" +
+                "\n" +
+                "class Hidden {\n" +
+                "    public record PaymentContext(String card) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"C\")\n" +
+                "    public void hide(Task task) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        String messages = javac(1, "Orders.java");
+
+        String notSupported = " is not supported by doer methods (@AcceptStatus methods). ";
+        String generated = ", so the generated service in package com.doer.generated can not refer to it.";
+        assertTrue(messages.contains("Type demo.test.Orders.CancellationContext of parameter context of "
+                + "@AcceptStatus method" + notSupported + "The class is not public" + generated), messages);
+        assertTrue(messages.contains("Type demo.test.Contexts.ShippingContext of parameter context of "
+                + "@AcceptStatus method" + notSupported + "The class is declared in not public class "
+                + "demo.test.Contexts" + generated), messages);
+        assertTrue(messages.contains("Type demo.test.Hidden.PaymentContext of return value of @TaskDataLoader "
+                + "method" + notSupported + "The class is declared in not public class demo.test.Hidden"
+                + generated), messages);
+        assertTrue(messages.contains("Exception class demo.test.HiddenException of the second parameter of "
+                + "@ExceptionDescriber annotated method describe is not public" + generated), messages);
+        assertTrue(messages.contains("Class demo.test.Hidden is not public" + generated), messages);
+        assertFalse(messages.contains("_GeneratedDoerService.java"), messages);
+    }
+
+    @Test
+    void javac__should_fail_on_exception_describer_of_not_throwable_type() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "import jakarta.json.JsonObjectBuilder;\n" +
+                "public class Describers {\n" +
+                "    @ExceptionDescriber\n" +
+                "    public void describeText(Task task, String text, JsonObjectBuilder builder) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Describers.java"), code.getBytes(UTF_8));
+
+        String messages = javac(1, "Describers.java");
+
+        assertTrue(messages.contains("Second parameter of @ExceptionDescriber annotated method describeText "
+                + "should be of Throwable type"), messages);
+        assertFalse(messages.contains("_GeneratedDoerService.java"), messages);
+    }
+
+    @Test
+    void javac__should_handle_nested_classes_as_task_data() throws Exception {
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders {\n" +
+                "    public record CancellationContext(String reason) {}\n" +
+                "\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    public void cancel(Task task, CancellationContext context) {}\n" +
+                "\n" +
+                "    @TaskDataLoader\n" +
+                "    public CancellationContext loadContext(Task task) {\n" +
+                "        return new CancellationContext(\"late\");\n" +
+                "    }\n" +
+                "\n" +
+                "    @TaskDataSaver\n" +
+                "    public void saveContext(Task task, CancellationContext context) {}\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        javac(0, "Orders.java");
+
+        String generated = new String(Files.readAllBytes(
+                dir.resolve("classes/com/doer/generated/_GeneratedDoerService.java")), UTF_8);
+        assertTrue(generated.contains("import demo.test.Orders.CancellationContext;"), generated);
+        assertTrue(generated.contains("orders.cancel(task, (CancellationContext)args[1]);"), generated);
+    }
+
+    @Test
+    void javac__should_use_full_names_for_types_with_taken_short_names() throws Exception {
+        Files.createDirectories(dir.resolve("demo/data"));
+        Files.write(dir.resolve("demo/data/Task.java"),
+                "package demo.data;\npublic class Task {\n}\n".getBytes(UTF_8));
+        Files.write(dir.resolve("demo/data/String.java"),
+                "package demo.data;\npublic class String {\n}\n".getBytes(UTF_8));
+        String code = "" +
+                "package demo.test;\n" +
+                "import com.doer.*;\n" +
+                "public class Orders<T> {\n" +
+                "    @AcceptStatus(\"A\")\n" +
+                "    public void accept(Task task, demo.data.Task data, demo.data.String text) {}\n" +
+                "\n" +
+                "    @TaskDataLoader\n" +
+                "    public demo.data.Task loadTask(Task task) {\n" +
+                "        return new demo.data.Task();\n" +
+                "    }\n" +
+                "\n" +
+                "    @TaskDataLoader\n" +
+                "    public demo.data.String loadText(Task task) {\n" +
+                "        return new demo.data.String();\n" +
+                "    }\n" +
+                "}\n" +
+                "";
+        Files.write(dir.resolve("Orders.java"), code.getBytes(UTF_8));
+
+        javac(0, "Orders.java", "demo/data/Task.java", "demo/data/String.java");
+
+        String generated = new String(Files.readAllBytes(
+                dir.resolve("classes/com/doer/generated/_GeneratedDoerService.java")), UTF_8);
+        assertTrue(generated.contains("import com.doer.Task;"), generated);
+        assertTrue(generated.contains("import java.lang.String;"), generated);
+        assertFalse(generated.contains("import demo.data."), generated);
+        assertTrue(generated.contains("import demo.test.Orders;"), generated);
+        assertTrue(generated.contains("(demo.data.Task)args[1], (demo.data.String)args[2]"), generated);
+    }
+
+    @Test
     void javac__should_use_default_retry_policy() throws Exception {
         String code = "" +
                 "package demo.test;\n" +
