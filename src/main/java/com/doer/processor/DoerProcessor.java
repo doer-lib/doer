@@ -216,6 +216,13 @@ public class DoerProcessor extends AbstractProcessor {
                     continue;
                 }
                 Duration delay = parseAnnotationDuration(annotation.delay(), "@AcceptStatus delay", element);
+                if (delay != null && delay.isZero()) {
+                    // A zero delay would be a delayed queue next to the asap queue with the same delay: the
+                    // generated SelectTasks.sql would have more LIMIT parameters than the service has queues
+                    error("@AcceptStatus delay \"" + escape(annotation.delay()) + "\" must be greater than zero. "
+                            + "Remove delay to process the task as soon as possible.", element);
+                    delay = null;
+                }
                 // Compilation fails when the delay is invalid; keep the status without a delay so that the
                 // generated code stays valid and the status is still checked
                 info.acceptList.add(delay != null ? new Accept(annotation.value(), annotation.delay(), delay)
@@ -982,7 +989,6 @@ public class DoerProcessor extends AbstractProcessor {
             if (!asapStatuses.isEmpty()) {
                 selects.add(selectTasks("IS NULL", asapStatuses, "created"));
             }
-            // A "0s" delay is still a delay here: such tasks are ordered by modified
             groupStatuses(methods, (m, a) -> a.delay()).values()
                     .forEach(statuses -> selects.add(selectTasks("IS NULL", statuses, "modified")));
             groupStatuses(methods, (m, a) -> m.retryInterval).values()

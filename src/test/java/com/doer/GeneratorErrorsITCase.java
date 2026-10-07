@@ -3,6 +3,7 @@ package com.doer;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -33,6 +34,36 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                                 ^
                 1 error
                 """, result.stdErr());
+    }
+
+    @Test
+    void AcceptStatus__should_fail_on_zero_delay() throws Exception {
+        writeSource("Orders.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Orders {
+                    @AcceptStatus("A")
+                    @AcceptStatus(value = "B", delay = "0s")
+                    public void accept(Task task) {}
+
+                    @AcceptStatus(value = "C", delay = "0 min")
+                    public void pay(Task task) {}
+                }
+                """);
+
+        var result = javac("Orders.java").assertStatus(1);
+
+        // the order of the methods is up to javac
+        assertThat(result.stdErr(), allOf(
+                containsString("""
+                        Orders.java:6: error: @AcceptStatus delay "0s" must be greater than zero. Remove delay to process the task as soon as possible.
+                            public void accept(Task task) {}
+                        """),
+                containsString("""
+                        Orders.java:9: error: @AcceptStatus delay "0 min" must be greater than zero. Remove delay to process the task as soon as possible.
+                            public void pay(Task task) {}
+                        """),
+                endsWith("2 errors\n")));
     }
 
     @Test
