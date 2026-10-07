@@ -216,10 +216,10 @@ public class DoerProcessor extends AbstractProcessor {
                     continue;
                 }
                 Duration delay = parseAnnotationDuration(annotation.delay(), "@AcceptStatus delay", element);
-                // Compilation fails when the delay is invalid; skip it so that code generation does not use it
-                if (delay != null) {
-                    info.acceptList.add(new Accept(annotation.value(), annotation.delay(), delay));
-                }
+                // Compilation fails when the delay is invalid; keep the status without a delay so that the
+                // generated code stays valid and the status is still checked
+                info.acceptList.add(delay != null ? new Accept(annotation.value(), annotation.delay(), delay)
+                        : new Accept(annotation.value(), null, null));
             }
             loadRetryPolicy(info, element);
             info.domainName = resolveDomainName(element);
@@ -336,6 +336,19 @@ public class DoerProcessor extends AbstractProcessor {
             return null;
         }
         return typeElement.getQualifiedName().toString();
+    }
+
+    /**
+     * Name of the class when it can be task data of {@code @TaskDataLoader} and {@code @TaskDataSaver};
+     * otherwise reports an error and returns null.
+     */
+    private String supportedTaskDataType(TypeMirror type, String what, Element element) {
+        String name = supportedDoerArgumentType(type, what, element);
+        if (Task.class.getName().equals(name) || DoerService.class.getName().equals(name)) {
+            error("Type " + name + " of " + what + " can not be task data.", element);
+            return null;
+        }
+        return name;
     }
 
     /** Why code in another package can not refer to the class; null when it can. */
@@ -510,7 +523,7 @@ public class DoerProcessor extends AbstractProcessor {
                         + Task.class.getName(), element);
                 continue;
             }
-            String type = supportedDoerArgumentType(method.getReturnType(),
+            String type = supportedTaskDataType(method.getReturnType(),
                     "return value of @" + TaskDataLoader.class.getSimpleName() + " method", element);
             String className = ownerClassName(element);
             if (type == null || className == null) {
@@ -535,7 +548,7 @@ public class DoerProcessor extends AbstractProcessor {
                 continue;
             }
             VariableElement data = ((ExecutableElement) element).getParameters().get(1);
-            String type = supportedDoerArgumentType(data.asType(),
+            String type = supportedTaskDataType(data.asType(),
                     "parameter " + data.getSimpleName() + " of @" + TaskDataSaver.class.getSimpleName() + " method",
                     data);
             String className = ownerClassName(element);
