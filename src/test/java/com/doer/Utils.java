@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -15,7 +14,6 @@ import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Scanner;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.postgresql.ds.PGSimpleDataSource;
@@ -148,17 +146,6 @@ public class Utils {
         return _ds;
     }
 
-    static void createDbSchema(Connection con) throws SQLException, IOException {
-        String sql;
-        try (InputStream is = DoerService.class.getResourceAsStream("SchemaForTests.sql");
-                Scanner scanner = new Scanner(is, "UTF-8")) {
-            sql = scanner.useDelimiter("\\A").next();
-        }
-        try (PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.executeUpdate();
-        }
-    }
-
     public static void sqlUpdate(String sql) {
         try (Connection con = getPostgresDataSource().getConnection();
                 PreparedStatement pst = con.prepareStatement(sql)) {
@@ -178,22 +165,19 @@ public class Utils {
                     return x;
                 }
             }
-        } catch (Exception e) {
-            e.printStackTrace();
+            return null;
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
         }
-        return null;
     }
 
     public static String selectStringValue(String sql) {
         try (Connection con = getPostgresDataSource().getConnection();
                 PreparedStatement pst = con.prepareStatement(sql);
                 ResultSet rs = pst.executeQuery()) {
-            if (rs.next()) {
-                return rs.getString(1);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
+            return rs.next() ? rs.getString(1) : null;
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
         }
-        return null;
     }
 }

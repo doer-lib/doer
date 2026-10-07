@@ -16,6 +16,7 @@ import org.junit.jupiter.api.TestInfo;
  * and the output of every command:
  *
  * <pre>
+ * target/it-test-workspaces/&lt;test class&gt;/_beforeAll/    the same for {@code @BeforeAll}, and mvn-*.txt
  * target/it-test-workspaces/&lt;test class&gt;/&lt;test method&gt;/
  *     Doer1.java, Main.java, ...   sources, flat (javac does not require folders to match packages)
  *     classes/demo/test/*.class    compiled classes, by package
@@ -40,18 +41,22 @@ abstract class GeneratorTestBase {
     /** Compile classpath plus Jakarta JSON implementation and the compiled classes. */
     static String runClasspath;
 
+    /** Workspace folder of {@code @BeforeAll} of the test class, created before subclasses' {@code @BeforeAll}. */
+    static Path beforeAllWorkspace;
+
     /** Workspace folder of the current test. */
     Path workspace;
 
     @BeforeAll
     static void resolveDependencies(TestInfo info) throws Exception {
-        Path workDir = WORKSPACES.resolve(info.getTestClass().orElseThrow().getSimpleName()).resolve("_beforeAll");
-        Utils.deleteRecursively(workDir);
-        Files.createDirectories(workDir);
-        RunResult jakarta = mvn(workDir, "mvn-dependency-get-jakarta",
+        beforeAllWorkspace = WORKSPACES.resolve(info.getTestClass().orElseThrow().getSimpleName())
+                .resolve("_beforeAll");
+        Utils.deleteRecursively(beforeAllWorkspace);
+        Files.createDirectories(beforeAllWorkspace);
+        RunResult jakarta = mvn(beforeAllWorkspace, "mvn-dependency-get-jakarta",
                 "dependency:get", "-Dartifact=jakarta.platform:jakarta.jakartaee-api:" + jakartaVersion)
                 .assertStatus(0);
-        RunResult parsson = mvn(workDir, "mvn-dependency-get-parsson",
+        RunResult parsson = mvn(beforeAllWorkspace, "mvn-dependency-get-parsson",
                 "dependency:get", "-Dartifact=org.eclipse.parsson:parsson:" + parssonVersion)
                 .assertStatus(0);
         System.out.printf("✔ Dependencies resolved in %s ms%n", jakarta.runMilliseconds() + parsson.runMilliseconds());
@@ -118,12 +123,17 @@ abstract class GeneratorTestBase {
      * javac-err.txt (javac writes its messages to stderr).
      */
     RunResult javac(String... optionsAndFiles) throws Exception {
+        return javac(workspace, optionsAndFiles);
+    }
+
+    /** Same as {@link #javac(String...)}, in the given folder (for {@code @BeforeAll}). */
+    static RunResult javac(Path workDir, String... optionsAndFiles) throws Exception {
         // DEBUGGING HELP: add "-J-Xdebug -J-Xrunjdwp:transport=dt_socket,server=y,suspend=y,address=8000"
         // to attach debugger to the annotation processor. -J-ea enables assertions in the annotation processor.
         List<String> cmd = new ArrayList<>(List.of("javac", "-J-ea", "-processor",
                 "com.doer.processor.DoerProcessor", "-cp", compileClasspath, "-d", "classes"));
         cmd.addAll(List.of(optionsAndFiles));
-        return Utils.run(workspace, "javac", TIMEOUT_SECONDS, cmd);
+        return Utils.run(workDir, "javac", TIMEOUT_SECONDS, cmd);
     }
 
     /** Runs the compiled class. The output is kept in java-out.txt and java-err.txt. */

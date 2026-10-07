@@ -146,9 +146,15 @@ public class DoerResource {
     @Path("coordinated_update")
     @GET
     public Task coordinatedUpdate(@QueryParam("id") long id, @QueryParam("s") String status,
-            @QueryParam("hijack") @DefaultValue("false") boolean hijack) throws Exception {
-        return doerService.facilitateCoordinatedUpdate(id, Duration.ofMillis(300), hijack,
-                task -> task.setStatus(status));
+            @QueryParam("hijack") @DefaultValue("false") boolean hijack,
+            @QueryParam("wait") @DefaultValue("300") long waitMs,
+            @QueryParam("fail") @DefaultValue("false") boolean fail) throws Exception {
+        return doerService.facilitateCoordinatedUpdate(id, Duration.ofMillis(waitMs), hijack, task -> {
+            task.setStatus(status);
+            if (fail) {
+                throw new IllegalStateException("updater failed");
+            }
+        });
     }
 
     @Path("coordinated_car_update")
@@ -156,6 +162,15 @@ public class DoerResource {
     public Task coordinatedCarUpdate(@QueryParam("id") long id, @QueryParam("s") String status) throws Exception {
         return doerService.facilitateCoordinatedUpdate(id, Duration.ZERO, false, Car.class,
                 (task, car) -> task.setStatus(status));
+    }
+
+    /** There is no @TaskDataLoader for String. */
+    @Path("coordinated_update_without_loader")
+    @GET
+    public Task coordinatedUpdateWithoutLoader(@QueryParam("id") long id, @QueryParam("s") String status)
+            throws Exception {
+        return doerService.facilitateCoordinatedUpdate(id, Duration.ZERO, false, String.class,
+                (task, data) -> task.setStatus(status));
     }
 
     @Path("coordinated_update_in_transaction")
