@@ -25,9 +25,8 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 }
                 """);
 
-        var result = javac("Orders.java");
+        var result = javac("Orders.java").assertStatus(1);
 
-        assertEquals(1, result.status(), result::toString);
         assertEquals("""
                 Orders.java:5: error: @AcceptStatus delay "soon" is not a duration. Expected a number and a unit, e.g. "5s", "10 min", "2h", "1 day".
                     public void accept(Task task) {}
@@ -76,12 +75,12 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 package demo.test;
                 import com.doer.*;
                 public class Orders {
-                    @AcceptStatus("A")
+                    @AcceptStatus("TEST_STATUS_A")
                     @RetryPolicy(interval = "5m")
                     public void accept(Task task) {}
 
                     @AcceptStatus("B")
-                    @AcceptStatus("C")
+                    @AcceptStatus("TEST_STATUS_C")
                     @RetryPolicy(interval = "5m")
                     public void pay(Task task) {}
                 }
@@ -91,7 +90,7 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 import com.doer.*;
                 public class Payments {
                     @AcceptStatus("B")
-                    @AcceptStatus("D")
+                    @AcceptStatus("TEST_STATUS_D")
                     @RetryPolicy(interval = "5m")
                     public void pay(Task task) {}
                 }
@@ -103,10 +102,9 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 containsString("Status \"B\" is accepted by more than one doer method"),
                 containsString("demo.test.Orders.pay(com.doer.Task)"),
                 containsString("demo.test.Payments.pay(com.doer.Task)"),
-                not(containsString("Status \"A\"")),
-                not(containsString("Status \"C\"")),
-                not(containsString("Status \"D\"")),
-                not(containsString("do not contain the statuses set by Task.setStatus"))));
+                not(containsString("TEST_STATUS_A")),
+                not(containsString("TEST_STATUS_C")),
+                not(containsString("TEST_STATUS_D"))));
     }
 
     @Test
@@ -144,9 +142,8 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 }
                 """);
 
-        var result = javac("Orders.java");
+        var result = javac("Orders.java").assertStatus(1);
 
-        assertEquals(1, result.status(), result::toString);
         assertEquals("""
                 Orders.java:6: error: @RetryPolicy duration "long" is not a duration. Expected a number and a unit, e.g. "5s", "10 min", "2h", "1 day".
                     public void accept(Task task) {}
@@ -219,9 +216,8 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 }
                 """);
 
-        var result = javac("Orders.java");
+        var result = javac("Orders.java").assertStatus(1);
 
-        assertEquals(1, result.status(), result::toString);
         assertEquals("""
                 Orders.java:6: error: @ConcurrencyGroup value must not be empty.
                     public void accept(Task task) {}
@@ -270,9 +266,8 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 }
                 """);
 
-        var result = javac("Orders.java");
+        var result = javac("Orders.java").assertStatus(1);
 
-        assertEquals(1, result.status(), result::toString);
         assertEquals("""
                 Orders.java:6: error: @ConcurrencyLimit value must be at least 1.
                     public void accept(Task task) {}
@@ -295,7 +290,7 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 }
                 """);
 
-        var result = javac("Orders.java");
+        var result = javac("Orders.java").assertStatus(0);
 
         assertEquals(0, result.status(), result::toString);
         assertEquals("""
@@ -336,9 +331,8 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 }
                 """);
 
-        var result = javac("Orders.java");
+        var result = javac("Orders.java").assertStatus(1);
 
-        assertEquals(1, result.status(), result::toString);
         assertEquals("""
                 Orders.java:5: error: com.doer.TaskDataLoader should have exactly 1 argument of type com.doer.Task
                     public String loadName(Task task, String prefix) {
@@ -390,9 +384,8 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 }
                 """);
 
-        var result = javac("Orders.java");
+        var result = javac("Orders.java").assertStatus(1);
 
-        assertEquals(1, result.status(), result::toString);
         assertEquals("""
                 Orders.java:5: error: com.doer.TaskDataSaver should have exactly 2 arguments: Task and the task data to save, and should return void.
                     public void saveName(Task task) {}
@@ -626,5 +619,22 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
                 containsString("doer.json and doer.dot do not contain the statuses set by Task.setStatus"));
         assertEquals(List.of(), doerJson().getList("doer_methods[0].emits"));
         assertTrue(Files.isRegularFile(generated("doer.dot")));
+    }
+
+    @Test
+    void proc_only__should_not_warn_that_doer_json_has_no_emits_when_processing_failed() throws Exception {
+        writeSource("Orders.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Orders {
+                    @AcceptStatus(value = "A", delay = "soon")
+                    public void accept(Task task) {}
+                }
+                """);
+
+        var result = javac("Orders.java").assertStatus(1);
+
+        assertThat(result.stdErr(),
+                not(containsString("doer.json and doer.dot do not contain the statuses set by Task.setStatus")));
     }
 }
