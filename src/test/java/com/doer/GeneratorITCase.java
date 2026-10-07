@@ -3,7 +3,6 @@ package com.doer;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -763,17 +762,39 @@ public class GeneratorITCase extends GeneratorTestBase {
 
         javac("Orders.java").assertStatus(0);
 
-        JsonPath json = doerJson();
-        assertEquals(List.of("A", "B"), json.getList("doer_methods[0].accepts.status"));
-        assertEquals("10 min", json.getString("doer_methods[0].accepts[0].delay"));
-        assertNull(json.get("doer_methods[0].accepts[1].delay"));
-        assertEquals(List.of("com.doer.Task", "demo.test.Orders.Order"), json.getList("doer_methods[0].args"));
-        assertEquals("demo.test.Orders.Order", json.getString("loaders[0].type"));
-        assertEquals("loadOrder", json.getString("loaders[0].method"));
-        assertEquals("demo.test.Orders.Order", json.getString("savers[0].type"));
-        assertEquals("saveOrder", json.getString("savers[0].method"));
-        assertEquals("java.lang.IllegalStateException", json.getString("exception_describers[0].type"));
-        assertEquals("describe", json.getString("exception_describers[0].method"));
+        String doerJson = Files.readString(generated("doer.json"))
+                .replaceFirst("\"generated\": \"[^\"]+\"", "\"generated\": \"<time>\"");
+        assertEquals("""
+                {
+                    "generator": "com.doer.processor.DoerProcessor",
+                    "generated": "<time>",
+                    "domains": [
+                        {"name": "demo.test.Orders", "limit": 2, "implicit": true}
+                    ],
+                    "doer_methods": [
+                        {
+                            "domain": "demo.test.Orders",
+                            "class": "demo.test.Orders", "method": "accept",
+                            "args": ["com.doer.Task", "demo.test.Orders.Order"],
+                            "accepts": [
+                                {"status": "A", "delay": "10 min"},
+                                {"status": "B"}
+                            ],
+                            "emits": [
+                            ]
+                        }
+                    ],
+                    "loaders": [
+                        {"type": "demo.test.Orders.Order", "class": "demo.test.Orders", "method": "loadOrder"}
+                    ],
+                    "savers": [
+                        {"type": "demo.test.Orders.Order", "class": "demo.test.Orders", "method": "saveOrder"}
+                    ],
+                    "exception_describers": [
+                        {"type": "java.lang.IllegalStateException", "class": "demo.test.Orders", "method": "describe"}
+                    ]
+                }
+                """, doerJson);
         assertThat(Files.readString(generated("doer.dot")), containsString("label=\"delay 10 min\""));
     }
 
