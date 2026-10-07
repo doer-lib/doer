@@ -9,15 +9,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.util.List;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /** Errors and warnings reported by DoerProcessor: the javac messages. */
 public class GeneratorErrorsITCase extends GeneratorTestBase {
 
     @Test
-    @Disabled("DoerProcessor bug: when every @AcceptStatus of a doer method has an invalid delay, the generated "
-            + "service gets 'if () {' and javac reports one more error in _GeneratedDoerService.java")
     void AcceptStatus__should_fail_on_invalid_delay() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
@@ -351,7 +348,6 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
     }
 
     @Test
-    @Disabled("DoerProcessor does not check yet that Task and DoerService are not used as task data")
     void TaskDataLoader__should_fail_on_Task_and_DoerService_types() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
@@ -409,7 +405,6 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
     }
 
     @Test
-    @Disabled("DoerProcessor does not check yet that Task and DoerService are not used as task data")
     void TaskDataSaver__should_fail_on_Task_and_DoerService_types() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
