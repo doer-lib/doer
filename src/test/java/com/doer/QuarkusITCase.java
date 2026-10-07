@@ -35,6 +35,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -324,6 +325,103 @@ public class QuarkusITCase {
         assertFalse(task.isInProgress());
         assertEquals(1L, selectLongValue(
                 "SELECT count(*) FROM task_logs WHERE exception_type = 'TaskHijacked' AND task_id = " + taskId));
+    }
+
+    @Test
+    void coordinated_update_should_rollback_when_updater_throws() {
+        resetServer();
+        long taskId = pushTask("Parked");
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked").queryParam("fail", true)
+                .get("doer/coordinated_update")
+                .then()
+                .statusCode(500)
+                .body("exception", equalTo("IllegalStateException"));
+
+        Task task = restGetTask(taskId);
+        assertEquals("Parked", task.getStatus());
+        assertEquals(0, task.getVersion());
+        assertEquals(0L, selectLongValue("SELECT count(*) FROM task_logs WHERE task_id = " + taskId));
+    }
+
+    @Test
+    void coordinated_update_should_fail_when_task_not_found() {
+        resetServer();
+
+        given().queryParam("id", 9839893L).queryParam("s", "Unparked")
+                .get("doer/coordinated_update")
+                .then()
+                .statusCode(500)
+                .body("exception", equalTo("TaskNotFoundException"));
+    }
+
+    @Test
+    void coordinated_update_should_wait_until_task_is_not_in_progress() throws Exception {
+        resetServer();
+        long taskId = pushTask("Parked");
+        sqlUpdate("UPDATE tasks SET in_progress = TRUE WHERE id = " + taskId);
+        CompletableFuture<Void> doerCompletion = CompletableFuture.runAsync(() -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+            sqlUpdate("UPDATE tasks SET in_progress = FALSE, status = 'Waited', version = version + 1 WHERE id = "
+                    + taskId);
+        });
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked").queryParam("wait", 10000)
+                .get("doer/coordinated_update")
+                .then()
+                .statusCode(200)
+                .body("status", equalTo("Unparked"));
+        doerCompletion.get();
+
+        Task task = restGetTask(taskId);
+        assertEquals("Unparked", task.getStatus());
+        assertFalse(task.isInProgress());
+        assertEquals("Waited>Unparked", selectStringValue(
+                "SELECT string_agg(initial_status || '>' || final_status, ',') FROM task_logs WHERE task_id = "
+                        + taskId));
+        assertEquals(0L, selectLongValue(
+                "SELECT count(*) FROM task_logs WHERE exception_type = 'TaskHijacked' AND task_id = " + taskId));
+    }
+
+    @Test
+    void coordinated_update_should_rollback_hijack_when_updater_throws() {
+        resetServer();
+        long taskId = pushTask("Parked");
+        sqlUpdate("UPDATE tasks SET in_progress = TRUE WHERE id = " + taskId);
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked").queryParam("hijack", true)
+                .queryParam("fail", true)
+                .get("doer/coordinated_update")
+                .then()
+                .statusCode(500)
+                .body("exception", equalTo("IllegalStateException"));
+
+        Task task = restGetTask(taskId);
+        assertEquals("Parked", task.getStatus());
+        assertTrue(task.isInProgress());
+        assertEquals(0, task.getVersion());
+        assertEquals(0L, selectLongValue("SELECT count(*) FROM task_logs WHERE task_id = " + taskId));
+    }
+
+    @Test
+    void coordinated_update_should_fail_without_loader() {
+        resetServer();
+        long taskId = pushTask("Parked");
+
+        given().queryParam("id", taskId).queryParam("s", "Unparked")
+                .get("doer/coordinated_update_without_loader")
+                .then()
+                .statusCode(500)
+                .body("exception", equalTo("IllegalArgumentException"));
+
+        Task task = restGetTask(taskId);
+        assertEquals("Parked", task.getStatus());
+        assertEquals(0, task.getVersion());
+        assertEquals(0L, selectLongValue("SELECT count(*) FROM task_logs WHERE task_id = " + taskId));
     }
 
     @Test
