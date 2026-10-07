@@ -68,6 +68,21 @@ public class Utils {
         return result;
     }
 
+    /**
+     * Runs the command in workDir and keeps its output there: {@code <logName>-cmd.txt}, {@code <logName>-out.txt} and
+     * {@code <logName>-err.txt}. The exit status is not checked.
+     */
+    public static RunResult run(Path workDir, String logName, int timeoutSeconds, List<String> cmd)
+            throws InterruptedException, IOException, TimeoutException {
+        Path stdOut = workDir.resolve(logName + "-out.txt");
+        Path stdErr = workDir.resolve(logName + "-err.txt");
+        Files.writeString(workDir.resolve(logName + "-cmd.txt"), String.join(" ", cmd) + "\n");
+        long t0 = System.currentTimeMillis();
+        int status = exec(workDir.toFile(), stdOut.toFile(), stdErr.toFile(), timeoutSeconds, cmd);
+        long runMilliseconds = System.currentTimeMillis() - t0;
+        return new RunResult(Files.readString(stdOut), Files.readString(stdErr), status, runMilliseconds);
+    }
+
     public static int exec(File workDir, File stdOut, File stdErr, int timeoutSeconds, List<String> cmd)
             throws InterruptedException, IOException, TimeoutException {
         Process process = new ProcessBuilder(cmd)
@@ -95,10 +110,10 @@ public class Utils {
         return process.exitValue();
     }
 
-    public static void deleteReqursivelly(Path path) {
+    public static void deleteRecursively(Path path) {
         try {
             if (Files.isDirectory(path)) {
-                Files.list(path).forEach(Utils::deleteReqursivelly);
+                Files.list(path).forEach(Utils::deleteRecursively);
             }
             if (Files.exists(path)) {
                 Files.delete(path);

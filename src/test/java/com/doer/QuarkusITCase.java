@@ -57,14 +57,14 @@ public class QuarkusITCase {
         Path projectDir = new File(".").toPath().toAbsolutePath();
 
         long t0 = System.currentTimeMillis();
-        Utils.deleteReqursivelly(quarkusDir);
+        Utils.deleteRecursively(quarkusDir);
         exec(0, quarkusDir.getParent(),
                 "mvn -B io.quarkus:quarkus-maven-plugin:3.40.0:create -DprojectGroupId=tst.demo " +
                         "-DprojectArtifactId=e2e-doer-quarkus " +
                         "-Dextensions=io.quarkus:quarkus-resteasy,io.quarkus:quarkus-jdbc-postgresql," +
                         "io.quarkus:quarkus-flyway,io.quarkus:quarkus-smallrye-health,io.quarkus:quarkus-resteasy-jsonb");
         Path testsFolder = quarkusDir.resolve("src/test/java/tst");
-        Utils.deleteReqursivelly(testsFolder);
+        Utils.deleteRecursively(testsFolder);
 
         Path properties = quarkusDir.resolve("src/main/resources/application.properties");
         System.out.printf("✔ Quarkus app created in %s seconds %s%n", (System.currentTimeMillis() - t0) / 1000,
