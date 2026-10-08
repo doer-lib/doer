@@ -1,10 +1,15 @@
 package com.doer;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.URISyntaxException;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -83,6 +88,31 @@ public abstract class GeneratorTestBase {
         Path file = root.resolve(path);
         Files.createDirectories(file.getParent());
         Files.writeString(file, code);
+    }
+
+    /** Copies a folder of test resources (for example {@code e2e/carwash}) into the target folder. */
+    public static void copySources(String resourceFolder, Path target) throws IOException {
+        URL url = GeneratorTestBase.class.getClassLoader().getResource(resourceFolder);
+        if (url == null) {
+            throw new IOException("No test resource folder " + resourceFolder);
+        }
+        Path source;
+        try {
+            source = Path.of(url.toURI());
+        } catch (URISyntaxException e) {
+            throw new IOException(e);
+        }
+        try (Stream<Path> files = Files.walk(source)) {
+            files.filter(Files::isRegularFile).forEach(file -> {
+                Path copy = target.resolve(source.relativize(file).toString());
+                try {
+                    Files.createDirectories(copy.getParent());
+                    Files.copy(file, copy, StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+        }
     }
 
     /**

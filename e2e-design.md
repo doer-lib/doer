@@ -68,7 +68,7 @@ All endpoints, functional and validation, are in one application under `@Applica
 
 Today's `DoerResource` breaks the rule with `io.quarkus.runtime.StartupEvent`; it is replaced by the CDI 4 `jakarta.enterprise.event.Startup` event (Jakarta EE 10), which Quarkus, WildFly and Open Liberty fire.
 
-So that `CarWashITCase` can run CarWash without a container, components get their collaborators through `@Inject` setters or package-private fields, and external services and repositories are behind small interfaces that `Main` can replace with in-memory implementations.
+So that `CarWashITCase` can run CarWash without a container, components get their collaborators through `@Inject` setters or package-private fields, and external services and repositories are behind small interfaces that `Main` can replace with in-memory implementations. `Main` is in the package `carwash`, so components of other packages (`carwash.validation`) need `@Inject` setters. Components that use the `DataSource` directly (today the loaders and savers that write `demo_log_tasks`) get a recording `DataSource` from `Main`: a `java.lang.reflect.Proxy` without a database that prints each statement it executes.
 
 ### Layout
 
@@ -282,7 +282,7 @@ Plus `appLog(node)` for the application log (`app-<node>-out.txt`), and `stopNod
 
 ## Implementation plan
 
-The plan is worked through top to bottom. A box is ticked when its **Check** passes. When the work shows that the plan or the design is wrong, fix the design first, then the plan, and go on. Only step 1 is detailed; each later step is detailed when it is next.
+The plan is worked through top to bottom. A box is ticked when its **Check** passes. When the work shows that the plan or the design is wrong, fix the design first, then the plan, and go on. Steps 1 and 2 are detailed; each later step is detailed when it is next.
 
 ### 1. Infrastructure on Quarkus
 
@@ -334,35 +334,67 @@ The plan is worked through top to bottom. A box is ticked when its **Check** pas
 **1.6 CI**
 
 - [x] Job `e2e` in `maven.yaml` with `runtime: [ quarkus ]`, as in [CI](#ci).
-- [ ] **Check:** the `build` job no longer builds Quarkus; the `e2e` job is green; on a failure, `target/e2e/` is uploaded.
+- [x] **Check:** the `build` job no longer builds Quarkus; the `e2e` job is green; on a failure, `target/e2e/` is uploaded.
 
 ### 2. `CarWashITCase` on the CarWash sources
 
-- [ ] `CarWashITCase` copies `e2e/carwash`, adds `TEST_DOER_SERVICE` and `Main`; the toy classes in text blocks are removed.
-- [ ] javac and Maven (`pom.xml` as a text block instead of the archetype).
-- [ ] Maven: a test class with a doer method; the processor changes nothing while compiling tests.
-- [ ] Gradle, with the same test class and check.
+javac and Maven only; more build tools are [step 7](#7-more-build-tools-in-carwashitcase).
 
-### 3. Spring Boot
+**2.1 CarWash and helpers**
+
+- [x] `copySources` moves to `GeneratorTestBase` as a static method next to `writeSource`; `E2eApp.copySources` calls it.
+- [x] `DoerResource`: `@Inject` setters instead of the package-private fields `doerService` and `ds`.
+- [x] **Check:** all `*E2E` classes pass with `-Ddoer.e2e.runtime=quarkus`.
+
+**2.2 `Main` and javac**
+
+- [x] `Main` (package `carwash`, text block) wires every component by hand (`_inject_*` of a `TestDoerService` subclass that prints `writeTaskLog`), gives `CarWash` and `DoerResource` the recording `DataSource`, and runs through `runTask`, printing the status before and after:
+  - `Car is dusty`: loaders of `Car` (in `DoerResource`, another package) and `Shampoo` (in `CarWash`, with the doer method), both savers;
+  - `Car need polishing`: the second `@AcceptStatus` of `polishTheCar`, `Car` as the first parameter;
+  - `Want a coffee` (`@Dependent` `Cafeteria`), `Need order pizza` (`PhoneBooth`), `A` → `B` → `null` (`DoerResource`);
+  - `Should send email`: the exception, described by `ExceptionMapper` and `PhoneBooth` (the extra JSON in `writeTaskLog`);
+  - `Should check email` with `failingSince` an hour ago: `@RetryPolicy` sets its fallback status.
+
+  The expected output is a text block next to it.
+- [x] javac: `e2e/carwash` copied to `<workspace>/carwash`, compiled with `TestDoerService.java` and `Main.java`, `carwash.Main` run. `writeCarWashClasses` and `writeCarWashMain` are removed: the processor details they covered (data types with the same simple name, loaders and savers in other classes) are tested in `GeneratorITCase`.
+- [x] **Check:** `javac__should_build_working_car_wash` passes; `git grep -n "demo.test2\|writeCarWash" src/test/java` finds nothing.
+
+**2.3 Maven**
+
+- [x] `pom.xml` as a text block instead of the archetype: release 17, `doer` and `jakarta.jakartaee-api`, `parsson` at runtime (JSON-P for the extra JSON), `doer` in `annotationProcessorPaths`; CarWash, `TestDoerService` and `Main` in `src/main/java`; `mvn package`, then `exec:java` of `carwash.Main` with the same expected output.
+- [x] A test source folder with one class with a doer method (no JUnit: only compiling it matters).
+- [x] **Check:** `maven__should_build_working_car_wash` passes; the `mvn package` log has the note of `DoerProcessor.isCompilingTests`; `target/test-classes` and `target/generated-test-sources` have no `com/doer/generated`.
+- [x] **Check:** `mvn verify` passes with JDK 17 and the newest JDK of the matrix.
+
+### 3. CarWash
+
+- [ ] A separate document that develops CarWash: its functionality, what `CarWashITCase` checks about the generated code, and what the e2e suite checks about its behavior in the runtimes.
+
+### 4. Spring Boot
 
 - [ ] `SpringBootApp`: `configureSpringBootApp` (`pom.xml` with `flyway-core` and `flyway-database-postgresql`, `application.properties`, `SpringBootApp.java`), `startSpringBootContainer`.
 - [ ] All `*E2E` classes pass with `-Ddoer.e2e.runtime=spring-boot`; fixes in Doer or in the design, if needed.
 - [ ] `spring-boot` in the CI matrix.
 
-### 4. Jakarta EE servers: WildFly, Open Liberty
+### 5. Jakarta EE servers: WildFly, Open Liberty
 
 - [ ] `WildflyApp`, `OpenLibertyApp`; the shared `Producers.java` and `FlywayMigration.java` as constants in the test code.
 - [ ] Both in the CI matrix.
 
-### 5. Jetty
+### 6. Jetty
 
-- [ ] Decide the open question about Jetty / Tomcat; then the same as step 4.
+- [ ] Decide the open question about Jetty / Tomcat; then the same as step 5.
 
-### 6. CarWash
+### 7. More build tools in `CarWashITCase`
 
-- [ ] A separate document that develops CarWash: its functionality, what `CarWashITCase` checks about the generated code, and what the e2e suite checks about its behavior in the runtimes.
+- [ ] Gradle (see [`CarWashITCase`](#carwashitcase-the-annotation-processor)), with the same test source class and check as Maven; decide the open question about Gradle on CI.
+- [ ] Eclipse compiler (ecj), if it is still a candidate.
 
-If, after step 4, several runtimes write the same Java files, they stay shared constants in the test code; a separate source folder only if text blocks become hard to maintain.
+### 8. More runtimes in the e2e suite
+
+- [ ] Decide which candidates of the open question about supported runtimes (Payara, TomEE, Helidon MP, …) go into the matrix; each one as in step 5.
+
+If, after step 5, several runtimes write the same Java files, they stay shared constants in the test code; a separate source folder only if text blocks become hard to maintain.
 
 ## Open questions
 

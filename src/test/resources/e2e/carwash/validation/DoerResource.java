@@ -26,11 +26,18 @@ import javax.sql.DataSource;
 @Path("/validation")
 @Produces(MediaType.APPLICATION_JSON)
 public class DoerResource {
-    @Inject
     DoerService doerService;
+    DataSource ds;
 
     @Inject
-    DataSource ds;
+    public void setDoerService(DoerService doerService) {
+        this.doerService = doerService;
+    }
+
+    @Inject
+    public void setDataSource(DataSource ds) {
+        this.ds = ds;
+    }
 
     @TaskDataLoader
     public Car loadCar(Task task) throws Exception {

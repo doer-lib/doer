@@ -2,14 +2,8 @@ package com.doer.e2e;
 
 import com.doer.GeneratorTestBase;
 import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.net.URISyntaxException;
-import java.net.URL;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.List;
-import java.util.stream.Stream;
 
 /**
  * CarWash in one runtime: turns the CarWash sources into a Maven project in the work folder and says how to run the
@@ -36,27 +30,7 @@ public interface E2eApp {
 
     /** Copies a folder of test resources (for example {@code e2e/carwash}) into the target folder. */
     default void copySources(String resourceFolder, Path target) throws IOException {
-        URL url = E2eApp.class.getClassLoader().getResource(resourceFolder);
-        if (url == null) {
-            throw new IOException("No test resource folder " + resourceFolder);
-        }
-        Path source;
-        try {
-            source = Path.of(url.toURI());
-        } catch (URISyntaxException e) {
-            throw new IOException(e);
-        }
-        try (Stream<Path> files = Files.walk(source)) {
-            files.filter(Files::isRegularFile).forEach(file -> {
-                Path copy = target.resolve(source.relativize(file).toString());
-                try {
-                    Files.createDirectories(copy.getParent());
-                    Files.copy(file, copy, StandardCopyOption.REPLACE_EXISTING);
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-            });
-        }
+        GeneratorTestBase.copySources(resourceFolder, target);
     }
 
     /** Writes the file (path is relative to the work folder). */
