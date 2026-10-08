@@ -1,16 +1,15 @@
-package tst.demo;
+package carwash.validation;
 
+import carwash.Car;
+import carwash.Shampoo;
 import com.doer.AcceptStatus;
 import com.doer.TaskDataLoader;
 import com.doer.DoerService;
 import com.doer.TaskDataSaver;
 import com.doer.Task;
-import io.quarkus.runtime.StartupEvent;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.context.BeforeDestroyed;
-import jakarta.enterprise.event.Observes;
-import jakarta.enterprise.event.Shutdown;
 import jakarta.inject.Inject;
+import jakarta.json.Json;
+import jakarta.json.JsonObjectBuilder;
 import jakarta.transaction.Transactional;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
@@ -24,7 +23,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import javax.sql.DataSource;
 
-@Path("/doer")
+@Path("/validation")
 @Produces(MediaType.APPLICATION_JSON)
 public class DoerResource {
     @Inject
@@ -32,14 +31,6 @@ public class DoerResource {
 
     @Inject
     DataSource ds;
-
-    void onAppStart(@Observes StartupEvent event) {
-        doerService.start(false);
-    }
-
-    void onAppStop(@Observes Shutdown event) {
-        doerService.stop();
-    }
 
     @TaskDataLoader
     public Car loadCar(Task task) throws Exception {
@@ -70,6 +61,20 @@ public class DoerResource {
             pst.setBoolean(2, task.isInProgress());
             pst.executeUpdate();
         }
+    }
+
+    /** The runtime the application runs in, from the environment variable {@code E2E_RUNTIME}. */
+    @Path("info")
+    @GET
+    public String info() {
+        String runtime = System.getenv("E2E_RUNTIME");
+        JsonObjectBuilder builder = Json.createObjectBuilder();
+        if (runtime == null) {
+            builder.addNull("runtime");
+        } else {
+            builder.add("runtime", runtime);
+        }
+        return builder.build().toString();
     }
 
     @Path("start")

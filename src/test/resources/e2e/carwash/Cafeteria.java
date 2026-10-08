@@ -1,4 +1,4 @@
-package tst.demo;
+package carwash;
 
 import com.doer.AcceptStatus;
 import com.doer.ConcurrencyLimit;
