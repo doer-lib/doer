@@ -77,6 +77,12 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>3.13.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>com.google.auto.service</groupId>
             <artifactId>auto-service</artifactId>
             <version>1.1.1</version>
@@ -166,6 +172,55 @@
         </plugins>
     </build>
     <profiles>
+        <profile>
+            <!-- E2E suite (*E2E classes) in the runtime given by -Ddoer.e2e.runtime; see e2e-design.md -->
+            <id>e2e</id>
+            <activation>
+                <property>
+                    <name>doer.e2e.runtime</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <skipTests>true</skipTests>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <!-- ITCase classes run in the JDK matrix, not here -->
+                                <id>default</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>e2e</id>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                                <configuration>
+                                    <includes>
+                                        <include>**/*E2E.java</include>
+                                    </includes>
+                                    <!-- One JVM, so one E2eEnvironment for all E2E classes -->
+                                    <reuseForks>true</reuseForks>
+                                    <systemPropertyVariables>
+                                        <doer.e2e.runtime>${doer.e2e.runtime}</doer.e2e.runtime>
+                                        <doer.lib.version>${doer.it.version}</doer.lib.version>
+                                        <doer.test.m2.repo>${settings.localRepository}</doer.test.m2.repo>
+                                    </systemPropertyVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <profile>
             <id>release</id>
             <build>

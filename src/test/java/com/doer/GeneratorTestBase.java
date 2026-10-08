@@ -24,7 +24,7 @@ import org.junit.jupiter.api.TestInfo;
  *     javac-*.txt, java-*.txt      command, stdout and stderr of each run
  * </pre>
  */
-abstract class GeneratorTestBase {
+public abstract class GeneratorTestBase {
     static final Path WORKSPACES = Path.of("target", "it-test-workspaces").toAbsolutePath();
     static final int TIMEOUT_SECONDS = 60;
     static final int MVN_TIMEOUT_SECONDS = 300;
@@ -79,7 +79,7 @@ abstract class GeneratorTestBase {
         writeSource(workspace, path, code);
     }
 
-    static void writeSource(Path root, String path, String code) throws IOException {
+    public static void writeSource(Path root, String path, String code) throws IOException {
         Path file = root.resolve(path);
         Files.createDirectories(file.getParent());
         Files.writeString(file, code);

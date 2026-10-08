@@ -1,4 +1,4 @@
-package tst.demo;
+package carwash;
 
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.MediaType;

@@ -1,4 +1,4 @@
-package tst.demo;
+package carwash;
 
 import com.doer.*;
 import jakarta.enterprise.context.ApplicationScoped;

@@ -1,4 +1,4 @@
-package tst.demo;
+package carwash;
 
 public class Shampoo {
 }
