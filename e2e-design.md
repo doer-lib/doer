@@ -11,12 +11,12 @@ Both questions are asked about the same code: **CarWash**, a Jakarta EE backend 
 
 | Suite | What it checks | Matrix | How it uses CarWash |
 |---|---|---|---|
-| `CarWashITCase` | the annotation processor | JDKs × build tools (javac, Maven, Gradle) | adds its own `Main`, runs key parts of Doer without a database |
-| e2e suite (`*E2E` classes) | the generated code in a deployed application | runtimes (`quarkus`, `spring-boot`, `wildfly`, …), one JDK | adds DB migrations and a runtime setup, runs it in Docker, tests it over REST, JDBC and WireMock |
+| `*GeneratedCodeITCase` | the annotation processor | JDKs × build tools (javac, Maven, Gradle) | adds its own `Main`, runs `GeneratedCodeTest` without a database |
+| e2e suite (`*E2E` classes) | the generated code in a deployed application (`GeneratedCodeE2E`: the same `GeneratedCodeTest`), and how the runtime serves it | runtimes (`quarkus`, `spring-boot`, `wildfly`, …), one JDK | adds DB migrations and a runtime setup, runs it in Docker, tests it over REST, JDBC and WireMock |
 
 This document describes only the infrastructure: the CarWash project, how each suite builds and runs it, and CI. What CarWash does and what exactly the suites check will be designed in a separate document, once the infrastructure is in place.
 
-`GeneratorITCase`, `GeneratorErrorsITCase`, `DoerServiceJdbcITCase` and the unit tests stay as they are, in the JDK matrix.
+`GeneratorITCase`, `GeneratorErrorsITCase`, `DoerServiceJdbcITCase` and the unit tests stay in the JDK matrix. The kinds of tests and how they are built are in [src/test/README.md](src/test/README.md).
 
 ## Problems today
 
@@ -32,7 +32,7 @@ This document describes only the infrastructure: the CarWash project, how each s
                                  │
          ┌───────────────────────┴──────────────────────────┐
          │                                                  │
- CarWashITCase                              E2eEnvironment, -Ddoer.e2e.runtime=<runtime>
+ *GeneratedCodeITCase                       E2eEnvironment, -Ddoer.e2e.runtime=<runtime>
  + Main (text block)                        copySources → configure<Runtime>App → mvn package
  + TestDoerService (no DB)                  → check migrations → docker run --rm (Flyway)
  javac / Maven / Gradle                                     │
@@ -64,11 +64,11 @@ All endpoints, functional and validation, are in one application under `@Applica
 
 ### The one rule
 
-**CarWash imports only `com.doer`, Jakarta Web Profile APIs (CDI, JTA, JAX-RS, JSON-P) and `javax.sql`.** Nothing of Quarkus, Spring or WildFly. Then the same sources compile in `CarWashITCase` and run in every runtime.
+**CarWash imports only `com.doer`, Jakarta Web Profile APIs (CDI, JTA, JAX-RS, JSON-P) and `javax.sql`.** Nothing of Quarkus, Spring or WildFly. Then the same sources compile in `*GeneratedCodeITCase` and run in every runtime.
 
 Today's `DoerResource` breaks the rule with `io.quarkus.runtime.StartupEvent`; it is replaced by the CDI 4 `jakarta.enterprise.event.Startup` event (Jakarta EE 10), which Quarkus, WildFly and Open Liberty fire.
 
-So that `CarWashITCase` can run CarWash without a container, components get their collaborators through `@Inject` setters or package-private fields, and external services and repositories are behind small interfaces that `Main` can replace with in-memory implementations. `Main` is in the package `carwash`, so components of other packages (`carwash.validation`) need `@Inject` setters. Components that use the `DataSource` directly (today the loaders and savers that write `demo_log_tasks`) get a recording `DataSource` from `Main`: a `java.lang.reflect.Proxy` without a database that prints each statement it executes.
+So that `*GeneratedCodeITCase` can run CarWash without a container, components get their collaborators through `@Inject` setters or package-private fields, and external services and repositories are behind small interfaces that `Main` can replace with in-memory implementations. `Main` is in the package `carwash`, so components of other packages (`carwash.validation`) need `@Inject` setters. Components that use the `DataSource` directly (today the loaders and savers that write `demo_log_tasks`) get a recording `DataSource` from `Main`: a `java.lang.reflect.Proxy` without a database that prints each statement it executes.
 
 ### Layout
 
@@ -92,27 +92,25 @@ CarWash has no tests of its own: the suites test CarWash, not tests inside it.
 
 **No shared glue folders**, at least at first. What a runtime cannot work without — `pom.xml`, configuration, a `SpringBootApp` class, a `DataSource` producer — is written by that runtime's methods in the test code, as text blocks (see [Runtime setup](#runtime-setup)). When two runtimes need the same text (the producers of WildFly and Open Liberty), it is a shared constant in the test code, not a folder.
 
-## `CarWashITCase`: the annotation processor
+## `*GeneratedCodeITCase`: the annotation processor
 
-`CarWashITCase` copies `src/test/resources/e2e/carwash` into the `carwash` package folder of its workspace and compiles it together with two text blocks of its own, as today:
+Each build tool is a class that implements `GeneratedCodeTest` (see [e2e-test-app.md](e2e-test-app.md#the-same-tests-in-generatedcodeitcase-and-in-e2e)). In `@BeforeAll` it copies `src/test/resources/e2e/carwash` into its workspace and builds it together with two text blocks:
 
 - `TEST_DOER_SERVICE` — the generated service without a database;
-- `Main` — wires the CarWash components by hand (the `_inject_*` methods of the generated service, in-memory implementations instead of repositories and external services), runs key parts of Doer through `runTask` and prints what is called. The expected output is a text block next to it.
+- `CarWashProcess.MAIN` — wires the CarWash components by hand (the `_inject_*` methods of the generated service) and passes each request to `TaskRunner`.
 
-CarWash is compiled against the Jakarta EE API jar, which `GeneratorTestBase` already resolves. The REST endpoints and JDBC repositories are compiled but not run by `Main`. No database is needed.
+CarWash is compiled against the Jakarta EE API jar, which `Toolchain` resolves. The REST endpoints and JDBC repositories are compiled but not run by `Main`. No database is needed.
 
-Each build tool is a test method:
-
-| Build tool | How |
+| Build tool | Class |
 |---|---|
-| javac | as today: `GeneratorTestBase.javac` |
-| Maven | `pom.xml` as a text block (instead of the archetype), sources copied in, processor in `annotationProcessorPaths` |
-| Gradle | new: `build.gradle` as a text block with `annotationProcessor "com.java-doer:doer:…"` and `mavenLocal()`; a pinned Gradle version |
+| javac | `JavacGeneratedCodeITCase` |
+| Maven | `MavenGeneratedCodeITCase`: `pom.xml` as a text block, sources copied in, processor in `annotationProcessorPaths` |
+| Gradle | new `GradleGeneratedCodeITCase`: `build.gradle` as a text block with `annotationProcessor "com.java-doer:doer:…"` and `mavenLocal()`; a pinned Gradle version |
 | Eclipse compiler (ecj) | candidate: the compiler of Eclipse and VS Code Java; runs processors differently from javac |
 
-The Maven and Gradle projects also have a test source folder with one class that has a doer method. The build compiles it with the processor on the path, and the check is that the processor changes nothing: no second `_GeneratedDoerService`, and `CreateSchema.sql`, `doer.json` and the other generated files of the main classes stay as they are (`DoerProcessor.isCompilingTests`; today's `DemoTest` in `QuarkusITCase`).
+That the processor generates nothing when it compiles test sources (`DoerProcessor.isCompilingTests`) is checked by `GeneratorITCase` with two javac runs, as a build tool compiles main and test sources. The build tools are not checked for it: if javac is right, they are right too.
 
-`CarWashITCase` stays in the JDK matrix, so it runs with JDK 17, 21, 25 and 27.
+The `*GeneratedCodeITCase` classes stay in the JDK matrix, so they run with JDK 17, 21, 25 and 27.
 
 ## The e2e suite: the generated code in runtimes
 
@@ -338,7 +336,7 @@ The plan is worked through top to bottom. A box is ticked when its **Check** pas
 
 ### 2. `CarWashITCase` on the CarWash sources
 
-javac and Maven only; more build tools are [step 7](#7-more-build-tools-in-carwashitcase).
+javac and Maven only; more build tools are [step 7](#7-more-build-tools-in-generatedcodeitcase).
 
 **2.1 CarWash and helpers**
 
@@ -366,9 +364,16 @@ javac and Maven only; more build tools are [step 7](#7-more-build-tools-in-carwa
 - [x] **Check:** `maven__should_build_working_car_wash` passes; the `mvn package` log has the note of `DoerProcessor.isCompilingTests`; `target/test-classes` and `target/generated-test-sources` have no `com/doer/generated`.
 - [x] **Check:** `mvn verify` passes with JDK 17 and the newest JDK of the matrix.
 
+**2.4 Test layout** (see [src/test/README.md](src/test/README.md))
+
+- [x] `CarWashITCase` becomes `GeneratedCodeTest` with `JavacGeneratedCodeITCase`, `MavenGeneratedCodeITCase` and `GeneratedCodeE2E`, in the package `com.doer.generatedcode`.
+- [x] `GeneratorTestBase` and `Utils` are replaced by `com.doer.testkit`: static helpers, and `InWorkspace` with `@TempDir(factory = Workspaces.class)` instead of a base class.
+- [x] The check of test sources moves from the Maven build to `GeneratorITCase`, with two javac runs.
+- [x] The Generator* beans of `carwash.validation` are renamed GeneratedCode*, after the test that uses them.
+
 ### 3. CarWash
 
-- [ ] A separate document that develops CarWash: its functionality, what `CarWashITCase` checks about the generated code, and what the e2e suite checks about its behavior in the runtimes.
+- [ ] A separate document that develops CarWash: its functionality, what `*GeneratedCodeITCase` checks about the generated code, and what the e2e suite checks about its behavior in the runtimes.
 
 ### 4. Spring Boot
 
@@ -385,9 +390,9 @@ javac and Maven only; more build tools are [step 7](#7-more-build-tools-in-carwa
 
 - [ ] Decide the open question about Jetty / Tomcat; then the same as step 5.
 
-### 7. More build tools in `CarWashITCase`
+### 7. More build tools in `*GeneratedCodeITCase`
 
-- [ ] Gradle (see [`CarWashITCase`](#carwashitcase-the-annotation-processor)), with the same test source class and check as Maven; decide the open question about Gradle on CI.
+- [ ] `GradleGeneratedCodeITCase` (see [`*GeneratedCodeITCase`](#generatedcodeitcase-the-annotation-processor)); decide the open question about Gradle on CI.
 - [ ] Eclipse compiler (ecj), if it is still a candidate.
 
 ### 8. More runtimes in the e2e suite

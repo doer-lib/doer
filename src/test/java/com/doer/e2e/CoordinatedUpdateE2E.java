@@ -6,10 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 /** DoerService.facilitateCoordinatedUpdate called from a REST endpoint. */
@@ -177,8 +175,8 @@ class CoordinatedUpdateE2E extends E2eTestBase {
 
         // Car loaded, task updated (trigger), Car unloaded
         List<DemoLogRow> logs = loadDemoLogs(taskId);
-        List<String> types = logs.stream().map(r -> r.type()).collect(Collectors.toList());
-        assertEquals(Arrays.asList("Car", "task", "Car"), types);
+        List<String> types = logs.stream().map(DemoLogRow::type).toList();
+        assertEquals(List.of("Car", "task", "Car"), types);
         assertEquals(logs.get(0).txId(), logs.get(1).txId());
         assertEquals(logs.get(1).txId(), logs.get(2).txId());
     }

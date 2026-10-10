@@ -1,6 +1,7 @@
 package carwash;
 
-import com.doer.*;
+import com.doer.ExceptionDescriber;
+import com.doer.Task;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.json.JsonObjectBuilder;
 

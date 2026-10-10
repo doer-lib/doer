@@ -1,6 +1,6 @@
 package com.doer.e2e;
 
-import static com.doer.e2e.E2eEnvironment.doerLibVersion;
+import static com.doer.testkit.Toolchain.doerLibVersion;
 
 import java.io.IOException;
 import java.nio.file.Path;

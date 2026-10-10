@@ -1,7 +1,12 @@
 package com.doer.e2e;
 
-import com.doer.RunResult;
-import com.doer.Utils;
+import static com.doer.testkit.Toolchain.property;
+
+import com.doer.testkit.Postgres;
+import com.doer.testkit.Processes;
+import com.doer.testkit.RunResult;
+import com.doer.testkit.Toolchain;
+import com.doer.testkit.Workspaces;
 import com.github.tomakehurst.wiremock.client.WireMock;
 import io.restassured.RestAssured;
 import io.restassured.path.json.JsonPath;
@@ -52,18 +57,14 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * </ul>
  */
 public class E2eEnvironment implements BeforeAllCallback {
-    static final String POSTGRES_IMAGE = "postgres:12.3";
+    static final String POSTGRES_IMAGE = Postgres.IMAGE;
     static final String WIREMOCK_IMAGE = "wiremock/wiremock:3.13.2";
-    static final int MVN_TIMEOUT_SECONDS = 600;
     static final int DOCKER_PULL_TIMEOUT_SECONDS = 600;
     static final int READY_TIMEOUT_SECONDS = 120;
     static final String EXTERNAL = "external";
 
     public static final String runtime = property("doer.e2e.runtime", "quarkus");
-    public static final String doerLibVersion = property("doer.lib.version", "0.0.0-IT-SNAPSHOT");
     static final boolean skipBuild = Boolean.parseBoolean(property("doer.e2e.skip-build", "false"));
-    static final Path m2Repo = Path.of(property("doer.test.m2.repo",
-            System.getProperty("user.home") + "/.m2/repository"));
     static final Path workdir = Path.of("target", "e2e", runtime).toAbsolutePath();
 
     private static boolean started;
@@ -87,7 +88,7 @@ public class E2eEnvironment implements BeforeAllCallback {
             return;
         }
         try {
-            if (EXTERNAL.equals(runtime)) {
+            if (isExternal()) {
                 startExternal();
             } else {
                 startInDocker();
@@ -97,6 +98,11 @@ public class E2eEnvironment implements BeforeAllCallback {
             startFailure = e;
             throw e;
         }
+    }
+
+    /** True for {@code doer.e2e.runtime=external}: an application that is already running, not in Docker. */
+    static boolean isExternal() {
+        return EXTERNAL.equals(runtime);
     }
 
     /** The {@link E2eApp} of the runtime. */
@@ -134,11 +140,9 @@ public class E2eEnvironment implements BeforeAllCallback {
             }
             System.out.printf("✔ Build skipped, reusing %s%n", workdir);
         } else {
-            Utils.deleteRecursively(workdir);
-            Files.createDirectories(workdir);
+            Workspaces.recreate(workdir);
             app.configure(workdir);
-            RunResult build = Utils.run(workdir, "mvn-package", MVN_TIMEOUT_SECONDS,
-                    List.of("mvn", "-B", "-Dmaven.repo.local=" + m2Repo, "package"));
+            RunResult build = Toolchain.mvn(workdir, "mvn-package", "package");
             build.assertStatus(0);
             System.out.printf("✔ CarWash for %s built in %s ms: %s%n", runtime, build.runMilliseconds(), workdir);
         }
@@ -146,7 +150,7 @@ public class E2eEnvironment implements BeforeAllCallback {
         checkMigration("V2__create_doer_indexes.sql", "CreateIndexes.sql");
 
         dockerRun = app.dockerRun(workdir);
-        RunResult pull = Utils.run(workdir, "docker-pull", DOCKER_PULL_TIMEOUT_SECONDS,
+        RunResult pull = Processes.run(workdir, "docker-pull", DOCKER_PULL_TIMEOUT_SECONDS,
                 List.of("docker", "pull", dockerRun.image()));
         pull.assertStatus(0);
 
@@ -205,13 +209,13 @@ public class E2eEnvironment implements BeforeAllCallback {
      */
     public static synchronized int stopNode(int node) throws Exception {
         requireDocker("stopNode");
-        return Objects.requireNonNull(nodes.get(node), "No node " + node).stop();
+        return appNode(node).stop();
     }
 
     /** Base URL of the node, for example {@code http://127.0.0.1:32801}; RestAssured is set to the one of node 1. */
     public static String baseUrl(int node) {
         requireDocker("baseUrl");
-        return Objects.requireNonNull(nodes.get(node), "No node " + node).baseUrl();
+        return appNode(node).baseUrl();
     }
 
     /** DataSource of the e2e Postgres. */
@@ -222,7 +226,7 @@ public class E2eEnvironment implements BeforeAllCallback {
     /** The application log (stdout) of the node, all its starts. */
     public static String appLog(int node) throws IOException {
         requireDocker("appLog");
-        return Files.readString(Objects.requireNonNull(nodes.get(node), "No node " + node).out);
+        return Files.readString(appNode(node).out);
     }
 
     /**
@@ -290,19 +294,17 @@ public class E2eEnvironment implements BeforeAllCallback {
         return String.join("\n", lines.subList(Math.max(0, lines.size() - 50), lines.size())) + "\n";
     }
 
+    private static AppNode appNode(int node) {
+        return Objects.requireNonNull(nodes.get(node), "No node " + node);
+    }
+
     private static void requireDocker(String method) {
-        if (EXTERNAL.equals(runtime)) {
+        if (isExternal()) {
             throw new UnsupportedOperationException(method + " is not available with doer.e2e.runtime=external");
         }
     }
 
     private static synchronized void destroyNodes() {
         nodes.values().forEach(AppNode::destroy);
-    }
-
-    /** System property; also the default when it is set but blank (as an empty Maven property). */
-    private static String property(String name, String defaultValue) {
-        String value = System.getProperty(name);
-        return value == null || value.isBlank() ? defaultValue : value;
     }
 }
