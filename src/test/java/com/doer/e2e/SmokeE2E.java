@@ -44,7 +44,7 @@ public class SmokeE2E extends E2eTestBase {
                 versions.add(rs.getString(1));
             }
         }
-        assertEquals(List.of("1", "2", "3"), versions);
+        assertEquals(List.of("1", "2", "3", "4"), versions);
     }
 
     @Test

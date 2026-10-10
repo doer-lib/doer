@@ -128,6 +128,10 @@ class TransitSimsProcess implements AutoCloseable {
                     generatedCodeTaskData.setCallTrace(callTrace);
                     var validationResource = new ValidationResource();
                     validationResource.setDoerService(doer);
+                    doer._inject_busDriver(new BusDriver());
+                    doer._inject_busRepository(new BusRepository());
+                    doer._inject_simRepository(new SimRepository());
+                    doer._inject_simSupervisor(new SimSupervisor());
                     doer._inject_concurrencyLimitOne(new ConcurrencyLimitOne());
                     doer._inject_concurrencyQueues(new ConcurrencyQueues());
                     doer._inject_doerMethodNextClass(new DoerMethodNextClass());

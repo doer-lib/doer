@@ -58,8 +58,14 @@ abstract class E2eTestBase {
     }
 
     static void resetServer() {
+        resetServer(false);
+    }
+
+    /** Deletes all tasks and data, and restarts Doer, with the monitor of delayed tasks when {@code monitor}. */
+    static void resetServer(boolean monitor) {
         given()
                 .when()
+                .queryParam("m", monitor)
                 .get("/api/validation/reset")
                 .then()
                 .statusCode(200)
