@@ -64,7 +64,7 @@ All endpoints, functional and validation, are in one application under `@Applica
 
 ### The one rule
 
-**Transit Sims imports only `com.doer`, Jakarta Web Profile APIs (CDI, JTA, JAX-RS, JSON-P) and `javax.sql`.** Nothing of Quarkus, Spring or WildFly. Then the same sources compile in `*GeneratedCodeITCase` and run in every runtime.
+**Transit Sims imports only `com.doer`, Jakarta Web Profile APIs (CDI, JTA, JAX-RS, JSON-P, JSON-B) and `javax.sql`.** Nothing of Quarkus, Spring or WildFly. Then the same sources compile in `*GeneratedCodeITCase` and run in every runtime.
 
 Today's `DoerResource` breaks the rule with `io.quarkus.runtime.StartupEvent`; it is replaced by the CDI 4 `jakarta.enterprise.event.Startup` event (Jakarta EE 10), which Quarkus, WildFly and Open Liberty fire.
 
@@ -415,8 +415,21 @@ The CarWash beans (`Washer`, `Cafeteria`, `PhoneBooth`, `ExceptionMapper`, `Car`
 
 **3.4 The functional code of Transit Sims**
 
-- [ ] Tables, network calculation, REST API, Sim and Bus tasks, as in [e2e-test-app.md](e2e-test-app.md#transit-sims-in-doer-terms). `Main` creates the new beans.
-- [ ] `TransitSimsE2E`: buses go from stop to stop. Concurrent boarding respects the capacity and the stop. A pause stops the buses. The simulation completes.
+As in [e2e-test-app.md](e2e-test-app.md#transit-sims-in-doer-terms). The functional code is in the package `transitsims`.
+
+- [x] `V4__create_transit_sims_tables.sql`: `sims` and `buses` with `id`, `task_id`, `created`, `modified`, `json_data`. `ValidationResource.reset` also deletes them. `SmokeE2E` expects V1–V4.
+- [x] `Simulation` with its records and its calculation (nearest vertex, Dijkstra, path length, buses per route), and `Bus`; JSON-B with formatting. `SimStatus`, `BusStatus`.
+- [x] `SimRepository` (loader, saver, `create` with `@Transactional`, find by id), `BusRepository` (loader with the simulation and `now()`, saver, find by simulation).
+- [x] `SimSupervisor.checkCompletion`, `BusDriver.stand`, `drive`.
+- [x] `SimResource`, `BusResource`: the endpoints of the REST API.
+- [x] `TransitSimsProcess.MAIN` injects the new beans. V2 is copied from the generated `CreateIndexes.sql`.
+- [x] `TransitSimsE2E`, on a line of three stops, Doer with the monitor (`reset?m=true`):
+  - the simulation is created with its buses at their stops, and its JSON in `sims` is formatted;
+  - buses go from stop to stop, with a `path` while driving;
+  - concurrent boarding before the start: as many passengers board as the capacity allows, the others get 409; boarding at another stop gets 409;
+  - a pause stops the simulation time and the buses, and a resume goes on;
+  - a passenger rides from the first stop to the second and arrives; the bus parks at the terminal, and the simulation completes.
+- [x] **Check:** `mvn verify` passes. All `*E2E` classes pass three runs in a row.
 
 **3.5 Specialized classes for the missing cases**
 
