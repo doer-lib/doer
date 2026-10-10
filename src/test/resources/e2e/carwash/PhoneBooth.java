@@ -1,8 +1,9 @@
 package carwash;
 
-import com.doer.*;
 import com.doer.AcceptStatus;
 import com.doer.ConcurrencyLimit;
+import com.doer.ExceptionDescriber;
+import com.doer.Task;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.json.JsonObjectBuilder;
 

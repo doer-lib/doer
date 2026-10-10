@@ -1,8 +1,8 @@
-package com.doer;
+package com.doer.testkit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/** Result of a command run by {@link Utils#run}. */
+/** Result of a command run by {@link Processes#run}. */
 public record RunResult(String stdOut, String stdErr, int status, long runMilliseconds) {
 
     /** Asserts the exit status; on mismatch the failure message has the command output. */

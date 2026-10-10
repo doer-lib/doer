@@ -3,16 +3,18 @@ package carwash.validation;
 import carwash.Car;
 import carwash.Shampoo;
 import com.doer.AcceptStatus;
-import com.doer.TaskDataLoader;
 import com.doer.DoerService;
-import com.doer.TaskDataSaver;
 import com.doer.Task;
+import com.doer.TaskDataLoader;
+import com.doer.TaskDataSaver;
 import jakarta.inject.Inject;
 import jakarta.json.Json;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.transaction.Transactional;
+import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
@@ -28,6 +30,7 @@ import javax.sql.DataSource;
 public class DoerResource {
     DoerService doerService;
     DataSource ds;
+    TaskRunner taskRunner;
 
     @Inject
     public void setDoerService(DoerService doerService) {
@@ -39,33 +42,34 @@ public class DoerResource {
         this.ds = ds;
     }
 
+    @Inject
+    public void setTaskRunner(TaskRunner taskRunner) {
+        this.taskRunner = taskRunner;
+    }
+
     @TaskDataLoader
     public Car loadCar(Task task) throws Exception {
-        String sql = "insert into demo_log_tasks (object_type , task_id, in_progress, tx_id) values ('Car', ?, ?, txid_current());";
-        try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setLong(1, task.getId());
-            pst.setBoolean(2, task.isInProgress());
-            pst.executeUpdate();
-        }
+        logTaskData("Car", task);
         return null;
     }
 
     @TaskDataSaver
     public void storeCar(Task task, Car car) throws Exception {
-        String sql = "insert into demo_log_tasks (object_type , task_id, in_progress, tx_id) values ('Car', ?, ?, txid_current());";
-        try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setLong(1, task.getId());
-            pst.setBoolean(2, task.isInProgress());
-            pst.executeUpdate();
-        }
+        logTaskData("Car", task);
     }
 
     @TaskDataSaver
     public void storeShampoo(Task task, Shampoo shampoo) throws Exception {
-        String sql = "insert into demo_log_tasks (object_type , task_id, in_progress, tx_id) values ('Shampoo', ?, ?, txid_current());";
+        logTaskData("Shampoo", task);
+    }
+
+    /** Records the access to the task data with the id of the current transaction, to check it is Doer's. */
+    private void logTaskData(String objectType, Task task) throws SQLException {
+        String sql = "insert into demo_log_tasks (object_type, task_id, in_progress, tx_id) values (?, ?, ?, txid_current())";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setLong(1, task.getId());
-            pst.setBoolean(2, task.isInProgress());
+            pst.setString(1, objectType);
+            pst.setLong(2, task.getId());
+            pst.setBoolean(3, task.isInProgress());
             pst.executeUpdate();
         }
     }
@@ -148,11 +152,18 @@ public class DoerResource {
         return task;
     }
 
+    /** Runs a task through runTask of the generated service, see {@link TaskRunner}. */
+    @Path("run-task")
+    @POST
+    @Consumes(MediaType.APPLICATION_JSON)
+    public String runTask(String request) throws Exception {
+        return taskRunner.run(request);
+    }
+
     @Path("task")
     @GET
     public Task getTask(@QueryParam("id") Long id) throws Exception {
-        Task task = doerService.loadTask(id);
-        return task;
+        return doerService.loadTask(id);
     }
 
     @Path("coordinated_update")
@@ -209,5 +220,4 @@ public class DoerResource {
         doerService.updateAndBumpVersion(task);
         task.setStatus("Washed");
     }
-
 }

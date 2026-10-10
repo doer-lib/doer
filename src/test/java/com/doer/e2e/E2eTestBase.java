@@ -3,12 +3,12 @@ package com.doer.e2e;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.CoreMatchers.equalTo;
 
+import com.doer.testkit.Sql;
 import io.restassured.RestAssured;
 import io.restassured.path.json.JsonPath;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -101,10 +101,8 @@ abstract class E2eTestBase {
     static String waitTaskStatus(long id, String status) {
         while (true) {
             RestTask task = restGetTask(id);
-            if (Objects.equals(status, task.status())) {
-                return task.status();
-            }
-            if (task.modified().plus(Duration.ofSeconds(2)).isBefore(Instant.now())) {
+            boolean idle = task.modified().plus(Duration.ofSeconds(2)).isBefore(Instant.now());
+            if (Objects.equals(status, task.status()) || idle) {
                 return task.status();
             }
             try {
@@ -136,7 +134,7 @@ abstract class E2eTestBase {
     }
 
     static List<DemoLogRow> loadDemoLogs(long taskId) {
-        ArrayList<DemoLogRow> list = new ArrayList<>();
+        List<DemoLogRow> list = new ArrayList<>();
         try (Connection con = E2eEnvironment.dataSource().getConnection();
                 PreparedStatement pst = con
                         .prepareStatement("SELECT * FROM demo_log_tasks WHERE task_id = ? ORDER BY id")) {
@@ -154,37 +152,14 @@ abstract class E2eTestBase {
     }
 
     static void sqlUpdate(String sql) {
-        try (Connection con = E2eEnvironment.dataSource().getConnection();
-                PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.executeUpdate();
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
+        Sql.update(E2eEnvironment.dataSource(), sql);
     }
 
     static Long selectLongValue(String sql) {
-        try (Connection con = E2eEnvironment.dataSource().getConnection();
-                PreparedStatement pst = con.prepareStatement(sql);
-                ResultSet rs = pst.executeQuery()) {
-            if (rs.next()) {
-                long x = rs.getLong(1);
-                if (!rs.wasNull()) {
-                    return x;
-                }
-            }
-            return null;
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
+        return Sql.selectLong(E2eEnvironment.dataSource(), sql);
     }
 
     static String selectStringValue(String sql) {
-        try (Connection con = E2eEnvironment.dataSource().getConnection();
-                PreparedStatement pst = con.prepareStatement(sql);
-                ResultSet rs = pst.executeQuery()) {
-            return rs.next() ? rs.getString(1) : null;
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
+        return Sql.selectString(E2eEnvironment.dataSource(), sql);
     }
 }

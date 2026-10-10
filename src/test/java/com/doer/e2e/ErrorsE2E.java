@@ -18,14 +18,12 @@ class ErrorsE2E extends E2eTestBase {
         long taskId2 = pushTask("Should check email");
         Thread.sleep(100);
 
-        // taskId1 - throws Exception - extra_json should not have "e2":
-        // "RuntimeException" value
+        // taskId1 - throws Exception - extra_json should not have "e2": "RuntimeException" value
         String extraJson1 = selectStringValue("SELECT extra_json::VARCHAR FROM task_logs WHERE task_id = " + taskId1);
         assertTrue(extraJson1.contains("\"e1\": \"Exception\""), extraJson1);
         assertFalse(extraJson1.contains("e2"), extraJson1);
 
-        // taskId2 - throws RuntimeExcpetion - extra_json should have both "Exceoption",
-        // and "RuntimeExeption" lines
+        // taskId2 - throws RuntimeException - extra_json should have both "Exception" and "RuntimeException" lines
         String extraJson2 = selectStringValue("SELECT extra_json::VARCHAR FROM task_logs WHERE task_id = " + taskId2);
         assertTrue(extraJson2.contains("\"e1\": \"Exception\""), extraJson2);
         assertTrue(extraJson2.contains("\"e2\": \"RuntimeException\""), extraJson2);

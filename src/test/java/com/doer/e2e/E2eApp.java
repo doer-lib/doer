@@ -1,6 +1,6 @@
 package com.doer.e2e;
 
-import com.doer.GeneratorTestBase;
+import com.doer.testkit.Sources;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
@@ -30,11 +30,11 @@ public interface E2eApp {
 
     /** Copies a folder of test resources (for example {@code e2e/carwash}) into the target folder. */
     default void copySources(String resourceFolder, Path target) throws IOException {
-        GeneratorTestBase.copySources(resourceFolder, target);
+        Sources.copyResources(resourceFolder, target);
     }
 
     /** Writes the file (path is relative to the work folder). */
     default void writeFile(Path workdir, String path, String content) throws IOException {
-        GeneratorTestBase.writeSource(workdir, path, content);
+        Sources.write(workdir, path, content);
     }
 }
