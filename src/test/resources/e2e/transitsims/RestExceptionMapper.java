@@ -1,4 +1,4 @@
-package carwash;
+package transitsims;
 
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.MediaType;

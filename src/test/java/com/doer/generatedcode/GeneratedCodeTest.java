@@ -8,13 +8,13 @@ import org.junit.jupiter.api.Test;
 /**
  * What {@code runTask} of the generated service does with a task: calls the doer method with its parameters, the
  * loaders before it and the savers after it, and sets the status and failingSince after a failure. Each check sends
- * a request to {@code carwash.validation.TaskRunner} and compares its response. The doer methods are the
- * GeneratedCode* classes of {@code carwash.validation}. See e2e-test-app.md.
+ * a request to {@code transitsims.validation.TaskRunner} and compares its response. The doer methods are the
+ * GeneratedCode* classes of {@code transitsims.validation}. See e2e-test-app.md.
  * <p>
- * The same checks run on CarWash built and run in different ways; the implementing class says how:
+ * The same checks run on Transit Sims built and run in different ways; the implementing class says how:
  * <ul>
  * <li>{@link JavacGeneratedCodeITCase}, {@link MavenGeneratedCodeITCase} — built by javac or Maven and run in its own
- * JVM ({@link CarWashProcess}), with every JDK of the matrix;</li>
+ * JVM ({@link TransitSimsProcess}), with every JDK of the matrix;</li>
  * <li>{@link GeneratedCodeE2E} — deployed in a runtime, called over REST, with one JDK per runtime.</li>
  * </ul>
  */

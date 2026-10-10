@@ -382,6 +382,8 @@ public abstract class DoerService {
                     for (ConcurrencyDomainImpl domain : domains) {
                         if (domain.getStatuses().contains(task.getStatus())) {
                             domain.putTaskToQueue(task);
+                            // The idle monitor waits for the checks planned before this task: wake it to plan again
+                            this.notify();
                             if (domain.numberOfTasksInProgress < domain.getLimit()) {
                                 executor.execute(() -> processNextTask(domain));
                             }

@@ -6,14 +6,14 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
 
-/** CarWash in Quarkus: a Quarkus JVM application, run with {@code java -jar quarkus-run.jar} in a JRE image. */
+/** Transit Sims in Quarkus: a Quarkus JVM application, run with {@code java -jar quarkus-run.jar} in a JRE image. */
 class QuarkusApp implements E2eApp {
     static final String QUARKUS_VERSION = "3.40.1";
     static final String JRE_IMAGE = "eclipse-temurin:25-jre";
 
     @Override
     public void configure(Path workdir) throws Exception {
-        copySources("e2e/carwash", workdir.resolve("src/main/java/carwash"));
+        copySources("e2e/transitsims", workdir.resolve("src/main/java/transitsims"));
         copySources("e2e/db/migration", workdir.resolve("src/main/resources/db/migration"));
         configureQuarkusApp(workdir);
     }
@@ -30,8 +30,8 @@ class QuarkusApp implements E2eApp {
                          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
                     <modelVersion>4.0.0</modelVersion>
-                    <groupId>carwash</groupId>
-                    <artifactId>carwash-quarkus</artifactId>
+                    <groupId>transitsims</groupId>
+                    <artifactId>transitsims-quarkus</artifactId>
                     <version>1.0.0-SNAPSHOT</version>
                     <packaging>quarkus</packaging>
 

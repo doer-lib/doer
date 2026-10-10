@@ -1,4 +1,4 @@
-package carwash;
+package transitsims.validation;
 
 import com.doer.AcceptStatus;
 import com.doer.ConcurrencyLimit;
@@ -13,7 +13,7 @@ import java.sql.PreparedStatement;
 import javax.sql.DataSource;
 
 @ApplicationScoped
-public class CarWash {
+public class Washer {
     Logger log = System.getLogger(getClass().getName());
 
     @Inject
