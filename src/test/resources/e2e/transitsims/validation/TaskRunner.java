@@ -1,4 +1,4 @@
-package carwash.validation;
+package transitsims.validation;
 
 import com.doer.DoerService;
 import com.doer.Task;
@@ -13,7 +13,7 @@ import java.time.Duration;
 
 /**
  * Runs one task through {@code runTask} of the generated service, for GeneratedCodeTest: in e2e through
- * {@code POST /api/validation/run-task}, in the processor tests through {@code carwash.Main}.
+ * {@code POST /api/validation/run-task}, in the processor tests through {@code transitsims.Main}.
  * <p>
  * Request: {@code {"status": "Generated code 1 param", "failingFor": "PT25H"}}; {@code failingFor} is optional, how long
  * ago the task started failing. Response: {@code {"status": ..., "failing": true|false, "trace": [calls]}}.

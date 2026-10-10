@@ -28,7 +28,7 @@ public interface InWorkspace {
         Sources.write(getWorkspace(), path, code);
     }
 
-    /** Copies a folder of test resources (for example {@code e2e/carwash}) into the folder of the workspace. */
+    /** Copies a folder of test resources (for example {@code e2e/transitsims}) into the folder of the workspace. */
     default void copySources(String resourceFolder, String path) throws IOException {
         Sources.copyResources(resourceFolder, getWorkspace().resolve(path));
     }

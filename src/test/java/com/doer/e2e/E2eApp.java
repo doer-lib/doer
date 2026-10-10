@@ -6,7 +6,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 /**
- * CarWash in one runtime: turns the CarWash sources into a Maven project in the work folder and says how to run the
+ * Transit Sims in one runtime: turns the Transit Sims sources into a Maven project in the work folder and says how to run the
  * built artifact in Docker. {@link E2eEnvironment} builds the project and runs it. See e2e-design.md.
  */
 public interface E2eApp {
@@ -28,7 +28,7 @@ public interface E2eApp {
     record DockerRun(List<String> options, String image, List<String> command) {
     }
 
-    /** Copies a folder of test resources (for example {@code e2e/carwash}) into the target folder. */
+    /** Copies a folder of test resources (for example {@code e2e/transitsims}) into the target folder. */
     default void copySources(String resourceFolder, Path target) throws IOException {
         Sources.copyResources(resourceFolder, target);
     }

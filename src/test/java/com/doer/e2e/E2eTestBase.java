@@ -18,7 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
- * Base for the E2E tests of CarWash: helpers for the validation endpoints ({@code /api/validation/...}) and for the
+ * Base for the E2E tests of Transit Sims: helpers for the validation endpoints ({@code /api/validation/...}) and for the
  * database of {@link E2eEnvironment}.
  */
 @ExtendWith(E2eEnvironment.class)

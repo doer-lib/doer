@@ -13,28 +13,28 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestInstance.Lifecycle;
 import org.junit.jupiter.api.io.TempDir;
 
-/** {@link GeneratedCodeTest} on CarWash compiled with javac, run in its own JVM. */
+/** {@link GeneratedCodeTest} on Transit Sims compiled with javac, run in its own JVM. */
 @TestInstance(Lifecycle.PER_CLASS)
 public class JavacGeneratedCodeITCase implements GeneratedCodeTest, InWorkspace {
 
     // Static: JUnit sets static fields before @BeforeAll, instance fields only before each test
     @TempDir(factory = Workspaces.class, cleanup = NEVER)
     static Path workspace;
-    CarWashProcess carWash;
+    TransitSimsProcess transitSims;
 
     @BeforeAll
     void build() throws Exception {
-        copySources("e2e/carwash", "carwash");
+        copySources("e2e/transitsims", "transitsims");
         writeSource("TestDoerService.java", TEST_DOER_SERVICE);
-        writeSource("carwash/Main.java", CarWashProcess.MAIN);
+        writeSource("transitsims/Main.java", TransitSimsProcess.MAIN);
         javac(javaFiles()).assertStatus(0);
-        carWash = CarWashProcess.start(workspace, Toolchain.runClasspath("classes"));
+        transitSims = TransitSimsProcess.start(workspace, Toolchain.runClasspath("classes"));
     }
 
     @AfterAll
     void stop() throws Exception {
-        if (carWash != null) {
-            carWash.close();
+        if (transitSims != null) {
+            transitSims.close();
         }
     }
 
@@ -45,6 +45,6 @@ public class JavacGeneratedCodeITCase implements GeneratedCodeTest, InWorkspace 
 
     @Override
     public String callTaskRunner(String request) throws Exception {
-        return carWash.runTask(request);
+        return transitSims.runTask(request);
     }
 }

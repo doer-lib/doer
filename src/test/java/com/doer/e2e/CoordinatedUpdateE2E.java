@@ -25,7 +25,7 @@ class CoordinatedUpdateE2E extends E2eTestBase {
                 .body("status", equalTo("Unparked"));
 
         assertEquals("Unparked", restGetTask(taskId).status());
-        assertEquals("Parked>Unparked>DoerResource>coordinatedUpdate", selectStringValue(
+        assertEquals("Parked>Unparked>ValidationResource>coordinatedUpdate", selectStringValue(
                 "SELECT initial_status || '>' || final_status || '>' || class_name || '>' || method_name "
                         + "FROM task_logs WHERE task_id = " + taskId));
     }

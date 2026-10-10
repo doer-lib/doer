@@ -70,7 +70,7 @@ class AppNode {
             throw new IllegalStateException("Node " + node + " is already started");
         }
         starts++;
-        String name = "carwash-" + runtime + "-" + node + "-" + starts;
+        String name = "transitsims-" + runtime + "-" + node + "-" + starts;
         List<String> command = new ArrayList<>(List.of("docker", "run", "--rm", "--name", name,
                 "--network", network, "-p", "127.0.0.1:" + port + ":8080"));
         // Ryuk removes the container when the test JVM ends, as it does with Testcontainers' own containers

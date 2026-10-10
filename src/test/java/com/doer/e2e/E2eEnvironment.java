@@ -37,12 +37,12 @@ import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * CarWash running in the runtime given by {@code -Ddoer.e2e.runtime}, with Postgres and WireMock, for the
+ * Transit Sims running in the runtime given by {@code -Ddoer.e2e.runtime}, with Postgres and WireMock, for the
  * {@code *E2E} test classes ({@code @ExtendWith(E2eEnvironment.class)}). One environment per JVM: the first test
  * class starts it, and it is stopped when the JVM ends. See e2e-design.md.
  *
  * <pre>
- * target/e2e/&lt;runtime&gt;/                    the work folder: a complete Maven project of CarWash in the runtime
+ * target/e2e/&lt;runtime&gt;/                    the work folder: a complete Maven project of Transit Sims in the runtime
  *     mvn-package-*.txt                     command and output of the build
  *     docker-pull-*.txt                     the same for docker pull of the application image
  *     app-&lt;node&gt;-out.txt, app-&lt;node&gt;-err.txt  stdout and stderr of the application, all starts of the node
@@ -144,7 +144,7 @@ public class E2eEnvironment implements BeforeAllCallback {
             app.configure(workdir);
             RunResult build = Toolchain.mvn(workdir, "mvn-package", "package");
             build.assertStatus(0);
-            System.out.printf("✔ CarWash for %s built in %s ms: %s%n", runtime, build.runMilliseconds(), workdir);
+            System.out.printf("✔ Transit Sims for %s built in %s ms: %s%n", runtime, build.runMilliseconds(), workdir);
         }
         checkMigration("V1__create_doer_schema.sql", "CreateSchema.sql");
         checkMigration("V2__create_doer_indexes.sql", "CreateIndexes.sql");
@@ -175,6 +175,22 @@ public class E2eEnvironment implements BeforeAllCallback {
         RestAssured.baseURI = nodes.get(1).baseUrl();
     }
 
+    /**
+     * Stops Doer in the node: the application starts it with the monitor, and the tests control it through the
+     * validation endpoints.
+     */
+    private static void stopDoer(AppNode node) throws Exception {
+        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
+        HttpRequest request = HttpRequest.newBuilder(URI.create(node.baseUrl() + "/api/validation/stop"))
+                .timeout(Duration.ofSeconds(5))
+                .build();
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new AssertionError("Node " + node.node + " failed to stop Doer: " + response.statusCode() + " "
+                    + response.body());
+        }
+    }
+
     private static void startExternal() throws Exception {
         String baseUrl = property("doer.e2e.base-url", "http://localhost:8080");
         PGSimpleDataSource ds = new PGSimpleDataSource();
@@ -189,16 +205,21 @@ public class E2eEnvironment implements BeforeAllCallback {
 
     /**
      * Starts the node (a new one, or one stopped by {@link #stopNode}) and waits until it is ready. Its log files get
-     * a separator line, and the output of the new start is appended to them.
+     * a separator line, and the output of the new start is appended to them. After the first start of the node Doer
+     * is stopped, see {@link #stopDoer}; after a restart it runs as the application started it.
      */
     public static synchronized void startNode(int node) throws Exception {
         requireDocker("startNode");
+        boolean firstStart = !nodes.containsKey(node);
         AppNode appNode = nodes.computeIfAbsent(node,
                 n -> new AppNode(runtime, n, workdir, network.getId(), appEnv, dockerRun));
         long t0 = System.currentTimeMillis();
         appNode.start();
         waitReady(appNode.baseUrl(), appNode);
-        System.out.printf("✔ Node %s of CarWash started in %s ms at %s%n", node, System.currentTimeMillis() - t0,
+        if (firstStart) {
+            stopDoer(appNode);
+        }
+        System.out.printf("✔ Node %s of Transit Sims started in %s ms at %s%n", node, System.currentTimeMillis() - t0,
                 appNode.baseUrl());
     }
 
@@ -231,7 +252,7 @@ public class E2eEnvironment implements BeforeAllCallback {
 
     /**
      * Fails when the generated SQL differs from the committed migration: the committed one must be a copy of what the
-     * processor generates for CarWash.
+     * processor generates for Transit Sims.
      */
     private static void checkMigration(String migration, String generatedFile) throws IOException {
         Path generated = workdir.resolve("target/classes/com/doer/generated").resolve(generatedFile);
@@ -241,7 +262,7 @@ public class E2eEnvironment implements BeforeAllCallback {
         }
         if (!committed.equals(Files.readString(generated))) {
             throw new AssertionError("src/test/resources/e2e/db/migration/" + migration
-                    + " differs from the SQL generated for CarWash. Copy it:\n    cp " + generated
+                    + " differs from the SQL generated for Transit Sims. Copy it:\n    cp " + generated
                     + " src/test/resources/e2e/db/migration/" + migration);
         }
     }

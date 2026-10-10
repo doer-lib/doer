@@ -9,7 +9,14 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -98,6 +105,47 @@ public class DoerServiceTest {
         assertEquals(Arrays.asList(4, 2, 2, 2), service.tst_limits); // actually it is second reloadTasksFromDb call
     }
 
+    @Test
+    void monitor__should_run_task_queued_while_idle_after_its_delay() throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            service.setExecutor(executor);
+            HashMap<String, Duration> delays = new HashMap<>();
+            delays.put("Delayed", Duration.ofSeconds(1));
+            service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
+            service.start(true);
+            // Nothing to run: the monitor waits for its next planned check, up to a minute
+            waitUntilIdleMonitorWaits();
+
+            Task task = createNewTask("Delayed");
+            service.tst_tasks_by_id.put(task.getId(), task);
+            service.triggerTaskReloadFromDb(task.getId());
+
+            Instant ran = service.tst_runs.poll(10, TimeUnit.SECONDS);
+            assertNotNull(ran, "the task did not run 10 s after it was queued; its delay is 1 s");
+            assertFalse(ran.isBefore(task.getModified().plusSeconds(1)), "the task ran before its delay");
+        } finally {
+            service.stop();
+            executor.shutdown();
+            executor.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    /** Waits until the thread of the idle monitor waits for its next check. */
+    private static void waitUntilIdleMonitorWaits() throws InterruptedException {
+        Instant deadline = Instant.now().plusSeconds(5);
+        while (Instant.now().isBefore(deadline)) {
+            boolean waiting = Thread.getAllStackTraces().keySet().stream()
+                    .anyMatch(t -> t.getName().equals("doer-idle-monitor")
+                            && t.getState() == Thread.State.TIMED_WAITING);
+            if (waiting) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        fail("the idle monitor does not wait");
+    }
+
     /** Task as inserted to db: queues order tasks by created and modified. */
     private Task createNewTask(String status) {
         Task task = new Task();
@@ -113,6 +161,10 @@ public class DoerServiceTest {
 
         List<Integer> tst_limits;
         ArrayList<Task> tst_task_from_db = new ArrayList<>();
+        /** Tasks "in db" for {@link #loadTask}. */
+        Map<Long, Task> tst_tasks_by_id = new ConcurrentHashMap<>();
+        /** When {@link #runTask} was called, one entry per call. */
+        BlockingQueue<Instant> tst_runs = new LinkedBlockingQueue<>();
 
         @Override
         public void runInTransaction(Callable<Object> code) {
@@ -136,6 +188,7 @@ public class DoerServiceTest {
 
         @Override
         public void runTask(Task task) throws Exception {
+            tst_runs.add(Instant.now());
             String status = task.getStatus();
             if ("A".equals(status)) {
                 task.setStatus("B");
@@ -144,6 +197,11 @@ public class DoerServiceTest {
             } else {
                 task.setStatus(null);
             }
+        }
+
+        @Override
+        public Task loadTask(long id) {
+            return tst_tasks_by_id.get(id);
         }
 
         @Override

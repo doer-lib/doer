@@ -13,30 +13,30 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestInstance.Lifecycle;
 import org.junit.jupiter.api.io.TempDir;
 
-/** {@link GeneratedCodeTest} on CarWash built with Maven, run in its own JVM. */
+/** {@link GeneratedCodeTest} on Transit Sims built with Maven, run in its own JVM. */
 @TestInstance(Lifecycle.PER_CLASS)
 public class MavenGeneratedCodeITCase implements GeneratedCodeTest, InWorkspace {
 
     // Static: JUnit sets static fields before @BeforeAll, instance fields only before each test
     @TempDir(factory = Workspaces.class, cleanup = NEVER)
     static Path workspace;
-    CarWashProcess carWash;
+    TransitSimsProcess transitSims;
 
     @BeforeAll
     void build() throws Exception {
-        copySources("e2e/carwash", "src/main/java/carwash");
+        copySources("e2e/transitsims", "src/main/java/transitsims");
         writeSource("src/main/java/demo/test/TestDoerService.java", TEST_DOER_SERVICE);
-        writeSource("src/main/java/carwash/Main.java", CarWashProcess.MAIN);
+        writeSource("src/main/java/transitsims/Main.java", TransitSimsProcess.MAIN);
         writeSource("pom.xml", POM.formatted(Toolchain.doerLibVersion, Toolchain.jakartaVersion,
                 Toolchain.parssonVersion));
         mvn("mvn-package", "package").assertStatus(0);
-        carWash = CarWashProcess.start(workspace, Toolchain.runClasspath("target/classes"));
+        transitSims = TransitSimsProcess.start(workspace, Toolchain.runClasspath("target/classes"));
     }
 
     @AfterAll
     void stop() throws Exception {
-        if (carWash != null) {
-            carWash.close();
+        if (transitSims != null) {
+            transitSims.close();
         }
     }
 
@@ -47,18 +47,18 @@ public class MavenGeneratedCodeITCase implements GeneratedCodeTest, InWorkspace 
 
     @Override
     public String callTaskRunner(String request) throws Exception {
-        return carWash.runTask(request);
+        return transitSims.runTask(request);
     }
 
-    /** Project of CarWash; parameters: doer (library and processor), Jakarta EE API and Parsson versions. */
+    /** Project of Transit Sims; parameters: doer (library and processor), Jakarta EE API and Parsson versions. */
     static final String POM = """
             <?xml version="1.0" encoding="UTF-8"?>
             <project xmlns="http://maven.apache.org/POM/4.0.0"
                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                      xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
               <modelVersion>4.0.0</modelVersion>
-              <groupId>carwash</groupId>
-              <artifactId>carwash</artifactId>
+              <groupId>transitsims</groupId>
+              <artifactId>transitsims</artifactId>
               <version>1.0-SNAPSHOT</version>
 
               <properties>
