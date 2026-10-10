@@ -9,11 +9,11 @@ Each kind of test has its own system under test (SUT). The package of a test cla
 | 1 | Unit | Doer classes in the test JVM, without the annotation processor | `DoerServiceTest` | `com.doer` |
 | 2 | SQL | Doer's SQL on Postgres. The Java code runs in the test JVM. The SQL comes from the annotation processor. | `DoerServiceJdbcITCase` | `com.doer` |
 | 3 | Annotation processing | javac + `DoerProcessor`. The test data is Java code. The results are javac messages, the files in `com/doer/generated`, or the output of the compiled code run with `java`. | `GeneratorITCase`, `GeneratorErrorsITCase` | `com.doer.processor` |
-| 4 | Generated code, build tools | CarWash built with the processor by a build tool, running in its own JVM. Nobody serves the Jakarta EE annotations: `Main` wires the beans by hand. | `JavacGeneratedCodeITCase`, `MavenGeneratedCodeITCase` | `com.doer.generatedcode` |
-| 5 | Generated code, runtimes | The same checks as 4, on CarWash deployed in a runtime (Quarkus, …) | `GeneratedCodeE2E` | `com.doer.generatedcode` |
+| 4 | Generated code, build tools | Transit Sims built with the processor by a build tool, running in its own JVM. Nobody serves the Jakarta EE annotations: `Main` wires the beans by hand. | `JavacGeneratedCodeITCase`, `MavenGeneratedCodeITCase` | `com.doer.generatedcode` |
+| 5 | Generated code, runtimes | The same checks as 4, on Transit Sims deployed in a runtime (Quarkus, …) | `GeneratedCodeE2E` | `com.doer.generatedcode` |
 | 6 | Runtime functional | The generated code and the user's code in a runtime. This checks how the runtime serves the Jakarta EE annotations: CDI, transactions, REST, shutdown. | `TransactionsE2E`, `ConcurrencyE2E` | `com.doer.e2e` |
 
-Kind 3 checks one feature or edge case of the processor per test, each on its own small sources. Kinds 4 and 5 check what `runTask` of the generated service does, on CarWash, the test application in [`resources/e2e/carwash`](resources/e2e/carwash) (see [e2e-test-app.md](../../e2e-test-app.md)).
+Kind 3 checks one feature or edge case of the processor per test, each on its own small sources. Kinds 4 and 5 check what `runTask` of the generated service does, on Transit Sims, the test application in [`resources/e2e/transitsims`](resources/e2e/transitsims) (see [e2e-test-app.md](../../e2e-test-app.md)).
 
 ## Where the tests run
 
@@ -23,12 +23,12 @@ Kind 3 checks one feature or edge case of the processor per test, each on its ow
 | `*ITCase` | failsafe, `mvn verify`, one JVM per class | every JDK of the matrix. Each build tool of kind 4 is a class of its own. |
 | `*E2E` | failsafe in the `e2e` profile, `mvn verify -Ddoer.e2e.runtime=<runtime>`, one JVM for all classes | each runtime with its recommended JDK (see [e2e-design.md](../../e2e-design.md)) |
 
-Kinds 4 and 5 share the tests and differ only in the SUT. The checks are `@Test` default methods of the interface [`GeneratedCodeTest`](java/com/doer/generatedcode/GeneratedCodeTest.java). Each implementing class builds and starts CarWash its own way and implements `runTask(request)`.
+Kinds 4 and 5 share the tests and differ only in the SUT. The checks are `@Test` default methods of the interface [`GeneratedCodeTest`](java/com/doer/generatedcode/GeneratedCodeTest.java). Each implementing class builds and starts Transit Sims its own way and implements `runTask(request)`.
 
 ```
-GeneratedCodeTest                the checks: request → expected response of carwash.validation.TaskRunner
-├── JavacGeneratedCodeITCase     javac       → CarWashProcess: java carwash.Main, JSON Lines over stdin/stdout
-├── MavenGeneratedCodeITCase     mvn package → CarWashProcess
+GeneratedCodeTest                the checks: request → expected response of transitsims.validation.TaskRunner
+├── JavacGeneratedCodeITCase     javac       → TransitSimsProcess: java transitsims.Main, JSON Lines over stdin/stdout
+├── MavenGeneratedCodeITCase     mvn package → TransitSimsProcess
 └── GeneratedCodeE2E             E2eEnvironment: deployed in Docker → POST /api/validation/run-task
 ```
 

@@ -1,7 +1,5 @@
-package carwash.validation;
+package transitsims.validation;
 
-import carwash.Car;
-import carwash.Shampoo;
 import com.doer.AcceptStatus;
 import com.doer.DoerService;
 import com.doer.Task;
@@ -27,7 +25,7 @@ import javax.sql.DataSource;
 
 @Path("/validation")
 @Produces(MediaType.APPLICATION_JSON)
-public class DoerResource {
+public class ValidationResource {
     DoerService doerService;
     DataSource ds;
     TaskRunner taskRunner;
@@ -123,9 +121,10 @@ public class DoerResource {
         return "{\"status\":\"fixed\"}";
     }
 
+    /** Stops Doer, deletes all tasks and logs, and starts Doer again, with the monitor when {@code m} is true. */
     @Path("reset")
     @GET
-    public String resetDoer() throws Exception {
+    public String resetDoer(@QueryParam("m") @DefaultValue("false") boolean monitor) throws Exception {
         doerService.stop();
         String sql = "DELETE FROM task_logs; DELETE FROM tasks; DELETE FROM demo_log_tasks";
         int updatedLogs;
@@ -138,7 +137,7 @@ public class DoerResource {
             pst.getMoreResults();
             updatedDemoLog = pst.getUpdateCount();
         }
-        doerService.start(false);
+        doerService.start(monitor);
         return "{\"status\": \"Doer Reset\",\n\"cleared\": {\n\"tasks\": " + updatedTasks + ",\n\"logs\": " + updatedLogs + ",\n\"demo_logs\": " + updatedDemoLog + "}}";
     }
 

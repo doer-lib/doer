@@ -9,7 +9,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
- * {@link GeneratedCodeTest} on CarWash deployed in the runtime of {@link E2eEnvironment}: the generated service is a
+ * {@link GeneratedCodeTest} on Transit Sims deployed in the runtime of {@link E2eEnvironment}: the generated service is a
  * CDI bean with real injection and transactions. Each request goes to TaskRunner through
  * {@code POST /api/validation/run-task}.
  */

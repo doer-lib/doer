@@ -16,34 +16,34 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * CarWash built by a build tool and run in its own JVM, without a container and a database: the system under test of
- * the {@code *GeneratedCodeITCase} classes. They compile {@link #MAIN} together with CarWash and start it with
- * {@link #start}; then every request is a line to the stdin of {@code carwash.Main}, and every response a line from
+ * Transit Sims built by a build tool and run in its own JVM, without a container and a database: the system under test
+ * of the {@code *GeneratedCodeITCase} classes. They compile {@link #MAIN} together with Transit Sims and start it with
+ * {@link #start}; then every request is a line to the stdin of {@code transitsims.Main}, and every response a line from
  * its stdout. The command is kept in main-cmd.txt of the workspace, the stderr of Main in main-err.txt. See
  * e2e-test-app.md.
  */
-class CarWashProcess implements AutoCloseable {
+class TransitSimsProcess implements AutoCloseable {
     private final Path workDir;
     private final Process process;
     private final BufferedWriter in;
     private final BufferedReader out;
 
-    private CarWashProcess(Path workDir, Process process) {
+    private TransitSimsProcess(Path workDir, Process process) {
         this.workDir = workDir;
         this.process = process;
         this.in = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), UTF_8));
         this.out = new BufferedReader(new InputStreamReader(process.getInputStream(), UTF_8));
     }
 
-    /** Starts carwash.Main in the folder, with the classpath. */
-    static CarWashProcess start(Path workDir, String classpath) throws Exception {
-        List<String> cmd = List.of("java", "-cp", classpath, "carwash.Main");
+    /** Starts transitsims.Main in the folder, with the classpath. */
+    static TransitSimsProcess start(Path workDir, String classpath) throws Exception {
+        List<String> cmd = List.of("java", "-cp", classpath, "transitsims.Main");
         Files.writeString(workDir.resolve("main-cmd.txt"), String.join(" ", cmd) + "\n");
         Process process = new ProcessBuilder(cmd)
                 .directory(workDir.toFile())
                 .redirectError(workDir.resolve("main-err.txt").toFile())
                 .start();
-        return new CarWashProcess(workDir, process);
+        return new TransitSimsProcess(workDir, process);
     }
 
     /** Sends the JSON request to TaskRunner as one line and returns its response line. */
@@ -59,7 +59,7 @@ class CarWashProcess implements AutoCloseable {
             }
         }).get(Toolchain.TIMEOUT_SECONDS, TimeUnit.SECONDS);
         if (response == null) {
-            throw new IllegalStateException("carwash.Main has exited, see main-err.txt in " + workDir);
+            throw new IllegalStateException("transitsims.Main has exited, see main-err.txt in " + workDir);
         }
         return response;
     }
@@ -74,19 +74,23 @@ class CarWashProcess implements AutoCloseable {
     }
 
     /**
-     * Wires the CarWash components by hand, with TestDoerService instead of a database, and passes each line of stdin
+     * Wires the Transit Sims components by hand, with TestDoerService instead of a database, and passes each line of stdin
      * to TaskRunner; writes each response as a line to stdout. The task gets its id in {@code insert}: an anonymous
      * subclass of Task, because {@code Task.setId} is protected.
      */
     static final String MAIN = """
-            package carwash;
+            package transitsims;
 
-            import carwash.validation.CallTrace;
-            import carwash.validation.DoerResource;
-            import carwash.validation.GeneratedCodeFailures;
-            import carwash.validation.GeneratedCodeMethods;
-            import carwash.validation.GeneratedCodeTaskData;
-            import carwash.validation.TaskRunner;
+            import transitsims.validation.Cafeteria;
+            import transitsims.validation.CallTrace;
+            import transitsims.validation.ExceptionMapper;
+            import transitsims.validation.GeneratedCodeFailures;
+            import transitsims.validation.GeneratedCodeMethods;
+            import transitsims.validation.GeneratedCodeTaskData;
+            import transitsims.validation.PhoneBooth;
+            import transitsims.validation.TaskRunner;
+            import transitsims.validation.ValidationResource;
+            import transitsims.validation.Washer;
             import com.doer.Task;
             import demo.test.TestDoerService;
             import java.io.BufferedReader;
@@ -119,13 +123,13 @@ class CarWashProcess implements AutoCloseable {
                     generatedCodeFailures.setCallTrace(callTrace);
                     var generatedCodeTaskData = new GeneratedCodeTaskData();
                     generatedCodeTaskData.setCallTrace(callTrace);
-                    var doerResource = new DoerResource();
-                    doerResource.setDoerService(doer);
+                    var validationResource = new ValidationResource();
+                    validationResource.setDoerService(doer);
                     doer._inject_cafeteria(new Cafeteria());
-                    doer._inject_carWash(new CarWash());
+                    doer._inject_washer(new Washer());
                     doer._inject_exceptionMapper(new ExceptionMapper());
                     doer._inject_phoneBooth(new PhoneBooth());
-                    doer._inject_doerResource(doerResource);
+                    doer._inject_validationResource(validationResource);
                     doer._inject_generatedCodeFailures(generatedCodeFailures);
                     doer._inject_generatedCodeMethods(generatedCodeMethods);
                     doer._inject_generatedCodeTaskData(generatedCodeTaskData);

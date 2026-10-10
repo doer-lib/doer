@@ -23,7 +23,7 @@ public final class Sources {
         Files.writeString(file, content);
     }
 
-    /** Copies a folder of test resources (for example {@code e2e/carwash}) into the target folder. */
+    /** Copies a folder of test resources (for example {@code e2e/transitsims}) into the target folder. */
     public static void copyResources(String resourceFolder, Path target) throws IOException {
         URL url = Sources.class.getClassLoader().getResource(resourceFolder);
         if (url == null) {

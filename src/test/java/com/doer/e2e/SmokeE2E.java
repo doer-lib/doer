@@ -9,18 +9,18 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.MethodOrderer.OrderAnnotation;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-import org.junit.jupiter.api.extension.ExtendWith;
 
-/** CarWash starts in the runtime, migrates the database and restarts. */
-@ExtendWith(E2eEnvironment.class)
+/** Transit Sims starts in the runtime, migrates the database and restarts. */
 @TestMethodOrder(OrderAnnotation.class)
-public class SmokeE2E {
+public class SmokeE2E extends E2eTestBase {
 
     @Test
     @Order(1)
@@ -64,5 +64,14 @@ public class SmokeE2E {
         int secondStart = log.lastIndexOf(separators.get(2));
         assertFalse(log.subList(secondStart + 1, log.size()).isEmpty(), "log of the second start");
         assertFalse(log.subList(1, log.indexOf(separators.get(1))).isEmpty(), "log of the first start");
+
+        // The restarted node runs Doer as the application starts it, with the monitor: a delayed task is processed
+        // without /api/validation/check
+        long taskId = pushTask("Receipt print started");
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(10));
+        while (!"Receipt printed".equals(restGetTask(taskId).status()) && Instant.now().isBefore(deadline)) {
+            Thread.sleep(200);
+        }
+        assertEquals("Receipt printed", restGetTask(taskId).status(), "delayed task after the restart");
     }
 }
