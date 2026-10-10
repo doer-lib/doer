@@ -3,8 +3,6 @@ package transitsims.validation;
 import com.doer.AcceptStatus;
 import com.doer.DoerService;
 import com.doer.Task;
-import com.doer.TaskDataLoader;
-import com.doer.TaskDataSaver;
 import jakarta.inject.Inject;
 import jakarta.json.Json;
 import jakarta.json.JsonObjectBuilder;
@@ -19,7 +17,6 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.SQLException;
 import java.time.Duration;
 import javax.sql.DataSource;
 
@@ -43,33 +40,6 @@ public class ValidationResource {
     @Inject
     public void setTaskRunner(TaskRunner taskRunner) {
         this.taskRunner = taskRunner;
-    }
-
-    @TaskDataLoader
-    public Car loadCar(Task task) throws Exception {
-        logTaskData("Car", task);
-        return null;
-    }
-
-    @TaskDataSaver
-    public void storeCar(Task task, Car car) throws Exception {
-        logTaskData("Car", task);
-    }
-
-    @TaskDataSaver
-    public void storeShampoo(Task task, Shampoo shampoo) throws Exception {
-        logTaskData("Shampoo", task);
-    }
-
-    /** Records the access to the task data with the id of the current transaction, to check it is Doer's. */
-    private void logTaskData(String objectType, Task task) throws SQLException {
-        String sql = "insert into demo_log_tasks (object_type, task_id, in_progress, tx_id) values (?, ?, ?, txid_current())";
-        try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setString(1, objectType);
-            pst.setLong(2, task.getId());
-            pst.setBoolean(3, task.isInProgress());
-            pst.executeUpdate();
-        }
     }
 
     /** The runtime the application runs in, from the environment variable {@code E2E_RUNTIME}. */
@@ -179,11 +149,11 @@ public class ValidationResource {
         });
     }
 
-    @Path("coordinated_car_update")
+    @Path("coordinated_data_update")
     @GET
-    public Task coordinatedCarUpdate(@QueryParam("id") long id, @QueryParam("s") String status) throws Exception {
-        return doerService.facilitateCoordinatedUpdate(id, Duration.ZERO, false, Car.class,
-                (task, car) -> task.setStatus(status));
+    public Task coordinatedDataUpdate(@QueryParam("id") long id, @QueryParam("s") String status) throws Exception {
+        return doerService.facilitateCoordinatedUpdate(id, Duration.ZERO, false, TransactionData.class,
+                (task, data) -> task.setStatus(status));
     }
 
     /** There is no @TaskDataLoader for String. */
@@ -203,20 +173,14 @@ public class ValidationResource {
         return doerService.facilitateCoordinatedUpdate(id, Duration.ZERO, false, task -> task.setStatus(status));
     }
 
-    @AcceptStatus("A")
-    public void consumeTaskA(Task task) {
-        task.setStatus("B");
+    /** Doer methods of a JAX-RS resource; the second one ends the task. */
+    @AcceptStatus("Validation resource first")
+    public void first(Task task) {
+        task.setStatus("Validation resource second");
     }
 
-    @AcceptStatus("B")
-    public void consumeTaskB(Task task) {
+    @AcceptStatus("Validation resource second")
+    public void second(Task task) {
         task.setStatus(null);
-    }
-
-    @AcceptStatus("Need wash hands")
-    public void washHands(Task task) throws SQLException {
-        // update task in doer method, to check it is run in separated transaction
-        doerService.updateAndBumpVersion(task);
-        task.setStatus("Washed");
     }
 }

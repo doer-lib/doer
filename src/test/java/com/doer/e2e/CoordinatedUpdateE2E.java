@@ -168,15 +168,15 @@ class CoordinatedUpdateE2E extends E2eTestBase {
         long taskId = pushTask("Parked");
 
         given().queryParam("id", taskId).queryParam("s", "Unparked")
-                .get("/api/validation/coordinated_car_update")
+                .get("/api/validation/coordinated_data_update")
                 .then()
                 .statusCode(200)
                 .body("status", equalTo("Unparked"));
 
-        // Car loaded, task updated (trigger), Car unloaded
+        // Data loaded, task updated (trigger), data saved
         List<DemoLogRow> logs = loadDemoLogs(taskId);
         List<String> types = logs.stream().map(DemoLogRow::type).toList();
-        assertEquals(List.of("Car", "task", "Car"), types);
+        assertEquals(List.of("TransactionData", "task", "TransactionData"), types);
         assertEquals(logs.get(0).txId(), logs.get(1).txId());
         assertEquals(logs.get(1).txId(), logs.get(2).txId());
     }
