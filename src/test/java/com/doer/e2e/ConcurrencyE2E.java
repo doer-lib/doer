@@ -15,13 +15,13 @@ class ConcurrencyE2E extends E2eTestBase {
     @Test
     void concurrency_1_should_run_only_1_method_at_a_time() {
         resetServer();
-        long task1 = pushTask("Need call taxi");
-        pushTask("Need order pizza");
-        pushTask("Time to cleanup");
-        pushTask("Need call taxi");
-        pushTask("Need order pizza");
-        long task2 = pushTask("Time to cleanup");
-        assertEquals("Cleanup finished", waitTaskStatus(task2, "Cleanup finished"));
+        long task1 = pushTask("Concurrency limit 1 first");
+        pushTask("Concurrency limit 1 second");
+        pushTask("Concurrency limit 1 other");
+        pushTask("Concurrency limit 1 first");
+        pushTask("Concurrency limit 1 second");
+        long task2 = pushTask("Concurrency limit 1 other");
+        assertEquals("Concurrency limit 1 other done", waitTaskStatus(task2, "Concurrency limit 1 other done"));
 
         RestTask firstTask = restGetTask(task1);
         RestTask lastTask = restGetTask(task2);
@@ -32,22 +32,29 @@ class ConcurrencyE2E extends E2eTestBase {
     @Test
     void concurrency_10_should_run_10_methods_in_parallel() {
         resetServer();
-        pushTask("Customer wants to make an order");
-        pushTask("Customer wants to make an order");
-        pushTask("Customer wants to make an order");
-        pushTask("Customer wants to make an order");
-        pushTask("Customer wants to make an order");
-        pushTask("Customer wants to make an order");
-        pushTask("Customer wants to make an order");
-        pushTask("Customer wants to make an order");
-        pushTask("Customer wants to make an order");
-        long lastTaskId = pushTask("Customer wants to make an order");
-        assertEquals("Order accepted", waitTaskStatus(lastTaskId, "Order accepted"));
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        long lastTaskId = pushTask("Concurrency queues slow");
+        assertEquals("Concurrency queues slow done", waitTaskStatus(lastTaskId, "Concurrency queues slow done"));
         Long timeSpentMs = selectLongValue(
                 "SELECT (extract(EPOCH FROM max(modified) - min(created)) * 1000)::INT FROM tasks");
         Long timeSleptMs = selectLongValue("SELECT sum(duration_ms) FROM task_logs");
         assertTrue(timeSpentMs < 800);
         assertTrue(timeSleptMs >= 1000);
+    }
+
+    @Test
+    void task_should_be_instantly_processed_by_different_methods() {
+        resetServer();
+        long taskId = pushTask("Concurrency chain class");
+        assertEquals("Concurrency chain done", waitTaskStatus(taskId, "Concurrency chain done"));
     }
 
     @Test
@@ -58,19 +65,19 @@ class ConcurrencyE2E extends E2eTestBase {
         LinkedList<Long> idList2 = new LinkedList<>(); // Asap tasks
         LinkedList<Long> idList3 = new LinkedList<>(); // Failing but not ready for retry
         for (int i = 0; i < 150; i++) {
-            idList1.add(pushTask("Should send email"));
+            idList1.add(pushTask("Concurrency queues failing"));
         }
         sqlUpdate("UPDATE tasks SET modified = now() - '6 min'::INTERVAL, " +
                 "failing_since = now() - '10 min'::INTERVAL, " +
                 "created = now() - '12 min'::INTERVAL");
         for (int i = 0; i < 300; i++) {
-            idList2.add(pushTask("Customer wants to make an order"));
+            idList2.add(pushTask("Concurrency queues slow"));
         }
         sqlUpdate("UPDATE tasks SET modified = now() - '6 min'::INTERVAL, " +
                 "created = now() - '11 min'::INTERVAL " +
                 "WHERE id >= " + idList2.peekFirst());
         for (int i = 0; i < 150; i++) {
-            idList3.add(pushTask("Should send email"));
+            idList3.add(pushTask("Concurrency queues failing"));
         }
         sqlUpdate("UPDATE tasks SET modified = now() - '1 min'::INTERVAL, " +
                 "failing_since = now() - '10 min'::INTERVAL, " +
@@ -79,7 +86,7 @@ class ConcurrencyE2E extends E2eTestBase {
         long linesToSkip = E2eEnvironment.appLog(1).lines().count();
         resumeServer(false);
         for (Long id : idList2) {
-            waitTaskStatus(id, "Order accepted");
+            waitTaskStatus(id, "Concurrency queues slow done");
         }
         Thread.sleep(250);
         checkReadyTasks();

@@ -14,39 +14,32 @@ class DoerMethodsE2E extends E2eTestBase {
     @Test
     void jaxrs_resource_can_have_doer_method() {
         resetServer();
-        long id = pushTask("A");
+        long id = pushTask("Validation resource first");
         assertNull(waitTaskStatus(id, null));
     }
 
     @Test
     void task_should_be_instantly_processed_by_different_classes() {
         resetServer();
-        long taskId = pushTask("Want a coffee");
-        assertEquals("Payed", waitTaskStatus(taskId, "Payed"));
-    }
-
-    @Test
-    void task_should_be_instantly_processed_by_different_methods() {
-        resetServer();
-        long taskId = pushTask("Need bubblegum");
-        assertEquals("Sayed goodbay", waitTaskStatus(taskId, "Sayed goodbay"));
+        long taskId = pushTask("Doer method hand over");
+        assertEquals("Doer method next class done", waitTaskStatus(taskId, "Doer method next class done"));
     }
 
     @Test
     void delayed_method_should_be_called_after_delay() throws Exception {
         resetServer();
-        long taskId = pushTask("Receipt print started");
+        long taskId = pushTask("Doer method delayed");
         Instant deadLine = Instant.now().plus(Duration.ofSeconds(5));
         while (Instant.now().isBefore(deadLine)) {
             checkReadyTasks();
             Thread.sleep(200);
             RestTask task = restGetTask(taskId);
-            if ("Receipt printed".equals(task.status())) {
+            if ("Doer method delayed done".equals(task.status())) {
                 break;
             }
         }
         RestTask task = restGetTask(taskId);
-        assertEquals("Receipt printed", task.status());
+        assertEquals("Doer method delayed done", task.status());
         Instant processed = Instant.ofEpochMilli(
                 selectLongValue("SELECT (extract(EPOCH FROM min(created)) * 1000)::BIGINT FROM task_logs"));
         long actualDelay = Duration.between(task.created(), processed).toMillis();

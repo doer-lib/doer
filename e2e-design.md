@@ -402,8 +402,16 @@ Sub-steps 3.1 and 3.2 are detailed. Each later sub-step is detailed when it is n
 
 **3.3 Specialized classes for today's cases**
 
-- [ ] The CarWash beans and the demo doer methods of `ValidationResource` are replaced by specialized classes (`Concurrency*`, `Transaction*`, `Error*`, `DoerMethod*`), with statuses named after them. The `*E2E` classes switch to them without changing what they check.
-- [ ] **Check:** all `*E2E` classes pass three runs in a row. Every filled-in row of the *Code* column in e2e-test-app.md points to a class of Transit Sims.
+The CarWash beans (`Washer`, `Cafeteria`, `PhoneBooth`, `ExceptionMapper`, `Car`, `Shampoo`) and the demo doer methods, loaders and savers of `ValidationResource` are replaced by specialized classes in `transitsims.validation`, with statuses named after them. The `*E2E` classes switch to them without changing what they check. What no test uses goes (`Car is dusty`, `checkIn`).
+
+- [x] `DoerMethodStatuses`: a method that hands the task over to `DoerMethodNextClass` (today `Want a coffee` → `Payed`), and a method with `delay = "2s"` (today `Receipt print started`). `ValidationResource` keeps `A` → `B` → `null` as `Validation resource first` → `Validation resource second` → `null`.
+- [x] `ConcurrencyLimitOne`: `@ConcurrencyLimit(1)` on the class, two methods of 100 ms, one of them with two `@AcceptStatus` (today `PhoneBooth`).
+- [x] `ConcurrencyQueues`: `@Dependent`, `@ConcurrencyLimit(10)` on the class. A method of 100 ms, a method that throws `Exception` without `@RetryPolicy`, and the chain class → method with `@ConcurrencyLimit(2)` → class (today `Cafeteria`). The slow and the failing method stay in one class: `queues__should_grow_and_shrink` checks the retry queue and the asap queue of one domain. The chain test moves from `DoerMethodsE2E` to `ConcurrencyE2E`.
+- [x] `TransactionMethods` with the task data `TransactionData`: its loader and saver write `demo_log_tasks` with `txid_current()`, in the same bean as the doer methods. A method with `TransactionData`, the same method failing, and a method that calls `updateAndBumpVersion` (today `Need wash hands`). `coordinated_car_update` → `coordinated_data_update` with `TransactionData`.
+- [x] `ErrorMethods`: a method that throws `Exception`, a method with `@RetryPolicy(interval = "2 sec", duration = "10 seconds", fallbackStatus)` that throws `RuntimeException`, and the describer of `RuntimeException`. `ErrorDescribers`: the describer of `Exception`.
+- [x] `TransitSimsProcess.MAIN` injects the new beans. V2 is copied from the generated `CreateIndexes.sql` (the delayed status is new).
+- [x] e2e-test-app.md: the *Code* column and the table of specialized classes name the new classes.
+- [x] **Check:** `mvn verify` passes. All `*E2E` classes pass three runs in a row. `git grep -wE "Washer|Cafeteria|PhoneBooth|Shampoo|Car" -- src` finds nothing. Every filled-in row of the *Code* column in e2e-test-app.md points to a class of Transit Sims.
 
 **3.4 The functional code of Transit Sims**
 

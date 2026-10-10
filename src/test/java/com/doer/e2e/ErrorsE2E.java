@@ -14,8 +14,8 @@ class ErrorsE2E extends E2eTestBase {
     @Test
     void exception_describer_should_add_details_to_extra_json() throws Exception {
         resetServer();
-        long taskId1 = pushTask("Should send email");
-        long taskId2 = pushTask("Should check email");
+        long taskId1 = pushTask("Error checked exception");
+        long taskId2 = pushTask("Error retry policy");
         Thread.sleep(100);
 
         // taskId1 - throws Exception - extra_json should not have "e2": "RuntimeException" value
@@ -32,7 +32,7 @@ class ErrorsE2E extends E2eTestBase {
     @Test
     void no_onException_method_should_be_retried_in_5_min() throws Exception {
         resetServer();
-        pushTask("Should send email");
+        pushTask("Error checked exception");
         Thread.sleep(200);
         assertEquals(1, selectLongValue("SELECT count(*) FROM task_logs"));
 
@@ -47,13 +47,13 @@ class ErrorsE2E extends E2eTestBase {
     @Test
     void retryPolicy_should_set_fallbackStatus_when_duration_elapsed() throws Exception {
         resetServer();
-        long taskId = pushTask("Should check email");
+        long taskId = pushTask("Error retry policy");
         Instant deadline = Instant.now().plus(Duration.ofSeconds(11));
         while (deadline.isAfter(Instant.now())) {
             Thread.sleep(200);
             checkReadyTasks();
         }
-        assertEquals("Email check failed", waitTaskStatus(taskId, "Email check failed"));
+        assertEquals("Error retry policy fallback", waitTaskStatus(taskId, "Error retry policy fallback"));
         assertEquals(6, selectLongValue("SELECT count(*) FROM task_logs"));
     }
 }

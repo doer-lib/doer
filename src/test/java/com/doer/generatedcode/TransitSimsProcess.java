@@ -81,16 +81,19 @@ class TransitSimsProcess implements AutoCloseable {
     static final String MAIN = """
             package transitsims;
 
-            import transitsims.validation.Cafeteria;
             import transitsims.validation.CallTrace;
-            import transitsims.validation.ExceptionMapper;
+            import transitsims.validation.ConcurrencyLimitOne;
+            import transitsims.validation.ConcurrencyQueues;
+            import transitsims.validation.DoerMethodNextClass;
+            import transitsims.validation.DoerMethodStatuses;
+            import transitsims.validation.ErrorDescribers;
+            import transitsims.validation.ErrorMethods;
             import transitsims.validation.GeneratedCodeFailures;
             import transitsims.validation.GeneratedCodeMethods;
             import transitsims.validation.GeneratedCodeTaskData;
-            import transitsims.validation.PhoneBooth;
             import transitsims.validation.TaskRunner;
+            import transitsims.validation.TransactionMethods;
             import transitsims.validation.ValidationResource;
-            import transitsims.validation.Washer;
             import com.doer.Task;
             import demo.test.TestDoerService;
             import java.io.BufferedReader;
@@ -125,10 +128,13 @@ class TransitSimsProcess implements AutoCloseable {
                     generatedCodeTaskData.setCallTrace(callTrace);
                     var validationResource = new ValidationResource();
                     validationResource.setDoerService(doer);
-                    doer._inject_cafeteria(new Cafeteria());
-                    doer._inject_washer(new Washer());
-                    doer._inject_exceptionMapper(new ExceptionMapper());
-                    doer._inject_phoneBooth(new PhoneBooth());
+                    doer._inject_concurrencyLimitOne(new ConcurrencyLimitOne());
+                    doer._inject_concurrencyQueues(new ConcurrencyQueues());
+                    doer._inject_doerMethodNextClass(new DoerMethodNextClass());
+                    doer._inject_doerMethodStatuses(new DoerMethodStatuses());
+                    doer._inject_errorDescribers(new ErrorDescribers());
+                    doer._inject_errorMethods(new ErrorMethods());
+                    doer._inject_transactionMethods(new TransactionMethods());
                     doer._inject_validationResource(validationResource);
                     doer._inject_generatedCodeFailures(generatedCodeFailures);
                     doer._inject_generatedCodeMethods(generatedCodeMethods);
