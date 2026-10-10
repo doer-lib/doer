@@ -1,4 +1,4 @@
-package com.doer;
+package com.doer.processor;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.allOf;
@@ -7,13 +7,26 @@ import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.io.CleanupMode.NEVER;
 
+import com.doer.testkit.InWorkspace;
+import com.doer.testkit.Workspaces;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /** Errors and warnings reported by DoerProcessor: the javac messages. */
-public class GeneratorErrorsITCase extends GeneratorTestBase {
+public class GeneratorErrorsITCase implements InWorkspace {
+
+    @TempDir(factory = Workspaces.class, cleanup = NEVER)
+    Path workspace;
+
+    @Override
+    public Path getWorkspace() {
+        return workspace;
+    }
 
     @Test
     void AcceptStatus__should_fail_on_invalid_delay() throws Exception {
@@ -323,7 +336,6 @@ public class GeneratorErrorsITCase extends GeneratorTestBase {
 
         var result = javac("Orders.java").assertStatus(0);
 
-        assertEquals(0, result.status(), result::toString);
         assertEquals("""
                 Orders.java:8: warning: @ConcurrencyLimit has no effect: no doer method runs in concurrency domain "demo.test.Orders.cancel".
                     public void cancel(Task task) {}

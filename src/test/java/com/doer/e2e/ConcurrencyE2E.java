@@ -4,10 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 /** {@code @ConcurrencyLimit} and the queues of DoerService. */
@@ -44,11 +43,11 @@ class ConcurrencyE2E extends E2eTestBase {
         pushTask("Customer wants to make an order");
         long lastTaskId = pushTask("Customer wants to make an order");
         assertEquals("Order accepted", waitTaskStatus(lastTaskId, "Order accepted"));
-        Long timeSpendMs = selectLongValue(
+        Long timeSpentMs = selectLongValue(
                 "SELECT (extract(EPOCH FROM max(modified) - min(created)) * 1000)::INT FROM tasks");
-        Long timeSleeped = selectLongValue("SELECT sum(duration_ms) FROM task_logs");
-        assertTrue(timeSpendMs < 800);
-        assertTrue(timeSleeped >= 1000);
+        Long timeSleptMs = selectLongValue("SELECT sum(duration_ms) FROM task_logs");
+        assertTrue(timeSpentMs < 800);
+        assertTrue(timeSleptMs >= 1000);
     }
 
     @Test
@@ -88,10 +87,10 @@ class ConcurrencyE2E extends E2eTestBase {
         checkReadyTasks();
         Thread.sleep(250);
         List<List<Integer>> limitsTable = E2eEnvironment.appLog(1).lines()
-            .skip(linesToSkip)
-            .filter(line -> line.contains(" Limits: "))
-            .map(this::parseLimitsLine)
-            .collect(Collectors.toList());
+                .skip(linesToSkip)
+                .filter(line -> line.contains(" Limits: "))
+                .map(ConcurrencyE2E::parseLimitsLine)
+                .toList();
 
         // All readyToRetry and asapTasks should be updated exactly 1 time
         // No one failed but not ready task should be updated
@@ -107,21 +106,22 @@ class ConcurrencyE2E extends E2eTestBase {
         // All 150 readyToRetry should be updated first, but few of ASAP tasks may also be updated
         // (When readyToRetry queue become empty and DoerService start loading bigger queue from DB
         // it continues processing other queues - in our case ASAP queue).
-        Long lastReadyToRetryLog = selectLongValue("SELECT max(id) FROM task_logs WHERE task_id <= " + idList1.peekLast());
-        Long aheadOfTime = selectLongValue(
-                "SELECT count(*) FROM task_logs WHERE id < " + lastReadyToRetryLog + " AND task_id >= " + idList2.peekFirst());
-        int max_ahead_of_time = 50;
+        Long lastReadyToRetryLog = selectLongValue(
+                "SELECT max(id) FROM task_logs WHERE task_id <= " + idList1.peekLast());
+        Long aheadOfTime = selectLongValue("SELECT count(*) FROM task_logs WHERE id < " + lastReadyToRetryLog
+                + " AND task_id >= " + idList2.peekFirst());
+        int maxAheadOfTime = 50;
         // DUMP logs just for debug purpose
-        if (aheadOfTime > max_ahead_of_time) {
-            String sql = "select json_agg(row_to_json(x)) from (select task_id, created, final_status, duration_ms from task_logs order by created) x;";
-            String logs = selectStringValue(sql);
-            System.out.println(logs);
+        if (aheadOfTime > maxAheadOfTime) {
+            System.out.println(selectStringValue("select json_agg(row_to_json(x)) from (select task_id, created, "
+                    + "final_status, duration_ms from task_logs order by created) x;"));
         }
         System.out.println("Limits");
         for (List<Integer> limits : limitsTable) {
             System.out.println(limits);
         }
-        assertTrue(aheadOfTime <= max_ahead_of_time, "Expected only few ASAP task updated ahead of time " + aheadOfTime + " <= " + max_ahead_of_time);
+        assertTrue(aheadOfTime <= maxAheadOfTime,
+                "Expected only few ASAP task updated ahead of time " + aheadOfTime + " <= " + maxAheadOfTime);
 
         List<Integer> firstRow = limitsTable.get(0);
         List<Integer> middleRow = limitsTable.get(limitsTable.size() / 2);
@@ -130,24 +130,28 @@ class ConcurrencyE2E extends E2eTestBase {
             assertEquals(10, firstRow.get(i), "Test should start with minimal limits for all queues");
         }
         int retryQueueIndex = maxValueIndex(middleRow);
-        int asapQueuIndex = maxValueIndex(lastRow);
+        int asapQueueIndex = maxValueIndex(lastRow);
         for (List<Integer> row : limitsTable) {
             for (int i = 0; i < row.size(); i++) {
                 int value = row.get(i);
                 assertTrue(value >= 10, "Minimal limit value should be 10. But found " + value);
-                if (i != retryQueueIndex && i != asapQueuIndex) {
-                    assertEquals(10, value, "Queues, not affected by the test, shold have limit = 10. But found " + value);
+                if (i != retryQueueIndex && i != asapQueueIndex) {
+                    assertEquals(10, value,
+                            "Queues, not affected by the test, should have limit = 10. But found " + value);
                 }
             }
         }
-        assertTrue(firstRow.get(retryQueueIndex) < middleRow.get(retryQueueIndex), "RedyToRetry queue limits should groow til middleRow");
+        assertTrue(firstRow.get(retryQueueIndex) < middleRow.get(retryQueueIndex),
+                "ReadyToRetry queue limits should grow till middleRow");
         assertTrue(middleRow.get(retryQueueIndex) > lastRow.get(retryQueueIndex),
-                "RedyToRetry queue limits should shrink from middleRow til lastRow");
-        assertEquals(firstRow.get(asapQueuIndex), middleRow.get(asapQueuIndex), "Asap queue shold remain minimal til middleRow");
-        assertTrue(middleRow.get(asapQueuIndex) < lastRow.get(asapQueuIndex), "Asap queue should grow from middleRow til lastRow");
+                "ReadyToRetry queue limits should shrink from middleRow till lastRow");
+        assertEquals(firstRow.get(asapQueueIndex), middleRow.get(asapQueueIndex),
+                "Asap queue should remain minimal till middleRow");
+        assertTrue(middleRow.get(asapQueueIndex) < lastRow.get(asapQueueIndex),
+                "Asap queue should grow from middleRow till lastRow");
     }
 
-    private int maxValueIndex(List<Integer> row) {
+    private static int maxValueIndex(List<Integer> row) {
         int maxValue = row.get(0);
         int indexOfMaxValue = 0;
         for (int i = 1; i < row.size(); i++) {
@@ -160,12 +164,9 @@ class ConcurrencyE2E extends E2eTestBase {
         return indexOfMaxValue;
     }
 
-    List<Integer> parseLimitsLine(String line) {
-        String[] arr = line.split("Limits: \\[")[1].split("]")[0].split(",\\s*");
-        ArrayList<Integer> result = new ArrayList<>();
-        for (String s : arr) {
-            result.add(Integer.valueOf(s));
-        }
-        return result;
+    /** The limits of the queues in a log line {@code ... Limits: [10, 12, 10]}. */
+    private static List<Integer> parseLimitsLine(String line) {
+        String limits = line.split("Limits: \\[")[1].split("]")[0];
+        return Arrays.stream(limits.split(",\\s*")).map(Integer::valueOf).toList();
     }
 }

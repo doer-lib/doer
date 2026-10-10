@@ -2,8 +2,8 @@ package carwash;
 
 import com.doer.AcceptStatus;
 import com.doer.ConcurrencyLimit;
-import com.doer.TaskDataLoader;
 import com.doer.Task;
+import com.doer.TaskDataLoader;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.lang.System.Logger;

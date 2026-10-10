@@ -27,7 +27,7 @@ public class SmokeE2E {
     void application_should_answer_with_runtime() {
         var response = given().get("/api/validation/info").then().statusCode(200);
         // An external application, run from the IDE, may have no E2E_RUNTIME
-        if (!E2eEnvironment.EXTERNAL.equals(E2eEnvironment.runtime)) {
+        if (!E2eEnvironment.isExternal()) {
             response.body("runtime", equalTo(E2eEnvironment.runtime));
         }
     }
@@ -50,7 +50,7 @@ public class SmokeE2E {
     @Test
     @Order(3)
     void node_should_restart() throws Exception {
-        assumeFalse(E2eEnvironment.EXTERNAL.equals(E2eEnvironment.runtime), "no restarts of an external application");
+        assumeFalse(E2eEnvironment.isExternal(), "no restarts of an external application");
 
         assertEquals(143, E2eEnvironment.stopNode(1), "exit code after SIGTERM");
         E2eEnvironment.startNode(1);

@@ -64,10 +64,6 @@ class AppNode {
         return "http://127.0.0.1:" + port;
     }
 
-    boolean isRunning() {
-        return process != null && process.isAlive();
-    }
-
     /** Starts {@code docker run}; does not wait until the application is ready. */
     void start() throws IOException {
         if (process != null) {

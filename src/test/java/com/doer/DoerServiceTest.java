@@ -10,7 +10,6 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.Callable;
-
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -30,9 +29,8 @@ public class DoerServiceTest {
     }
 
     void runAllExecutorJobs() {
-        while(!executorJobs.isEmpty()) {
-            Runnable runnable = executorJobs.pollFirst();
-            runnable.run();
+        while (!executorJobs.isEmpty()) {
+            executorJobs.pollFirst().run();
         }
     }
 
@@ -54,7 +52,7 @@ public class DoerServiceTest {
     void start__should_reloadTasksFromDb_and_start_processing_loaded_tasks() throws Exception {
         service.setMinSingleQueueSize(5);
         {
-            // 3 queues (asap, delayed 2 min, retryed 5 min)
+            // 3 queues (asap, delayed 2 min, retry 5 min)
             HashMap<String, Duration> delays = new HashMap<>();
             delays.put("A", Duration.ZERO);
             delays.put("B", Duration.ZERO);
@@ -62,7 +60,7 @@ public class DoerServiceTest {
             service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
         }
         {
-            // 4 quees (asap, delayed 20 sec, retry 20 sec, retry 5 min)
+            // 4 queues (asap, delayed 20 sec, retry 20 sec, retry 5 min)
             HashMap<String, Duration> delays = new HashMap<>();
             delays.put("C", Duration.ZERO);
             delays.put("D_Delayed", Duration.ofSeconds(20));
