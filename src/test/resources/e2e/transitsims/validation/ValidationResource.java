@@ -96,7 +96,8 @@ public class ValidationResource {
     @GET
     public String resetDoer(@QueryParam("m") @DefaultValue("false") boolean monitor) throws Exception {
         doerService.stop();
-        String sql = "DELETE FROM task_logs; DELETE FROM tasks; DELETE FROM demo_log_tasks";
+        String sql = "DELETE FROM task_logs; DELETE FROM tasks; DELETE FROM demo_log_tasks; DELETE FROM buses; "
+                + "DELETE FROM sims";
         int updatedLogs;
         int updatedTasks;
         int updatedDemoLog;
