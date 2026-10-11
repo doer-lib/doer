@@ -37,14 +37,12 @@ public class SimRepository {
         this.busRepository = busRepository;
     }
 
-    /**
-     * Inserts the simulation, its buses and their tasks in one transaction. Doer sees the tasks of the buses only
-     * after the commit, so the caller asks Doer to load them.
-     */
+    /** Inserts the simulation, its buses and their tasks in one transaction; the tasks have no status yet. */
     @Transactional(rollbackOn = Exception.class)
     public List<Bus> create(Simulation simulation) throws SQLException {
         simulation.id = UUID.randomUUID();
-        simulation.taskId = insertTask(SimStatus.READY);
+        simulation.status = Simulation.Status.READY;
+        simulation.taskId = insertTask();
         String sql = "INSERT INTO sims (id, task_id, json_data) VALUES (?, ?, ?::json)";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setObject(1, simulation.id);
@@ -55,15 +53,14 @@ public class SimRepository {
         List<Bus> buses = simulation.newBuses();
         for (Bus bus : buses) {
             bus.id = UUID.randomUUID();
-            bus.taskId = insertTask(bus.atTerminal() ? BusStatus.AT_TERMINAL : BusStatus.AT_STOP);
+            bus.taskId = insertTask();
             busRepository.insert(bus);
         }
         return buses;
     }
 
-    private long insertTask(String status) throws SQLException {
+    private long insertTask() throws SQLException {
         Task task = new Task();
-        task.setStatus(status);
         doerService.insert(task);
         return task.getId();
     }
@@ -79,6 +76,10 @@ public class SimRepository {
 
     @TaskDataSaver
     public void save(Task task, Simulation simulation) throws SQLException {
+        update(simulation);
+    }
+
+    public void update(Simulation simulation) throws SQLException {
         String sql = "UPDATE sims SET json_data = ?::json, modified = now() WHERE id = ?";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setString(1, JsonData.JSONB.toJson(simulation));

@@ -51,13 +51,26 @@ public class BusRepository {
                 simulationId.toString());
     }
 
-    /** The buses of the simulation whose task is not parked. */
-    public long countNotParked(UUID simulationId) throws SQLException {
-        String sql = "SELECT count(*) FROM buses b JOIN tasks t ON t.id = b.task_id "
-                + "WHERE b.json_data ->> 'simulationId' = ? AND t.status IS DISTINCT FROM ?";
+    /** The ids of the tasks of the buses of the simulation. */
+    public List<Long> taskIds(UUID simulationId) throws SQLException {
+        String sql = "SELECT task_id FROM buses WHERE json_data ->> 'simulationId' = ? ORDER BY task_id";
+        List<Long> taskIds = new ArrayList<>();
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setString(1, simulationId.toString());
-            pst.setString(2, BusStatus.PARKED);
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    taskIds.add(rs.getLong(1));
+                }
+            }
+        }
+        return taskIds;
+    }
+
+    public long countNotParked(UUID simulationId) throws SQLException {
+        String sql = "SELECT count(*) FROM buses "
+                + "WHERE json_data ->> 'simulationId' = ? AND json_data ->> 'state' IS DISTINCT FROM 'PARKED'";
+        try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            pst.setString(1, simulationId.toString());
             try (ResultSet rs = pst.executeQuery()) {
                 rs.next();
                 return rs.getLong(1);

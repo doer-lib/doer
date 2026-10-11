@@ -1,11 +1,14 @@
 package transitsims;
 
-/** Statuses of the task of a bus. */
+/**
+ * Statuses of the task of a bus: whether Doer runs it. Where the bus is, is in {@link Bus#state}. A bus before the
+ * start, paused or parked has no status.
+ */
 public final class BusStatus {
-    public static final String AT_STOP = "Bus at stop";
-    public static final String AT_TERMINAL = "Bus at terminal";
-    public static final String DRIVING = "Bus driving";
-    public static final String PARKED = "Bus parked";
+    /** Set to all buses when the simulation starts or resumes. */
+    public static final String RESUME = "Bus resume";
+    /** The bus is simulated step by step. */
+    public static final String ON_ROUTE = "Bus on route";
 
     private BusStatus() {
     }

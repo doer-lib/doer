@@ -55,7 +55,7 @@ public class BusResource {
     public BusView board(@PathParam("sim") UUID simId, @PathParam("bus") UUID busId, Boarding boarding)
             throws Exception {
         return update(simId, busId, (task, bus) -> {
-            requireStandingAt(task, bus, boarding.stop());
+            requireStandingAt(bus, boarding.stop());
             if (bus.passengers.size() >= bus.capacity) {
                 throw conflict("The bus is full");
             }
@@ -69,7 +69,7 @@ public class BusResource {
     public BusView alight(@PathParam("sim") UUID simId, @PathParam("bus") UUID busId, Boarding boarding)
             throws Exception {
         return update(simId, busId, (task, bus) -> {
-            requireStandingAt(task, bus, boarding.stop());
+            requireStandingAt(bus, boarding.stop());
             if (!bus.passengers.remove(boarding.passenger())) {
                 throw conflict("Passenger " + boarding.passenger() + " is not on the bus");
             }
@@ -85,9 +85,8 @@ public class BusResource {
         return view(busRepository.find(busId), task);
     }
 
-    private static void requireStandingAt(Task task, Bus bus, String stop) {
-        boolean standing = BusStatus.AT_STOP.equals(task.getStatus()) || BusStatus.AT_TERMINAL.equals(task.getStatus());
-        if (!standing || !bus.stopId().equals(stop)) {
+    private static void requireStandingAt(Bus bus, String stop) {
+        if (bus.state != Bus.State.STANDING || !bus.stopId().equals(stop)) {
             throw conflict("The bus does not stand at stop " + stop);
         }
     }
