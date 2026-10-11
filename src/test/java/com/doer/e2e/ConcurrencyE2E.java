@@ -26,7 +26,8 @@ class ConcurrencyE2E extends E2eTestBase {
         RestTask firstTask = restGetTask(task1);
         RestTask lastTask = restGetTask(task2);
         Duration timeToFinish6TasksBy100msEach = Duration.between(firstTask.created(), lastTask.modified());
-        assertTrue(timeToFinish6TasksBy100msEach.compareTo(Duration.ofMillis(600)) >= 0);
+        assertTrue(timeToFinish6TasksBy100msEach.compareTo(Duration.ofMillis(600)) >= 0,
+                () -> timeToFinish6TasksBy100msEach + ", task logs (task, created, duration): " + taskLogs());
     }
 
     @Test
@@ -66,8 +67,9 @@ class ConcurrencyE2E extends E2eTestBase {
         Long timeSpentMs = selectLongValue(
                 "SELECT (extract(EPOCH FROM max(modified) - min(created)) * 1000)::INT FROM tasks");
         Long timeSleptMs = selectLongValue("SELECT sum(duration_ms) FROM task_logs");
-        assertTrue(timeSpentMs < 800);
-        assertTrue(timeSleptMs >= 1000);
+        assertTrue(timeSpentMs < 800, () -> "spent " + timeSpentMs + " ms, task logs (task, created, duration): "
+                + taskLogs());
+        assertTrue(timeSleptMs >= 1000, () -> "slept " + timeSleptMs + " ms");
     }
 
     @Test
@@ -195,5 +197,11 @@ class ConcurrencyE2E extends E2eTestBase {
     private static List<Integer> parseLimitsLine(String line) {
         String limits = line.split("Limits: \\[")[1].split("]")[0];
         return Arrays.stream(limits.split(",\\s*")).map(Integer::valueOf).toList();
+    }
+
+    /** The task logs in their order, for the message of a failed check of timing. */
+    private static String taskLogs() {
+        return selectStringValue("SELECT string_agg(task_id || ' ' || to_char(created, 'HH24:MI:SS.MS') || ' '"
+                + " || coalesce(duration_ms::text, '-'), ', ' ORDER BY id) FROM task_logs");
     }
 }
