@@ -13,9 +13,14 @@ class WildflyApp extends JakartaEeServerApp {
         return "transitsims-wildfly";
     }
 
-    @Override
+    /** JNDI name of the data source the server defines. */
     String dataSourceJndiName() {
         return "java:jboss/datasources/TransitSims";
+    }
+
+    @Override
+    String producers() {
+        return jndiProducers(dataSourceJndiName());
     }
 
     @Override

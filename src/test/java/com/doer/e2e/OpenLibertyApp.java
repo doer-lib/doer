@@ -16,9 +16,14 @@ class OpenLibertyApp extends JakartaEeServerApp {
         return "transitsims-open-liberty";
     }
 
-    @Override
+    /** JNDI name of the data source the server defines. */
     String dataSourceJndiName() {
         return "jdbc/transitsims";
+    }
+
+    @Override
+    String producers() {
+        return jndiProducers(dataSourceJndiName());
     }
 
     /** Copies the Postgres driver to {@code target/liberty/postgresql.jar}. */

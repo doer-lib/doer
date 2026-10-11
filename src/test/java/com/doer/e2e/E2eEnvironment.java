@@ -112,6 +112,7 @@ public class E2eEnvironment implements BeforeAllCallback {
             case "spring-boot" -> new SpringBootApp();
             case "wildfly" -> new WildflyApp();
             case "open-liberty" -> new OpenLibertyApp();
+            case "jetty" -> new JettyApp();
             default -> throw new IllegalArgumentException("Unknown doer.e2e.runtime: " + runtime);
         };
     }
