@@ -64,6 +64,11 @@ class QuarkusApp implements E2eApp {
                             <artifactId>quarkus-resteasy-jsonb</artifactId>
                         </dependency>
                         <dependency>
+                            <!-- The JAX-RS client API, for the calls of external services -->
+                            <groupId>io.quarkus</groupId>
+                            <artifactId>quarkus-resteasy-client</artifactId>
+                        </dependency>
+                        <dependency>
                             <groupId>io.quarkus</groupId>
                             <artifactId>quarkus-jdbc-postgresql</artifactId>
                         </dependency>

@@ -52,7 +52,7 @@ jobs:
           path: ~/.m2/repository
           key: maven-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-  # E2E suite (*E2E classes): CarWash in each runtime, in Docker, with one JDK; see e2e-design.md
+  # E2E suite (*E2E classes): Transit Sims in each runtime, in Docker, with one JDK; see e2e-design.md
   e2e:
     runs-on: ubuntu-latest
     strategy:
@@ -79,7 +79,7 @@ jobs:
       - name: Build with Maven
         run: mvn -B --color=always -DskipTests package
 
-      # One JDK for the e2e suite: it builds CarWash, and the application runs on a JRE 25 image
+      # One JDK for the e2e suite: it builds Transit Sims, and the application runs on a JRE 25 image
       - name: Set up JDK 25 (for e2e)
         uses: actions/setup-java@v6
         with:

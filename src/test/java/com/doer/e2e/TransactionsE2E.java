@@ -67,6 +67,25 @@ class TransactionsE2E extends E2eTestBase {
     }
 
     @Test
+    void doer_method_with_own_transactional_should_run_in_its_own_transaction() {
+        resetServer();
+        long taskId = pushTask("Transaction own");
+        assertEquals("Transaction own done", waitTaskStatus(taskId, "Transaction own done"));
+
+        List<DemoLogRow> logs = loadDemoLogs(taskId);
+        assertEquals(4, logs.size());
+        DemoLogRow taskStart = logs.get(0);
+        DemoLogRow firstInMethod = logs.get(1);
+        DemoLogRow secondInMethod = logs.get(2);
+        DemoLogRow taskStop = logs.get(3);
+        assertEquals("TransactionOwn", firstInMethod.type());
+        assertEquals("TransactionOwn", secondInMethod.type());
+        assertEquals(firstInMethod.txId(), secondInMethod.txId(), "both rows in the transaction of the method");
+        assertNotEquals(taskStart.txId(), firstInMethod.txId());
+        assertNotEquals(taskStop.txId(), firstInMethod.txId());
+    }
+
+    @Test
     void on_exception_data_should_not_be_saved() throws Exception {
         resetServer();
         long taskId = pushTask("Transaction data failing");

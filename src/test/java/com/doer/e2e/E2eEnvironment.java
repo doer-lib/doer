@@ -171,6 +171,7 @@ public class E2eEnvironment implements BeforeAllCallback {
         appEnv.put("E2E_DB_URL", "jdbc:postgresql://db:5432/doer");
         appEnv.put("E2E_DB_USER", "doer");
         appEnv.put("E2E_DB_PASSWORD", "doer");
+        appEnv.put("E2E_EXTERNAL_URL", "http://wiremock:8080");
         startNode(1);
         RestAssured.baseURI = nodes.get(1).baseUrl();
     }

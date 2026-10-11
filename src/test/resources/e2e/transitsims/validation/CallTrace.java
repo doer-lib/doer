@@ -8,8 +8,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * Calls of the GeneratedCode* doer methods, loaders and savers, by task: what {@link TaskRunner} reports back for the
- * task it ran.
+ * Calls of the GeneratedCode* and BeanKind* doer methods, loaders, savers and interceptors, by task: what
+ * {@link TaskRunner} reports back for the task it ran.
  */
 @ApplicationScoped
 public class CallTrace {

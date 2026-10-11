@@ -3,6 +3,7 @@ package transitsims.validation;
 import com.doer.AcceptStatus;
 import com.doer.DoerService;
 import com.doer.Task;
+import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.json.Json;
 import jakarta.json.JsonObjectBuilder;
@@ -20,6 +21,12 @@ import java.sql.PreparedStatement;
 import java.time.Duration;
 import javax.sql.DataSource;
 
+/**
+ * The validation endpoints ({@code /api/validation}): control Doer, read tasks, reset data, report the runtime. Also a
+ * JAX-RS resource with doer methods: {@code @ApplicationScoped}, because without a scope annotation it is per request in
+ * some runtimes, and Doer threads have no request context.
+ */
+@ApplicationScoped
 @Path("/validation")
 @Produces(MediaType.APPLICATION_JSON)
 public class ValidationResource {
