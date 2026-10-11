@@ -10,9 +10,19 @@ import java.util.TreeSet;
 import java.util.UUID;
 
 /** A bus as it is kept in buses.json_data: where it is on its route, and who is on board. */
-@JsonbPropertyOrder({ "simulationId", "routeId", "stopIndex", "direction", "arrivedAt", "departedAt", "path",
-        "capacity", "passengers" })
+@JsonbPropertyOrder({ "simulationId", "routeId", "state", "stopIndex", "direction", "arrivedAt", "departedAt",
+        "path", "capacity", "passengers" })
 public class Bus {
+
+    public enum State {
+        /** At the stop {@code stopIndex}. */
+        STANDING,
+        /** On the {@code path} from the stop {@code stopIndex} to the next one. */
+        DRIVING,
+        /** At a terminal for good. */
+        PARKED
+    }
+
     @JsonbTransient
     public UUID id;
     @JsonbTransient
@@ -26,6 +36,7 @@ public class Bus {
 
     public UUID simulationId;
     public String routeId;
+    public State state = State.STANDING;
     /** The last stop of the route the bus stood at. */
     public int stopIndex;
     /** +1 or -1, along the stops of the route. */

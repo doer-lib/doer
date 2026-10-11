@@ -76,14 +76,18 @@ public class Simulation {
     public int buses, capacity;
     public double speed;              // units of length per second
     public int stopDwell, terminalDwell;  // seconds
+    public Status status;                 // READY, RUNNING, PAUSED, COMPLETED
     public Instant startedAt, pausedAt;   // database time
     public long pausedMs;
     public int passengers, arrived;
 }
 
 public class Bus {
+    public enum State { STANDING, DRIVING, PARKED }
+
     public UUID simulationId;
     public String routeId;
+    public State state;                   // at the stop stopIndex, on the way to the next one, or parked for good
     public int stopIndex, direction;      // +1 or −1
     public long arrivedAt, departedAt;    // simulation time, ms
     public List<Simulation.Vertex> path;  // to the next stop, while driving
@@ -98,34 +102,41 @@ public class Bus {
 
 ### Tasks
 
-Each simulation and each bus is a Doer task. **The bus is simulated in steps**: its doer method runs again and again, every second (the delay of its status), and leaves the status as it is until something happens.
+Each simulation and each bus is a Doer task. A task has a status only while Doer has to run it: a new simulation and its buses, a paused bus, a parked bus and a completed simulation have the status `null`. The state of the simulation for its clients is `Simulation.status`: `READY`, `RUNNING`, `PAUSED`, `COMPLETED`.
 
-When the bus departs, it gets the `path` to the next stop: the road vertices from the last stop to the next one, and `departedAt`, the simulation time of the departure. From them, and from `speed`, a client draws the bus between steps, and a step finds out whether the bus has arrived. Both times are simulation time, so a paused bus stays where it is.
+**The bus is simulated in steps**: its doer method runs again and again, every second (the delay of its status), and leaves the status as it is until something happens. When the bus departs, it gets the `path` to the next stop: the road vertices from the last stop to the next one, and `departedAt`, the simulation time of the departure. From them, and from `speed`, a client draws the bus between steps, and a step finds out whether the bus has arrived.
 
 | Task | Status | Doer method | What one step does |
 |---|---|---|---|
-| Sim | `Sim ready` | — | waits for `start` |
-| Sim | `Sim running` (delay `1s`) | `SimSupervisor.checkCompletion(Task, Simulation)` | `Sim completed` when all passengers have arrived and all buses are parked. |
+| Sim | `null` | — | ready, or completed |
+| Sim | `Sim running` (delay `1s`) | `SimSupervisor.checkCompletion(Task, Simulation)` | when all passengers have arrived and all buses are parked, the last step: `Simulation.status` = `COMPLETED`, the task status `null` |
 | Sim | `Sim paused` | — | waits for `resume` |
-| Bus | `Bus at stop`, `Bus at terminal` (delay `1s`) | `BusDriver.stand(Task, Bus)` | nothing while the simulation is not running. After the dwell since `arrivedAt` (`stopDwell` at a stop, `terminalDwell` at a terminal): `path` and `departedAt` of the next stop, `Bus driving`; the direction is reversed at a terminal. When all passengers have arrived and the bus is empty at a terminal: `Bus parked`. |
-| Bus | `Bus driving` (delay `1s`) | `BusDriver.drive(Task, Bus)` | when the length of `path` is covered at `speed` since `departedAt`: `arrivedAt`, `Bus at stop` or `Bus at terminal` |
-| Bus | `Bus parked` | — | the end of the bus |
+| Bus | `null` | — | before the start, while paused, and parked |
+| Bus | `Bus resume` | `BusDriver.resume(Task, Bus)` | after a start or a resume: `Bus on route`, or `null` for a parked bus |
+| Bus | `Bus on route` (delay `1s`) | `BusDriver.step(Task, Bus)` | by `Bus.state`. `STANDING`: after the dwell since `arrivedAt` (`stopDwell` at a stop, `terminalDwell` at a terminal), `path` and `departedAt` of the next stop, `DRIVING`; the direction is reversed at a terminal. When all passengers have arrived and the bus is empty at a terminal: `PARKED`, and the status `null`. `DRIVING`: when the length of `path` is covered at `speed` since `departedAt`, `arrivedAt` and `STANDING` at the next stop. |
 
-The statuses are constants of `SimStatus` and `BusStatus`.
+The status of a bus task says only whether Doer runs the bus. Where the bus is, and whether it drives or stands, is in the `Bus`: `state`, `stopIndex`, `path`.
 
-**Task data.** `SimRepository` loads and saves `Simulation`, and `BusRepository` loads and saves `Bus`, with JDBC. Neither has doer methods. The `Bus` loader also reads the `Simulation` of the bus and `now()` into transient fields of the `Bus`: the bus methods see the simulation time, the road and whether all passengers have arrived. The `Bus` saver writes only `buses`. So the bus methods do not take `Simulation`, and its saver is not called by many bus tasks at once.
+The statuses of the tasks are constants of `SimStatus` and `BusStatus`.
+
+**Start, pause and resume are coordinated updates of the Sim task** (`SimResource`). Inside the updater, in the transaction of `facilitateCoordinatedUpdate`, the tasks of the buses get their statuses with `DoerService.loadTasks` and `updateAndBumpVersion`, which join that transaction:
+
+- `start` and `resume` set `Sim running`, and `Bus resume` for all buses: the doer method `BusDriver.resume` sets `Bus on route`, or `null` for a parked bus. So the endpoint knows nothing of the buses.
+- `pause` sets `Sim paused`, and `null` for all buses. A bus task in progress is hijacked: `in_progress` and `failing_since` are reset, so the step that was running fails on the version of the task, and its data is not saved.
+- If a bus task changed after `loadTasks`, by a Doer step or a coordinated update, its version did too: the update fails, the transaction is rolled back, and the endpoint responds 409.
+- After the commit the endpoint asks Doer to reload its queues (`triggerQueuesReloadFromDb`): to run the new statuses, and to drop the paused buses.
 
 ### REST API
 
 | Endpoint | Does |
 |---|---|
-| `POST /api/sims` | the `Simulation` as JSON (below). `SimRepository.create`, a `@Transactional` method, inserts the simulation, its buses and their tasks in one transaction (Sim `Sim ready`, buses `Bus at stop` / `Bus at terminal`). After the commit the endpoint asks Doer to load the bus tasks (`triggerTaskReloadFromDb`): a task inserted in a transaction is not visible to Doer before the commit. Returns `{"id": …}`. |
-| `GET /api/sims/{sim}` | status, simulation time, and the `Simulation` |
-| `GET /api/sims/{sim}/buses` | for each bus: id, status, stop, simulation time, and the `Bus` (its `path` has the coordinates of the vertices) |
-| `POST /api/sims/{sim}/start`, `pause`, `resume` | a coordinated update of the Sim task with `Simulation`: status and clock |
+| `POST /api/sims` | the `Simulation` as JSON (below). `SimRepository.create`, a `@Transactional` method, inserts the simulation, its buses and their tasks, all with the status `null`, in one transaction. Returns `{"id": …}`. |
+| `GET /api/sims/{sim}` | simulation time, and the `Simulation` with its status |
+| `GET /api/sims/{sim}/buses` | for each bus: id, the status of its task, stop, simulation time, and the `Bus` (its `path` has the coordinates of the vertices) |
+| `POST /api/sims/{sim}/start`, `pause`, `resume` | a coordinated update of the Sim task with `Simulation`, and the statuses of the buses in its transaction (above) |
 | `POST /api/sims/{sim}/passengers` | before the start: registers a passenger and returns its number (a coordinated update of `Simulation`) |
 | `POST /api/sims/{sim}/passengers/{p}/arrived` | `arrived` + 1 (a coordinated update of `Simulation`) |
-| `POST /api/sims/{sim}/buses/{bus}/board`, `alight` | `{"passenger": p, "stop": "s2"}`: a coordinated update of the Bus task with `Bus`. Responds 409 when the bus is not stopped at that stop, or when it is full. |
+| `POST /api/sims/{sim}/buses/{bus}/board`, `alight` | `{"passenger": p, "stop": "s2"}`: a coordinated update of the Bus task with `Bus`. Responds 409 when the bus does not stand at that stop (it drives, or is parked), or when it is full. A bus stands at its stop before the start and in a pause too. |
 
 The body of `POST /api/sims`:
 
@@ -251,15 +262,15 @@ Requests and responses are JSON objects, one per line ([JSON Lines](https://json
 
 | | Case | Code | Transit Sims |
 |---|---|---|---|
-| | several `@AcceptStatus` on one method | `BusDriver.stand`, `ConcurrencyLimitOne.slow` | `BusDriver.stand` |
-| | `@AcceptStatus` with `delay` | `BusDriver.stand`, `drive`, `SimSupervisor.checkCompletion`, `DoerMethodStatuses.delayed` | `BusDriver.stand`, `drive`, `SimSupervisor.checkCompletion` |
-| | status set to `null` (end of the process) | `ValidationResource.second` | `ValidationResource.second` |
+| | several `@AcceptStatus` on one method | `ConcurrencyLimitOne.slow` | `ConcurrencyLimitOne.slow` |
+| | `@AcceptStatus` with `delay` | `BusDriver.step`, `SimSupervisor.checkCompletion`, `DoerMethodStatuses.delayed` | `BusDriver.step`, `SimSupervisor.checkCompletion` |
+| | status set to `null` (end of the process) | `SimSupervisor.checkCompletion`, `BusDriver.step`, `BusDriver.resume`, `ValidationResource.second` | `SimSupervisor.checkCompletion`, `BusDriver.step` |
 | — | statuses from constants of another class, from `switch` and lambdas | constants: `BusStatus`, `SimStatus` | `BusStatus`, `SimStatus`; `DoerMethodStatuses` |
 | — | `@RetryPolicy` without `duration` (retries forever) | | `ErrorMethods` |
 | | calls `DoerService` itself (insert a new task, `updateAndBumpVersion`) | `TransactionMethods.updateInMethod` | `DoerMethodCalls`, `TransactionMethods` |
 | — | calls an external service (JAX-RS client to WireMock): success, error, timeout | | `ExternalServiceMethods` |
 | | long-running method | `ConcurrencyLimitOne`, `ConcurrencyQueues.slow` (`Thread.sleep`) | `ConcurrencyLimitOne`, `ConcurrencyQueues` |
-| | the status stays the same; the method runs again after the delay | `BusDriver.stand`, `drive`, `SimSupervisor.checkCompletion` | `BusDriver.stand`, `drive`, `SimSupervisor.checkCompletion` |
+| | the status stays the same; the method runs again after the delay | `BusDriver.step`, `SimSupervisor.checkCompletion` | `BusDriver.step`, `SimSupervisor.checkCompletion` |
 
 ### Concurrency
 
@@ -301,6 +312,7 @@ The case "through a repository interface (JDBC in e2e, in memory in `Main`)" was
 |---|---|---|---|
 | | functional endpoint that starts a business operation (inserts a task) | `SimResource.create` | `POST /api/sims` |
 | | `@Transactional` method that inserts tasks and writes Transit Sims data in one transaction (creating a simulation) | `SimRepository.create` | `SimRepository.create`, called by `POST /api/sims` |
+| | other tasks updated in the transaction of a coordinated update, with hijacking (start, pause, resume) | `SimResource` | `SimResource` |
 | | functional endpoint that does a coordinated update, called by many clients at once for the same task (boarding and alighting) | `BusResource.board`, `alight` | `BusResource` board, alight |
 | | validation endpoints: control Doer, read tasks, reset data, report the runtime | `ValidationResource` | `ValidationResource` |
 

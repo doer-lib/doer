@@ -431,6 +431,19 @@ As in [e2e-test-app.md](e2e-test-app.md#transit-sims-in-doer-terms). The functio
   - a passenger rides from the first stop to the second and arrives; the bus parks at the terminal, and the simulation completes.
 - [x] **Check:** `mvn verify` passes. All `*E2E` classes pass three runs in a row.
 
+Then the statuses of the tasks were changed: a task has a status only while Doer has to run it.
+
+- [x] A new simulation and its buses have the status `null`; a paused bus, a parked bus (`Bus.parked`) and a completed simulation (`Simulation.status` = `COMPLETED`) too. `Bus parked`, `Sim ready` and `Sim completed` go.
+- [x] Start, pause and resume: a coordinated update of the Sim task; in its transaction the bus tasks get `Bus resume` (`BusDriver.resume` finds out where the bus is) or `null`, hijacking the steps in progress; Doer reloads its queues after the commit. Boarding checks where the bus is, not the status of its task.
+- [x] `TransitSimsE2E` checks the statuses `null`: of a new simulation and its buses, of the buses in a pause, of the completed simulation and its parked bus.
+- [x] **Check:** `mvn verify` passes. All `*E2E` classes pass three runs in a row.
+
+Then the bus task got only the statuses `Bus resume`, `Bus on route` and `null`.
+
+- [x] `Bus.state` (`STANDING`, `DRIVING`, `PARKED`) says where the bus is; `Bus.parked` goes. `BusDriver.step` on `Bus on route` stands, drives or parks by `state`. V2 is copied from the generated `CreateIndexes.sql`.
+- [x] `TransitSimsE2E` follows the bus by `Bus.state` and its stop, and checks the statuses of its task.
+- [x] **Check:** `mvn verify` passes. All `*E2E` classes pass three runs in a row.
+
 **3.5 Specialized classes for the missing cases**
 
 - [ ] The cases marked `—` in e2e-test-app.md: kinds of beans, sources of statuses, retry forever, `@ConcurrencyGroup`, task data, exception describers, the external service on WireMock.

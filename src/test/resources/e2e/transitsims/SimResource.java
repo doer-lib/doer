@@ -14,8 +14,8 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import java.sql.SQLException;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -30,6 +30,7 @@ public class SimResource {
 
     DoerService doerService;
     SimRepository simRepository;
+    BusRepository busRepository;
 
     @Inject
     public void setDoerService(DoerService doerService) {
@@ -41,16 +42,18 @@ public class SimResource {
         this.simRepository = simRepository;
     }
 
-    public record SimView(UUID id, String status, long time, Simulation simulation) {
+    @Inject
+    public void setBusRepository(BusRepository busRepository) {
+        this.busRepository = busRepository;
+    }
+
+    public record SimView(UUID id, long time, Simulation simulation) {
     }
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     public Map<String, UUID> create(Simulation simulation) throws Exception {
-        List<Bus> buses = simRepository.create(simulation);
-        for (Bus bus : buses) {
-            doerService.triggerTaskReloadFromDb(bus.taskId);
-        }
+        simRepository.create(simulation);
         return Map.of("id", simulation.id);
     }
 
@@ -58,39 +61,54 @@ public class SimResource {
     @Path("{sim}")
     public SimView get(@PathParam("sim") UUID id) throws Exception {
         Simulation simulation = find(id);
-        Task task = doerService.loadTask(simulation.taskId);
-        return new SimView(id, task.getStatus(), simulation.time(doerService.getDbNow()), simulation);
+        return new SimView(id, simulation.time(doerService.getDbNow()), simulation);
     }
 
+    /**
+     * The start, the pause and the resume are coordinated updates of the Sim task. The tasks of the buses get their
+     * statuses in the same transaction, and Doer reloads its queues after the commit.
+     */
     @POST
     @Path("{sim}/start")
     public SimView start(@PathParam("sim") UUID id) throws Exception {
-        return update(id, (task, simulation) -> {
-            requireStatus(task, SimStatus.READY);
+        SimView view = update(id, (task, simulation) -> {
+            requireStatus(simulation, Simulation.Status.READY);
             simulation.startedAt = doerService.getDbNow();
+            simulation.status = Simulation.Status.RUNNING;
             task.setStatus(SimStatus.RUNNING);
+            setBusStatuses(id, BusStatus.RESUME);
         });
+        doerService.triggerQueuesReloadFromDb();
+        return view;
     }
 
     @POST
     @Path("{sim}/pause")
     public SimView pause(@PathParam("sim") UUID id) throws Exception {
-        return update(id, (task, simulation) -> {
-            requireStatus(task, SimStatus.RUNNING);
+        SimView view = update(id, (task, simulation) -> {
+            requireStatus(simulation, Simulation.Status.RUNNING);
             simulation.pausedAt = doerService.getDbNow();
+            simulation.status = Simulation.Status.PAUSED;
             task.setStatus(SimStatus.PAUSED);
+            setBusStatuses(id, null);
         });
+        doerService.triggerQueuesReloadFromDb();
+        return view;
     }
 
     @POST
     @Path("{sim}/resume")
     public SimView resume(@PathParam("sim") UUID id) throws Exception {
-        return update(id, (task, simulation) -> {
-            requireStatus(task, SimStatus.PAUSED);
+        SimView view = update(id, (task, simulation) -> {
+            requireStatus(simulation, Simulation.Status.PAUSED);
             simulation.pausedMs += Duration.between(simulation.pausedAt, doerService.getDbNow()).toMillis();
             simulation.pausedAt = null;
+            simulation.status = Simulation.Status.RUNNING;
             task.setStatus(SimStatus.RUNNING);
+            setBusStatuses(id, BusStatus.RESUME);
         });
+        doerService.triggerQueuesReloadFromDb();
+        return view;
     }
 
     /** Registers a passenger before the start; returns its number. */
@@ -99,7 +117,7 @@ public class SimResource {
     public Map<String, Integer> addPassenger(@PathParam("sim") UUID id) throws Exception {
         AtomicInteger passenger = new AtomicInteger();
         update(id, (task, simulation) -> {
-            requireStatus(task, SimStatus.READY);
+            requireStatus(simulation, Simulation.Status.READY);
             passenger.set(++simulation.passengers);
         });
         return Map.of("passenger", passenger.get());
@@ -109,11 +127,27 @@ public class SimResource {
     @Path("{sim}/passengers/{passenger}/arrived")
     public SimView arrived(@PathParam("sim") UUID id, @PathParam("passenger") int passenger) throws Exception {
         return update(id, (task, simulation) -> {
+            requireStatus(simulation, Simulation.Status.RUNNING, Simulation.Status.PAUSED);
             if (passenger < 1 || passenger > simulation.passengers) {
                 throw conflict("No passenger " + passenger);
             }
             simulation.arrived++;
         });
+    }
+
+    /**
+     * Sets the status of all buses of the simulation, in the transaction of the caller. A bus whose step is in
+     * progress is hijacked: the step fails on the version of the task, and its data is not saved.
+     */
+    private void setBusStatuses(UUID simulationId, String status) throws SQLException {
+        for (Task task : doerService.loadTasks(busRepository.taskIds(simulationId)).values()) {
+            task.setInProgress(false);
+            task.setFailingSince(null);
+            task.setStatus(status);
+            if (!doerService.updateAndBumpVersion(task)) {
+                throw conflict("The task " + task.getId() + " of a bus has changed meanwhile, try again");
+            }
+        }
     }
 
     private SimView update(UUID id, TaskAndDataUpdater<Simulation> updater) throws Exception {
@@ -129,9 +163,9 @@ public class SimResource {
         return simulation;
     }
 
-    private static void requireStatus(Task task, String status) {
-        if (!status.equals(task.getStatus())) {
-            throw conflict("The status is " + task.getStatus() + ", not " + status);
+    private static void requireStatus(Simulation simulation, Simulation.Status... statuses) {
+        if (!List.of(statuses).contains(simulation.status)) {
+            throw conflict("The simulation is " + simulation.status + ", not " + List.of(statuses));
         }
     }
 
