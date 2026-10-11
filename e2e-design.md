@@ -191,21 +191,24 @@ The generated `_GeneratedDoerService` needs a `DataSource` bean, an `Executor` b
 | **quarkus** | `DataSource` (Agroal), `Executor`, JTA (Narayana), CDI events, RESTEasy, Flyway (`quarkus-flyway`, `migrate-at-start`) | `pom.xml`, `application.properties` |
 | **wildfly** | JTA, CDI events, RESTEasy | `pom.xml` (WAR), `WEB-INF/transitsims-ds.xml` with `${env.E2E_DB_URL}`, `Producers.java`: `DataSource` from `@Resource(lookup)`, `Executor` from `ManagedExecutorService`; `FlywayMigration.java` |
 | **open-liberty** | JTA, CDI events, JAX-RS | `pom.xml` (WAR), `server.xml` (features, data source, Postgres driver), the same `Producers.java` and `FlywayMigration.java` |
-| **spring-boot** | `DataSource` (Hikari), transactions (Spring reads the jakarta annotation), Flyway (auto-configured with `flyway-core`) | `pom.xml`, `application.properties`, `SpringBootMain.java` (see below) |
+| **spring-boot** | `DataSource` (Hikari), transactions (Spring reads the jakarta annotation), Jersey, Flyway (`spring-boot-starter-flyway`) | `pom.xml`, `application.properties`, `SpringBootMain.java` (see below) |
 | **jetty** | servlet container only | `pom.xml`, Weld servlet, Jersey and Narayana setup, `web.xml`, producers of a transactional `DataSource` and an `Executor`, `FlywayMigration.java` |
 
 `FlywayMigration.java`, for the runtimes without a Flyway integration, observes `Startup` with a `@Priority` lower than the one of `DoerLifecycle`, so that CDI calls it first, and runs `Flyway.configure().dataSource(ds).load().migrate()`. Flyway is a dependency of the runtime's `pom.xml`, not of Transit Sims: Transit Sims does not import `org.flywaydb`. In Quarkus and Spring Boot the migration runs before the `Startup` event / `ApplicationReadyEvent`, so nothing is written. Every runtime also needs `flyway-database-postgresql`.
 
-REST is served by Jersey (`spring-boot-starter-jersey`), not by Spring MVC: the endpoints of Transit Sims stay JAX-RS, as in every other runtime.
+REST is served by Jersey (`spring-boot-starter-jersey`), not by Spring MVC: the endpoints of Transit Sims stay JAX-RS, as in every other runtime. JSON is JSON-B and JSON-P (`jersey-media-json-binding`, `jersey-media-json-processing`); `jersey-media-json-jackson` is excluded from the starter, because Transit Sims uses JSON-B annotations. `@ApplicationPath("/api")` is repeated as `spring.jersey.application-path=/api`: Spring Boot reads the path from the `ResourceConfig` bean, not from the `Application` of Transit Sims.
 
 `SpringBootMain.java` (package `transitsims`, written into the work folder only) carries everything Spring does differently from CDI, so that Transit Sims stays free of Spring:
 
 - `@Import(_GeneratedDoerService.class)`, because Spring does not know `@ApplicationScoped`;
-- a component scan of `transitsims` with an include filter on CDI scope annotations, and a `ScopeMetadataResolver` that maps `@ApplicationScoped` → singleton, `@Dependent` → prototype;
+- a component scan of `transitsims` with an include filter on CDI scope annotations, and a `ScopeMetadataResolver` that maps `@ApplicationScoped` and `@Singleton` → singleton, `@Dependent` → prototype;
 - the `DataSource` wrapped in `TransactionAwareDataSourceProxy`: on a plain `DataSource`, `getConnection()` does not join the Spring transaction;
-- exactly one `Executor` bean: with two, `@Inject Executor` is ambiguous;
-- a Jersey `ResourceConfig` that registers the JAX-RS endpoints;
-- `ApplicationReadyEvent` → `doerService.start(true)` (with the monitor, as `DoerLifecycle` does), `ContextClosedEvent` → `stop()`: Spring does not fire the CDI events, so the observer in `DoerLifecycle` is never called.
+- exactly one `Executor` bean: with two, `@Inject Executor` is ambiguous. It is a cached thread pool, shut down without waiting when the context is destroyed; the `applicationTaskExecutor` of Spring Boot backs off. Not a `ThreadPoolTaskExecutor`: it is a `SmartLifecycle` itself and stops accepting tasks before Doer is stopped;
+- a Jersey `ResourceConfig` with the resource classes (`@Path`) and providers (`@Provider`) found by a Spring classpath scan: `ResourceConfig.packages` does not scan a Spring Boot fat jar. A resource class that is a Spring bean (`ValidationResource`) is taken from the Spring context: Jersey asks Spring only for classes with `@Component` and creates the others itself, so its `@Transactional` would not apply, and its endpoints and its doer methods would run on two instances. The resources without a scope (`SimResource`, `BusResource`) are created by Jersey per request, with Spring beans in their `@Inject` fields (the HK2 bridge of `jersey-spring6`);
+- a `SmartLifecycle` with a phase below the one of the web server: `start()` → `doerService.start(true)` (with the monitor, as `DoerLifecycle` does), `stop()` → `doerService.stop()`. Spring does not fire the CDI events, so the observer in `DoerLifecycle` is never called. Not `ApplicationReadyEvent`: Tomcat accepts requests before it, so the first `/api/validation/stop` of `E2eEnvironment` could come before the start of Doer. With the lower phase Doer starts before Tomcat accepts requests, and stops after Tomcat has stopped accepting them, before the `DataSource` and the `Executor` are destroyed;
+- `spring.main.allow-circular-references=true` (in `application.properties`): the generated service injects itself (`setSelfReference`), which Spring Boot forbids by default;
+- the `@Bean` of `BeanKindProduced`: Spring does not know `@jakarta.enterprise.inject.Produces`, so the producer method is called from a `@Bean` method;
+- an adapter of CDI interceptors: a Spring AOP advisor for the methods with an interceptor binding of an `@Interceptor` class, which calls its `@AroundInvoke` method with an `InvocationContext`.
 
 ### Environment
 
@@ -508,13 +511,48 @@ The cases marked `—` in [e2e-test-app.md](e2e-test-app.md#what-transit-sims-mu
 
 ### 4. Spring Boot
 
-Detailed when it is next.
+Spring Boot 4.1 (Spring Framework 7, Jakarta EE 11, Jersey 4). Transit Sims does not change: what Spring does differently from CDI is in `SpringBootMain.java`, which only the work folder of `spring-boot` has.
 
-- [ ] `SpringBootApp implements E2eApp`. `configureSpringBootApp` writes `pom.xml` (`spring-boot-starter-jersey`, `spring-boot-starter-jdbc`, JSON-P and JSON-B for Jersey, the Postgres driver, `flyway-core`, `flyway-database-postgresql`, `doer` as a dependency and in `annotationProcessorPaths`, `spring-boot-maven-plugin`), `application.properties` (`E2E_*` with the defaults of Quarkus, port 8080) and `SpringBootMain.java` (see [What each runtime writes](#what-each-runtime-writes)). `springBootDockerRun`: the jar mounted to `eclipse-temurin:25-jre`, `java -jar`.
-- [ ] **Check:** `SmokeE2E` passes with `-Ddoer.e2e.runtime=spring-boot`.
-- [ ] What Spring does not serve as CDI does (the interceptor binding of `BeanKindIntercepted`, `@Dependent`, the `Startup` and `Shutdown` events, …) is decided case by case: a line in `SpringBootMain.java`, a fix in Doer, or a case that Spring Boot does not support. Each decision goes to *Decisions* of e2e-test-app.md.
-- [ ] **Check:** all `*E2E` classes pass with `spring-boot` three runs in a row, and still with `quarkus`.
-- [ ] `spring-boot` in the CI matrix. **Check:** the `e2e` job is green for both runtimes.
+**4.1 Design** ([What each runtime writes](#what-each-runtime-writes))
+
+What the design said before Spring Boot 4 was looked at closely, and is corrected:
+
+- [x] Flyway: `spring-boot-starter-flyway`. Since Spring Boot 4 the auto-configuration of Flyway is a module of its own, and `flyway-core` alone is not enough.
+- [x] Doer is started and stopped by a `SmartLifecycle` with a phase below the one of the web server, not on `ApplicationReadyEvent`: Tomcat accepts requests before `ApplicationReadyEvent`, so the first `/api/validation/stop` of `E2eEnvironment` could come before the start of Doer. With the lower phase Doer starts before Tomcat accepts requests, and stops after Tomcat has stopped accepting them, before the beans (the `DataSource`, the `Executor`) are destroyed.
+- [x] Jersey: the resource classes (`@Path`) and providers (`@Provider`) are found by a Spring classpath scan and registered in the `ResourceConfig`: `ResourceConfig.packages` does not scan a Spring Boot fat jar. A resource class that is a Spring bean (`ValidationResource`, `@ApplicationScoped`) is taken from the Spring context: Jersey asks Spring only for classes with `@Component` and creates the others itself, so without this the `@Transactional` of `ValidationResource` would not apply (`coordinated_update_should_not_be_called_in_transaction` expects 500), and its endpoints and its doer methods would run on two instances. `SimResource` and `BusResource` have no scope: Jersey creates them per request and injects Spring beans into their `@Inject` fields (the HK2 bridge of `jersey-spring6`).
+- [x] JSON: `jersey-media-json-binding` (Yasson) and `jersey-media-json-processing` (Parsson), and `jersey-media-json-jackson` excluded from the starter: Transit Sims uses JSON-B annotations.
+- [x] The `Executor` bean of `SpringBootMain` is a cached thread pool, shut down (without waiting) when the context is destroyed; the `applicationTaskExecutor` of Spring Boot backs off when an `Executor` bean exists. Not a `ThreadPoolTaskExecutor`: it is a `SmartLifecycle` itself and stops accepting tasks before Doer is stopped.
+- [x] `@ApplicationPath("/api")` of `TransitSimsApplication` is repeated as `spring.jersey.application-path=/api`: Spring Boot reads the path from the `ResourceConfig` bean, not from the `Application` of Transit Sims.
+- [x] **Check:** the spring-boot row of the table and the list of `SpringBootMain.java` in [What each runtime writes](#what-each-runtime-writes) say the above.
+
+**4.2 `SpringBootApp` and `SmokeE2E`**
+
+- [x] `configureSpringBootApp` writes `pom.xml`: the parent `spring-boot-starter-parent`, `spring-boot-starter-jersey` (without Jackson), `spring-boot-starter-jdbc`, `spring-boot-starter-flyway`, `flyway-database-postgresql`, the Postgres driver, JSON-B and JSON-P for Jersey (4.1), the APIs Transit Sims compiles against and Spring does not bring (`jakarta.enterprise.cdi-api`, `jakarta.transaction-api`), `doer` as a dependency and in `annotationProcessorPaths`, `spring-boot-maven-plugin`, `finalName` `transitsims`.
+- [x] `application.properties`: `spring.datasource.*` from `E2E_DB_URL`, `E2E_DB_USER`, `E2E_DB_PASSWORD` with the defaults of Quarkus, a pool of 4 connections as in Quarkus, port 8080, `spring.jersey.application-path=/api`, a log format like the one of Quarkus.
+- [x] `SpringBootMain.java` as in [What each runtime writes](#what-each-runtime-writes): `@Import(_GeneratedDoerService.class)`, the component scan of `transitsims` with the CDI scopes and their `ScopeMetadataResolver`, the `DataSource` in `TransactionAwareDataSourceProxy`, the `Executor`, the `ResourceConfig`, the `SmartLifecycle` of Doer.
+- [x] `springBootDockerRun`: `target/transitsims.jar` mounted to `/app/transitsims.jar` of `eclipse-temurin:25-jre`, `java -jar /app/transitsims.jar`. `E2eEnvironment.app` knows `spring-boot`.
+- [x] **Check:** `SmokeE2E` passes with `-Ddoer.e2e.runtime=spring-boot`, and again with `-Ddoer.e2e.skip-build=true`: the runtime is `spring-boot`, V1–V4 are migrated, the restart exits with 143. `grep -rE "import org\.springframework" src/test/resources/e2e` finds nothing.
+
+**4.3 What Spring serves differently from CDI**
+
+Case by case, each decided as a line in `SpringBootMain.java`, a fix in Doer, or a case that Spring Boot does not support; each decision goes to *Decisions* of [e2e-test-app.md](e2e-test-app.md#decisions).
+
+- [x] The self-reference of the generated service (`@Inject setSelfReference(DoerService)`): Spring Boot forbids circular references, a bean that injects itself too. Decided: `spring.main.allow-circular-references=true` in `application.properties`.
+- [x] `@jakarta.enterprise.inject.Produces` (`BeanKindProducers.produce`): Spring does not know it. Decided: a `@Bean` of `BeanKindProduced` in `SpringBootMain.java`.
+- [x] CDI interceptors (`@BeanKindTraced`, `BeanKindTracedInterceptor`): Spring does not know them. Decided: an adapter in `SpringBootMain.java`, a Spring AOP advisor that calls the `@AroundInvoke` method.
+- [x] Served by Spring itself or by the `ScopeMetadataResolver`, confirmed by the tests: `@jakarta.inject.Singleton` (singleton), `@Dependent` (prototype: one instance per injection point, as in CDI), the `@Inject` constructor of `BeanKindConstructor`, the `TxType` and `rollbackOn` of `@jakarta.transaction.Transactional` (`REQUIRES_NEW`, `NOT_SUPPORTED`, `NEVER`, …), the beans of another package, nested and inherited.
+- [x] `DoerLifecycle` is a Spring bean whose observers are never called; Doer is started by the `SmartLifecycle` of `SpringBootMain` (4.1).
+- [x] **Check:** `BeanKindsE2E`, `TransactionsE2E`, `CoordinatedUpdateE2E` pass with `spring-boot`.
+
+**4.4 All `*E2E` classes**
+
+- [x] What else fails is fixed in the test code or in `SpringBootMain.java`, or decided as in 4.3. A task left `in_progress` by a doer method that ran at the stop of a node is the open question, not fixed here.
+- [x] **Check:** all `*E2E` classes pass with `-Ddoer.e2e.runtime=spring-boot` three runs in a row, one of them with `-Dfailsafe.runOrder=random`; all `*E2E` classes still pass with `quarkus`; `mvn verify` passes.
+
+**4.5 CI**
+
+- [x] `spring-boot` in the matrix of the `e2e` job.
+- [ ] **Check:** the `e2e` job is green for both runtimes.
 
 ### 5. Jakarta EE servers: WildFly, Open Liberty
 
