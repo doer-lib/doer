@@ -19,9 +19,13 @@ import java.util.UUID;
  * A simulation as it is posted and kept in sims.json_data: the road, the stops, the routes, the buses on them, and the
  * clock. It also calculates on the road: the paths between stops and the buses of each route.
  */
-@JsonbPropertyOrder({ "road", "stops", "routes", "buses", "capacity", "speed", "stopDwell", "terminalDwell",
-        "startedAt", "pausedAt", "pausedMs", "passengers", "arrived" })
+@JsonbPropertyOrder({ "status", "road", "stops", "routes", "buses", "capacity", "speed", "stopDwell",
+        "terminalDwell", "startedAt", "pausedAt", "pausedMs", "passengers", "arrived" })
 public class Simulation {
+
+    public enum Status {
+        READY, RUNNING, PAUSED, COMPLETED
+    }
 
     public record Vertex(String id, double x, double y) {
     }
@@ -43,6 +47,7 @@ public class Simulation {
     @JsonbTransient
     public long taskId;
 
+    public Status status;
     public Road road;
     public List<BusStop> stops;
     public List<Route> routes;
@@ -68,10 +73,6 @@ public class Simulation {
             return 0;
         }
         return Duration.between(startedAt, pausedAt != null ? pausedAt : now).toMillis() - pausedMs;
-    }
-
-    public boolean clockRunning() {
-        return startedAt != null && pausedAt == null;
     }
 
     public boolean allArrived() {

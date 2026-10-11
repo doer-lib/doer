@@ -16,10 +16,12 @@ public class SimSupervisor {
         this.busRepository = busRepository;
     }
 
+    /** The last step of a simulation: it is completed, and its task has nothing more to do. */
     @AcceptStatus(value = SimStatus.RUNNING, delay = "1s")
     public void checkCompletion(Task task, Simulation simulation) throws SQLException {
         if (simulation.allArrived() && busRepository.countNotParked(simulation.id) == 0) {
-            task.setStatus(SimStatus.COMPLETED);
+            simulation.status = Simulation.Status.COMPLETED;
+            task.setStatus(null);
         }
     }
 }

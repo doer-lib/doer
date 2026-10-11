@@ -3,6 +3,7 @@ package com.doer.e2e;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -35,14 +36,16 @@ class TransitSimsE2E extends E2eTestBase {
         String sim = createSim(30, 2);
 
         JsonPath view = get("/api/sims/" + sim);
-        assertEquals("Sim ready", view.getString("status"));
+        assertEquals("READY", view.getString("simulation.status"));
         assertEquals(0L, view.getLong("time"));
+        assertEquals("null", simTaskStatus(sim), "Doer has nothing to run yet");
         Map<String, Object> bus = buses(sim).get(0);
-        assertEquals("Bus at terminal", bus.get("status"));
+        assertNull(bus.get("status"));
+        assertEquals("STANDING", stateOf(bus));
         assertEquals("s1", bus.get("stop"));
         // json_data is formatted, so that it can be read in psql
         String json = selectStringValue("SELECT json_data::text FROM sims WHERE id = '" + sim + "'");
-        assertTrue(json.startsWith("{\n    \"road\": {"), json);
+        assertTrue(json.startsWith("{\n    \"status\": \"READY\",\n    \"road\": {"), json);
     }
 
     @Test
@@ -52,11 +55,12 @@ class TransitSimsE2E extends E2eTestBase {
         post("/api/sims/" + sim + "/passengers", null, 200);
         post("/api/sims/" + sim + "/start", null, 200);
 
-        Map<String, Object> driving = waitBus(sim, b -> "Bus driving".equals(b.get("status")));
+        Map<String, Object> driving = waitBus(sim, b -> "DRIVING".equals(stateOf(b)));
+        assertEquals("Bus on route", driving.get("status"));
         assertEquals("s1", driving.get("stop"));
         assertEquals(List.of("a", "b"), pathOf(driving));
-        waitBus(sim, b -> "Bus at stop".equals(b.get("status")) && "s2".equals(b.get("stop")));
-        waitBus(sim, b -> "Bus at terminal".equals(b.get("status")) && "s3".equals(b.get("stop")));
+        waitBus(sim, b -> standsAt(b, "s2"));
+        waitBus(sim, b -> standsAt(b, "s3"));
     }
 
     @Test
@@ -82,16 +86,21 @@ class TransitSimsE2E extends E2eTestBase {
         String sim = createSim(10, 2);
         post("/api/sims/" + sim + "/passengers", null, 200);
         post("/api/sims/" + sim + "/start", null, 200);
-        waitBus(sim, b -> "Bus driving".equals(b.get("status")));
+        waitBus(sim, b -> "DRIVING".equals(stateOf(b)));
 
         post("/api/sims/" + sim + "/pause", null, 200);
         long pausedTime = get("/api/sims/" + sim).getLong("time");
         Thread.sleep(3000);
 
         assertEquals(pausedTime, get("/api/sims/" + sim).getLong("time"));
-        assertEquals("Bus driving", buses(sim).get(0).get("status"));
+        assertEquals("Sim paused", simTaskStatus(sim));
+        Map<String, Object> paused = buses(sim).get(0);
+        assertNull(paused.get("status"), "a paused bus has no status");
+        assertEquals("DRIVING", stateOf(paused));
+        assertEquals(List.of("a", "b"), pathOf(paused), "the bus keeps its way to the next stop");
         post("/api/sims/" + sim + "/resume", null, 200);
-        waitBus(sim, b -> "Bus at stop".equals(b.get("status")) && "s2".equals(b.get("stop")));
+        waitBus(sim, b -> "Bus on route".equals(b.get("status")));
+        waitBus(sim, b -> standsAt(b, "s2"));
     }
 
     @Test
@@ -102,13 +111,15 @@ class TransitSimsE2E extends E2eTestBase {
         assertEquals(200, board(sim, bus, passenger, "s1"));
         post("/api/sims/" + sim + "/start", null, 200);
 
-        waitBus(sim, b -> "Bus at stop".equals(b.get("status")) && "s2".equals(b.get("stop")));
+        waitBus(sim, b -> standsAt(b, "s2"));
         post("/api/sims/" + sim + "/buses/" + bus + "/alight", boarding(passenger, "s2"), 200);
         post("/api/sims/" + sim + "/passengers/" + passenger + "/arrived", null, 200);
 
-        waitSim(sim, "Sim completed");
+        waitSim(sim, "COMPLETED");
+        assertEquals("null", simTaskStatus(sim), "the last step of the simulation");
         Map<String, Object> parked = buses(sim).get(0);
-        assertEquals("Bus parked", parked.get("status"));
+        assertNull(parked.get("status"));
+        assertEquals("PARKED", stateOf(parked));
         assertEquals("s3", parked.get("stop"));
         assertFalse(passengersOf(parked).contains(passenger));
     }
@@ -157,15 +168,33 @@ class TransitSimsE2E extends E2eTestBase {
         return get("/api/sims/" + sim + "/buses").getList("$");
     }
 
+    /** The status of the task of the simulation, "null" for none. */
+    static String simTaskStatus(String sim) {
+        return selectStringValue("SELECT coalesce(t.status, 'null') FROM tasks t JOIN sims s ON s.task_id = t.id "
+                + "WHERE s.id = '" + sim + "'");
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> busOf(Map<String, Object> busView) {
+        return (Map<String, Object>) busView.get("bus");
+    }
+
+    static String stateOf(Map<String, Object> busView) {
+        return (String) busOf(busView).get("state");
+    }
+
+    static boolean standsAt(Map<String, Object> busView, String stop) {
+        return "STANDING".equals(stateOf(busView)) && stop.equals(busView.get("stop"));
+    }
+
     @SuppressWarnings("unchecked")
     static List<Integer> passengersOf(Map<String, Object> busView) {
-        return (List<Integer>) ((Map<String, Object>) busView.get("bus")).get("passengers");
+        return (List<Integer>) busOf(busView).get("passengers");
     }
 
     @SuppressWarnings("unchecked")
     static List<String> pathOf(Map<String, Object> busView) {
-        Map<String, Object> bus = (Map<String, Object>) busView.get("bus");
-        List<Map<String, Object>> path = (List<Map<String, Object>>) bus.get("path");
+        List<Map<String, Object>> path = (List<Map<String, Object>>) busOf(busView).get("path");
         return path.stream().map(v -> (String) v.get("id")).toList();
     }
 
@@ -187,7 +216,7 @@ class TransitSimsE2E extends E2eTestBase {
         Instant deadline = Instant.now().plus(TIMEOUT);
         String last = null;
         while (Instant.now().isBefore(deadline)) {
-            last = get("/api/sims/" + sim).getString("status");
+            last = get("/api/sims/" + sim).getString("simulation.status");
             if (status.equals(last)) {
                 return;
             }
