@@ -5,6 +5,7 @@ import com.doer.TaskDataLoader;
 import com.doer.TaskDataSaver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -17,9 +18,12 @@ import javax.sql.DataSource;
 
 /**
  * Buses in the table buses; the task data of the Bus task. A bus is loaded with its simulation and the database
- * time, to be read; only the bus is saved.
+ * time, to be read; only the bus is saved. Every method runs in a transaction, joining the current one: a connection
+ * taken outside a transaction can stay with the request until it ends (Open Liberty), and an endpoint that reads a bus
+ * and then makes a coordinated update would need two connections at once.
  */
 @ApplicationScoped
+@Transactional
 public class BusRepository {
     static final String SELECT = "SELECT b.id, b.task_id, b.json_data, s.id, s.task_id, s.json_data, now() "
             + "FROM buses b JOIN sims s ON s.id = (b.json_data ->> 'simulationId')::uuid";

@@ -189,12 +189,24 @@ The generated `_GeneratedDoerService` needs a `DataSource` bean, an `Executor` b
 | Runtime | Provided by the runtime | Written by the test |
 |---|---|---|
 | **quarkus** | `DataSource` (Agroal), `Executor`, JTA (Narayana), CDI events, RESTEasy, Flyway (`quarkus-flyway`, `migrate-at-start`) | `pom.xml`, `application.properties` |
-| **wildfly** | JTA, CDI events, RESTEasy | `pom.xml` (WAR), `WEB-INF/transitsims-ds.xml` with `${env.E2E_DB_URL}`, `Producers.java`: `DataSource` from `@Resource(lookup)`, `Executor` from `ManagedExecutorService`; `FlywayMigration.java` |
-| **open-liberty** | JTA, CDI events, JAX-RS | `pom.xml` (WAR), `server.xml` (features, data source, Postgres driver), the same `Producers.java` and `FlywayMigration.java` |
+| **wildfly** | JTA, CDI events, RESTEasy | `pom.xml` (WAR, shared), `WEB-INF/transitsims-ds.xml` with system properties and the driver of the WAR, `WEB-INF/web.xml` (JSON-B instead of Jackson), `Producers.java` and `FlywayMigration.java` (shared, see below); the start command |
+| **open-liberty** | JTA, CDI events, RESTEasy | `pom.xml` (WAR, shared, plus the driver copied to `target/liberty/`), `server.xml` (features, INFO on the console, port 8080, data source with `${env.E2E_DB_*}`, the driver as a `library`, context root `/`), `db/migration/flyway.location`, the same `Producers.java` and `FlywayMigration.java` |
 | **spring-boot** | `DataSource` (Hikari), transactions (Spring reads the jakarta annotation), Jersey, Flyway (`spring-boot-starter-flyway`) | `pom.xml`, `application.properties`, `SpringBootMain.java` (see below) |
 | **jetty** | servlet container only | `pom.xml`, Weld servlet, Jersey and Narayana setup, `web.xml`, producers of a transactional `DataSource` and an `Executor`, `FlywayMigration.java` |
 
-`FlywayMigration.java`, for the runtimes without a Flyway integration, observes `Startup` with a `@Priority` lower than the one of `DoerLifecycle`, so that CDI calls it first, and runs `Flyway.configure().dataSource(ds).load().migrate()`. Flyway is a dependency of the runtime's `pom.xml`, not of Transit Sims: Transit Sims does not import `org.flywaydb`. In Quarkus and Spring Boot the migration runs before the `Startup` event / `ApplicationReadyEvent`, so nothing is written. Every runtime also needs `flyway-database-postgresql`.
+`FlywayMigration.java`, for the runtimes without a Flyway integration, observes `Startup` with `@Priority(Interceptor.Priority.LIBRARY_BEFORE)`, lower than the default priority of the observer in `DoerLifecycle` (`APPLICATION + 500`), so that CDI calls it first, and runs `Flyway.configure().dataSource(ds).load().migrate()`. Flyway is a dependency of the runtime's `pom.xml`, not of Transit Sims: Transit Sims does not import `org.flywaydb`. In Quarkus and Spring Boot the migration runs before Doer starts, so nothing is written. Every runtime also needs `flyway-database-postgresql`.
+
+**WildFly and Open Liberty** share an abstract `JakartaEeServerApp implements E2eApp`, which writes what the two servers have in common: the `pom.xml` of `ROOT.war` (`jakarta.jakartaee-api` provided; `doer`, `flyway-core`, `flyway-database-postgresql` and the Postgres driver in `WEB-INF/lib`), `Producers.java` and `FlywayMigration.java` (package `transitsims`, written into the work folder only). `WildflyApp` and `OpenLibertyApp` add the configuration of the server and `dockerRun`.
+
+`Producers.java` (`@ApplicationScoped`) gives what Jakarta EE has in JNDI but not as CDI beans, and a bean CDI does not discover:
+
+- `@Produces DataSource` from `@Resource(lookup = …)` of the data source of the server: `java:jboss/datasources/TransitSims` in WildFly, `jdbc/transitsims` in Open Liberty;
+- `@Produces Executor` from `@Resource ManagedExecutorService` (`java:comp/DefaultManagedExecutorService`): the threads of Doer get the context of the application, as the threads of a server must, and each task its own local transaction containment, so a connection Doer takes outside a transaction goes back to the pool when the task ends (Open Liberty). Not a cached thread pool of the `ManagedThreadFactory`: the containment of its threads never ends, and Open Liberty ran out of connections;
+- `@Produces @Singleton BeanKindSingleton`: `@jakarta.inject.Singleton` alone does not make a class a CDI bean (it is not a bean defining annotation, `@Named` neither), so a WAR without `beans.xml` (bean discovery mode `annotated`) does not discover it. Quarkus does; a producer in Transit Sims would make it ambiguous there.
+
+WildFly replaces only system properties in its own descriptors (`-ds.xml`), neither `${env.…}` nor environment variables, also not in a properties file given with `-P`. So the start command passes `-De2e.db.url="$E2E_DB_URL"` and the others. The start script `standalone.sh` of the image runs Java in the background (`LAUNCH_JBOSS_IN_BACKGROUND`, set in the image) and turns its exit code after SIGTERM (143) into 0; in the foreground it runs Java without `exec`, and the signals of the container do not reach it. So the container runs a copy of the script with `exec` before Java, in the foreground: Java gets the signals, and its exit code is the one of the container, as a container in Kubernetes must. RESTEasy of WildFly writes JSON with Jackson unless `resteasy.preferJacksonOverJsonB` is `false` (`web.xml`); Transit Sims uses JSON-B.
+
+Open Liberty: a data source of the `server.xml` cannot use the driver of the WAR, so the driver is also a file next to `server.xml`; without `contextRoot="/"` the context root is the name of the WAR; the console has no INFO messages by default, which the tests read; Flyway finds a classpath location in WebSphere and Open Liberty only by an empty file `flyway.location` in it. Its start script passes SIGTERM and the exit code on as it is.
 
 REST is served by Jersey (`spring-boot-starter-jersey`), not by Spring MVC: the endpoints of Transit Sims stay JAX-RS, as in every other runtime. JSON is JSON-B and JSON-P (`jersey-media-json-binding`, `jersey-media-json-processing`); `jersey-media-json-jackson` is excluded from the starter, because Transit Sims uses JSON-B annotations. `@ApplicationPath("/api")` is repeated as `spring.jersey.application-path=/api`: Spring Boot reads the path from the `ResourceConfig` bean, not from the `Application` of Transit Sims.
 
@@ -552,17 +564,56 @@ Case by case, each decided as a line in `SpringBootMain.java`, a fix in Doer, or
 **4.5 CI**
 
 - [x] `spring-boot` in the matrix of the `e2e` job.
-- [ ] **Check:** the `e2e` job is green for both runtimes.
+- [x] **Check:** the `e2e` job is green for both runtimes.
 
 ### 5. Jakarta EE servers: WildFly, Open Liberty
 
-Detailed when it is next.
+WildFly 41 (`quay.io/wildfly/wildfly:41.0.1.Final-jdk25`) and Open Liberty 26.0.0.10 (`icr.io/appcafe/open-liberty:26.0.0.10-full-java25-openj9-ubi-minimal`; Docker Hub has no Java 25 image of Open Liberty), both Jakarta EE 11. Open Liberty runs on OpenJ9, the other runtimes on HotSpot. Transit Sims does not change: what a server needs is in files written into the work folder only, as `SpringBootMain.java` is.
 
-- [ ] `Producers.java` and `FlywayMigration.java` as shared constants in the test code.
-- [ ] `WildflyApp`: WAR, `WEB-INF/transitsims-ds.xml`, `ROOT.war` mounted to `standalone/deployments` of the WildFly image.
-- [ ] `OpenLibertyApp`: WAR, `server.xml`, `ROOT.war` and `server.xml` mounted to `config/` of the Open Liberty image.
-- [ ] **Check:** all `*E2E` classes pass with `wildfly` and with `open-liberty`, three runs in a row each.
-- [ ] Both in the CI matrix. **Check:** the `e2e` job is green for all runtimes.
+**5.1 Design** ([What each runtime writes](#what-each-runtime-writes))
+
+- [x] The two servers share an abstract `JakartaEeServerApp implements E2eApp`: the WAR `pom.xml` (`ROOT.war`; `jakarta.jakartaee-api` provided; `doer`, `flyway-core`, `flyway-database-postgresql` and the Postgres driver in `WEB-INF/lib`), `Producers.java` and `FlywayMigration.java`. `WildflyApp` and `OpenLibertyApp` add the configuration of the server and `dockerRun`.
+- [x] `Producers.java` (package `transitsims`, `@ApplicationScoped`): `@Produces DataSource` from `@Resource(lookup = "java:jboss/datasources/TransitSims")` or `jdbc/transitsims`, the JNDI name is a parameter; `@Produces Executor` from `@Resource ManagedExecutorService` (`java:comp/DefaultManagedExecutorService`): the threads of Doer get the context of the application, as the threads of a server must.
+- [x] `FlywayMigration.java` (package `transitsims`, `@ApplicationScoped`): `@Observes @Priority(Interceptor.Priority.LIBRARY_BEFORE) Startup` → `Flyway.configure().dataSource(ds).load().migrate()`; `DoerLifecycle` observes with the default priority (`APPLICATION + 500`), so CDI calls Flyway first.
+- [x] WildFly: `WEB-INF/transitsims-ds.xml` with `${env.E2E_DB_URL}`, `${env.E2E_DB_USER}`, `${env.E2E_DB_PASSWORD}` (WildFly replaces properties in its own descriptors by default; corrected in 5.4: system properties only) and the driver of the WAR, `ROOT.war_org.postgresql.Driver_<major>_<minor>`. `ROOT.war` is mounted to `standalone/deployments/`; the image command (`standalone.sh -b 0.0.0.0`) is kept.
+- [x] Open Liberty: `server.xml` with the features (`webProfile-11.0`, `jdbc-4.3`), `httpEndpoint` on 8080, the data source `jdbc/transitsims` with `${env.E2E_DB_*}`, the Postgres driver as a `library` and `webApplication` with `contextRoot="/"` (otherwise the context root is the name of the WAR). A data source of `server.xml` cannot use the driver of the WAR, so the work folder copies the driver to `target/liberty/` (`maven-dependency-plugin`), and `ROOT.war`, `server.xml` and the driver are mounted to `/config/`.
+- [x] **Check:** the wildfly and open-liberty rows of the table, the paragraph on `FlywayMigration.java` and a new paragraph on `Producers.java` in [What each runtime writes](#what-each-runtime-writes) say the above.
+
+**5.2 `WildflyApp` and `SmokeE2E`**
+
+- [x] `JakartaEeServerApp`, `WildflyApp`; `E2eEnvironment.app` knows `wildfly`.
+- [x] **Check:** `SmokeE2E` passes with `-Ddoer.e2e.runtime=wildfly`, and again with `-Ddoer.e2e.skip-build=true`: the runtime is `wildfly`, V1–V4 are migrated by `FlywayMigration` before Doer starts, the restart exits with 143: the server stops on the SIGTERM of Docker and its start script passes on the exit code of Java, as a container in Kubernetes must. `grep -rE "import (org\.flywaydb|org\.jboss|io\.openliberty|com\.ibm)" src/test/resources/e2e` finds nothing.
+
+**5.3 `OpenLibertyApp` and `SmokeE2E`**
+
+- [x] `OpenLibertyApp`; `E2eEnvironment.app` knows `open-liberty`.
+- [x] **Check:** `SmokeE2E` passes with `-Ddoer.e2e.runtime=open-liberty`, and again with `-Ddoer.e2e.skip-build=true`; the restart exits with 143.
+
+**5.4 What the servers serve differently from Quarkus**
+
+Case by case, as in 4.3: a line in the configuration written by the test, a fix in Doer, or a case that the server does not support; each decision goes to *Decisions* of [e2e-test-app.md](e2e-test-app.md#decisions).
+
+- [x] SIGTERM and the exit code: 143 is required of every runtime. If the start script of a server does not pass SIGTERM on to Java, or not its exit code (`java …` instead of `exec java …`), the container misbehaves in Kubernetes: that is an error of the start script, and the test fixes how the container is started (the command or the environment of `dockerRun`), never the expected exit code. Found: `standalone.sh` of WildFly turns 143 into 0; the container runs a copy of it with `exec` before Java. Open Liberty passes 143 on.
+- [x] The `ManagedExecutorService`: expected to be too small for Doer. It is not, and it must stay: a cached thread pool of the `ManagedThreadFactory` was tried, and Open Liberty ran out of connections, because the local transaction containment of its threads never ends.
+- [x] `@Inject Executor`: no server gives a bean of the type `Executor`; the producer stays.
+- [x] Flyway finds `db/migration` in the WAR: the VFS of WildFly works; in Open Liberty Flyway needs an empty `db/migration/flyway.location`.
+- [x] Found: WildFly replaces only system properties in `-ds.xml` (not `${env.…}`, not from a `-P` file either): the start command passes `-De2e.db.*`.
+- [x] Found: `@jakarta.inject.Singleton` alone does not make a CDI bean (nor with `@Named`): `Producers.java` produces `BeanKindSingleton`.
+- [x] Found: RESTEasy of WildFly writes JSON with Jackson: `resteasy.preferJacksonOverJsonB=false` in `web.xml`. The console of Open Liberty has no INFO messages: `consoleLogLevel="INFO"`.
+- [x] Found: the caller in `task_logs` was a transaction interceptor of the server: Doer skips `com.arjuna.`, `com.ibm.`, `io.openliberty.` too.
+- [x] Found: in Open Liberty a connection taken outside a transaction stays with the request; `BusResource` needed two at once, and concurrent boardings timed out on the pool. Fixed in Transit Sims: `BusRepository` is `@Transactional`.
+- [x] Found: a log of WildFly ends without a line break; `AppNode` writes its separators on a line of their own.
+- [x] **Check:** `BeanKindsE2E`, `TransactionsE2E`, `CoordinatedUpdateE2E` pass with `wildfly` and with `open-liberty`.
+
+**5.5 All `*E2E` classes**
+
+- [x] What else fails is fixed in the test code or in the configuration written by the test, or decided as in 5.4. A task left `in_progress` by a doer method that ran at the stop of a node is the open question, not fixed here.
+- [x] **Check:** all `*E2E` classes pass with `wildfly` and with `open-liberty`, three runs in a row each, one of them with `-Dfailsafe.runOrder=random`; all `*E2E` classes still pass with `quarkus` and `spring-boot`; `mvn verify` passes.
+
+**5.6 CI**
+
+- [x] `wildfly` and `open-liberty` in the matrix of the `e2e` job.
+- [ ] **Check:** the `e2e` job is green for all runtimes.
 
 ### 6. Jetty
 
