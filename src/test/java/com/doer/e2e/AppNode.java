@@ -27,6 +27,11 @@ import org.testcontainers.DockerClientFactory;
  */
 class AppNode {
     static final int STOP_TIMEOUT_SECONDS = 60;
+    /**
+     * CPUs of a container, as on a runner of GitHub Actions: a pool of a runtime sized by the number of processors is
+     * then as small as in CI.
+     */
+    static final String CPUS = "4";
 
     final int node;
     final int port;
@@ -38,6 +43,7 @@ class AppNode {
     private final Map<String, String> env;
     private final E2eApp.DockerRun dockerRun;
     private Process process;
+    private String name;
     private int starts;
 
     AppNode(String runtime, int node, Path workdir, String network, Map<String, String> env,
@@ -71,9 +77,9 @@ class AppNode {
             throw new IllegalStateException("Node " + node + " is already started");
         }
         starts++;
-        String name = "transitsims-" + runtime + "-" + node + "-" + starts;
+        name = "transitsims-" + runtime + "-" + node + "-" + starts;
         List<String> command = new ArrayList<>(List.of("docker", "run", "--rm", "--name", name,
-                "--network", network, "-p", "127.0.0.1:" + port + ":8080"));
+                "--network", network, "-p", "127.0.0.1:" + port + ":8080", "--cpus", CPUS));
         // Ryuk removes the container when the test JVM ends, as it does with Testcontainers' own containers
         DockerClientFactory.DEFAULT_LABELS.forEach((k, v) -> command.addAll(List.of("--label", k + "=" + v)));
         command.addAll(List.of("--label",
@@ -115,6 +121,18 @@ class AppNode {
         process = null;
         separator(String.format(Locale.ROOT, "node %s stopped in %.1f s, exit code %s", node, seconds, exitCode));
         return exitCode;
+    }
+
+    /**
+     * Sends SIGQUIT to the application: a HotSpot JVM writes the dump of its threads to stdout, into the log of the node;
+     * OpenJ9 (Open Liberty) writes a javacore file in the container instead.
+     */
+    void threadDump() throws IOException, InterruptedException {
+        if (process == null) {
+            throw new IllegalStateException("Node " + node + " is not started");
+        }
+        separator("node " + node + " thread dump");
+        new ProcessBuilder("docker", "kill", "--signal=QUIT", name).inheritIO().start().waitFor();
     }
 
     /** The exit code if {@code docker run} has exited by itself, or null. */

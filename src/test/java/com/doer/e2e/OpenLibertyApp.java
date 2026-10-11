@@ -77,6 +77,11 @@ class OpenLibertyApp extends JakartaEeServerApp {
                     <!-- The INFO messages of the application on the console, as in the other runtimes -->
                     <logging consoleLogLevel="INFO"/>
 
+                    <!-- The ManagedExecutorService runs on this pool, which starts with as many threads as processors (4 on
+                         a runner of GitHub Actions) and adds them slowly: Doer would run fewer tasks at once than its
+                         limits. 200, as the pool of Quarkus. -->
+                    <executor coreThreads="200"/>
+
                     <httpEndpoint id="defaultHttpEndpoint" host="*" httpPort="8080" httpsPort="-1"/>
 
                     <library id="postgresql">
