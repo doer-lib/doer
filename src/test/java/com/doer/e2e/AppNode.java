@@ -4,6 +4,7 @@ import static java.nio.file.StandardOpenOption.APPEND;
 import static java.nio.file.StandardOpenOption.CREATE;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
 import java.lang.ProcessBuilder.Redirect;
 import java.net.ServerSocket;
@@ -132,11 +133,25 @@ class AppNode {
         }
     }
 
-    /** Appends a separator line with the timestamp to both log files; in UTC, as the logs of the containers. */
+    /**
+     * Appends a separator line with the timestamp to both log files; in UTC, as the logs of the containers. On a line of
+     * its own: a log may end without a line break (WildFly ends it with an ANSI reset).
+     */
     private void separator(String text) throws IOException {
         String line = "==== " + Instant.now().truncatedTo(ChronoUnit.MILLIS) + " " + text + " ====\n";
-        Files.writeString(out, line, CREATE, APPEND);
-        Files.writeString(err, line, CREATE, APPEND);
+        for (Path log : List.of(out, err)) {
+            Files.writeString(log, (endsWithLineBreak(log) ? "" : "\n") + line, CREATE, APPEND);
+        }
+    }
+
+    private static boolean endsWithLineBreak(Path log) throws IOException {
+        if (!Files.exists(log) || Files.size(log) == 0) {
+            return true;
+        }
+        try (RandomAccessFile file = new RandomAccessFile(log.toFile(), "r")) {
+            file.seek(file.length() - 1);
+            return file.read() == '\n';
+        }
     }
 
     private static int freePort() {

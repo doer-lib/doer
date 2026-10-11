@@ -1070,6 +1070,9 @@ public abstract class DoerService {
                     fullClassName.startsWith("org.springframework.") ||
                     fullClassName.startsWith("org.glassfish.") ||
                     fullClassName.startsWith("com.sun.ejb.") ||
+                    fullClassName.startsWith("com.arjuna.") ||
+                    fullClassName.startsWith("com.ibm.") ||
+                    fullClassName.startsWith("io.openliberty.") ||
                     fullClassName.startsWith("jakarta.") ||
                     fullClassName.startsWith("javax.") ||
                     fullClassName.startsWith("java.lang.reflect.") ||
