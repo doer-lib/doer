@@ -63,10 +63,18 @@ class DoerMethodsE2E extends E2eTestBase {
     }
 
     @Test
-    void task_inserted_by_doer_method_should_be_run() {
+    void task_inserted_by_doer_method_should_be_run() throws Exception {
         resetServer();
         long taskId = pushTask("Doer method calls insert");
-        assertEquals("Doer method calls insert done", waitTaskStatus(taskId, "Doer method calls insert done"));
+        String status = waitTaskStatus(taskId, "Doer method calls insert done");
+        if (!"Doer method calls insert done".equals(status) && !E2eEnvironment.isExternal()) {
+            // Once in CI, the doer method did not end in 2 s, and the task it inserts was not in the database
+            E2eEnvironment.threadDump(1);
+        }
+        assertEquals("Doer method calls insert done", status, () -> "tasks (id, status, in progress): "
+                + selectStringValue("SELECT string_agg(id || ' ' || coalesce(status, '-') || ' ' || in_progress, ', '"
+                        + " ORDER BY id) FROM tasks")
+                + "; the thread dump of node 1 is in its log");
         Long insertedId = selectLongValue("SELECT max(id) FROM tasks WHERE id <> " + taskId);
         assertEquals("Doer method calls inserted done",
                 waitTaskStatus(insertedId, "Doer method calls inserted done"));
