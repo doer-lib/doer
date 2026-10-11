@@ -1,10 +1,10 @@
 # E2E test application: Transit Sims
 
-Status: proposed
+Status: implemented
 
 ## What it is
 
-Transit Sims is a small Jakarta EE backend application that uses Doer the way a Doer user would: CDI beans with doer methods, loaders and savers, REST endpoints, JDBC and calls to external services. It simulates buses and passengers on a city transport network; see [transit-sims.md](transit-sims.md). It replaces CarWash, the first test application.
+Transit Sims is a small Jakarta EE backend application that uses Doer the way a Doer user would: CDI beans with doer methods, loaders and savers, REST endpoints, JDBC and calls to external services. It simulates buses and passengers on a city transport network; see [transit-sims.md](transit-sims.md). It replaced CarWash, the first test application.
 
 It exists to test Doer and is not part of the library. It has to answer two questions about the same code (see [e2e-design.md](e2e-design.md)):
 
@@ -39,7 +39,7 @@ The functional code is not stretched to cover a case. A case it covers on its ow
 
 ### In the suites and out of them
 
-In step 3: the backend, which means the REST API, and the Sim and Bus tasks. Out of step 3:
+In the suites: the backend, which means the REST API, and the Sim and Bus tasks. Out of them:
 
 - **the frontend**. The suites do not use it.
 - **the SSE stream of events**. An in-memory SSE broadcaster reaches only the clients of its own node, but a bus task runs on any node. Events across nodes need a design of their own, for example a table of events or Postgres `LISTEN`/`NOTIFY`. Until then the clients poll `GET …/buses`.
@@ -169,33 +169,37 @@ All of them are in `transitsims.validation`. The statuses carry the name of the 
 
 | Aspect | Classes | Tested by |
 |---|---|---|
-| generated code | `GeneratedCodeMethods`, `GeneratedCodeFailures`, `GeneratedCodeTaskData`, `TaskRunner`, `CallTrace` (as today) | `GeneratedCodeTest` |
-| kinds of beans | `BeanKindSingleton`, `BeanKindProduced` with `BeanKindProducers`, `BeanKindIntercepted` with the binding `@BeanKindTraced`, `BeanKindConstructor`, `BeanKinds.Nested`, `BeanKindInherited` extends `BeanKindBase` | `BeanKindsE2E` |
-| doer methods | `DoerMethodStatuses` (hand-over to `DoerMethodNextClass`, delay; later several `@AcceptStatus`, constants of `DoerMethodStatusNames`, `switch`, lambda), `DoerMethodCalls` (calls `DoerService`) | `DoerMethodsE2E` |
+| generated code | `GeneratedCodeMethods`, `GeneratedCodeFailures`, `GeneratedCodeTaskData`, `TaskRunner`, `CallTrace` | `GeneratedCodeTest` |
+| kinds of beans | `BeanKindSingleton`, `BeanKindProduced` with `BeanKindProducers`, `BeanKindIntercepted` with the binding `@BeanKindTraced` and `BeanKindTracedInterceptor`, `BeanKindConstructor`, `BeanKinds.Nested`, `BeanKindInherited` extends `BeanKindBase`; run through `TaskRunner`, the calls in `CallTrace` | `BeanKindsE2E` |
+| doer methods | `DoerMethodStatuses` (hand-over to `DoerMethodNextClass`, delay, constants of `DoerMethodStatusNames`, `switch`, lambda), `DoerMethodCalls` (inserts a task with `DoerService`) | `DoerMethodsE2E` |
 | concurrency | `ConcurrencyLimitOne` (limit 1 on the class, long-running methods), `ConcurrencyQueues` (`@Dependent`, limit 10 on the class and 2 on a method, class → method → class, a slow and a failing method in one domain for the queues), `ConcurrencyGroupFirst`, `ConcurrencyGroupSecond` (one group in two classes, on a class and on a method) | `ConcurrencyE2E` |
 | transactions | `TransactionMethods`: the loader and saver of the task data `TransactionData`, which write `demo_log_tasks` with `txid_current()`, in the same bean as the doer methods; `updateAndBumpVersion` in a doer method; a doer method with its own `@Transactional` | `TransactionsE2E`, `CoordinatedUpdateE2E` |
-| task data | `TaskDataRecord` (a record, a loader without a saver) | `DoerMethodsE2E` |
+| task data | `TaskDataMethods`: the loader of the record `TaskDataRecord`, without a saver | `DoerMethodsE2E` |
 | errors | `ErrorMethods` (checked, runtime, `@RetryPolicy` with a fallback and without a duration, cause and suppressed; describer of `RuntimeException`), `ErrorDescribers` (describer of `Exception`, a bean of its own) | `ErrorsE2E` |
 | external service | `ExternalServiceMethods` (JAX-RS client to WireMock: success, error, timeout), `ExternalServiceConfig` (URL from `E2E_EXTERNAL_URL`) | `ExternalServiceE2E` |
-| validation endpoints | `ValidationResource` (`/api/validation`; also the doer methods of a JAX-RS resource) | all `*E2E` |
+| validation endpoints | `ValidationResource` (`/api/validation`; `@ApplicationScoped`, also the doer methods of a JAX-RS resource) | all `*E2E` |
 
 `ValidationResource.reset` also deletes `sims` and `buses`, because a test of an aspect counts all rows of `tasks` and `task_logs`.
 
 ## The e2e tests
 
-| Today | In Transit Sims |
+| Class | Checks |
 |---|---|
-| `SmokeE2E` | unchanged; migrations V1–V4 |
-| `GeneratedCodeE2E` | unchanged |
-| `DoerMethodsE2E`, `ConcurrencyE2E`, `TransactionsE2E`, `ErrorsE2E` | the same checks on the specialized classes of their aspect, and new checks for the cases marked `—` |
-| `CoordinatedUpdateE2E` | unchanged, on `ValidationResource` |
-| — | `BeanKindsE2E`, `ExternalServiceE2E`: specialized classes |
-| — | `TransitSimsE2E`: a small network. Buses go from stop to stop. Concurrent boarding respects the capacity and the stop. A pause stops the buses. The simulation completes. |
-| — | `LifecycleE2E` on Transit Sims: a node stops while tasks are in progress and is restarted; two nodes run one simulation. |
+| `SmokeE2E` | the application answers with its runtime, migrations V1–V4, a restart |
+| `GeneratedCodeE2E` | [`GeneratedCodeTest`](#generated-code-generatedcodetest) in the runtime |
+| `BeanKindsE2E` | kinds of beans, through `TaskRunner` |
+| `DoerMethodsE2E` | doer methods, sources of statuses, `DoerService` called from a doer method, a record as task data |
+| `ConcurrencyE2E` | `@ConcurrencyLimit`, `@ConcurrencyGroup`, the queues of Doer |
+| `TransactionsE2E` | transactions around doer methods, loaders and savers |
+| `CoordinatedUpdateE2E` | `facilitateCoordinatedUpdate`, on `ValidationResource` |
+| `ErrorsE2E` | exception describers, retries, `@RetryPolicy` |
+| `ExternalServiceE2E` | a call of an external service on WireMock: success, error, timeout |
+| `TransitSimsE2E` | a small network: buses go from stop to stop, concurrent boarding respects the capacity and the stop, a pause stops the buses, the simulation completes |
+| `LifecycleE2E` | a node restarted while a simulation runs; two nodes run one simulation |
 
 ## What Transit Sims must cover
 
-`—` in the first column marks a case today's code does not cover yet. **Code** points to where today's code covers it. **Transit Sims** is the class that covers it after step 3: a functional class (see [Classes](#classes)) or a specialized one.
+**Code** points to the functional class (see [Classes](#classes)) or the specialized class that covers the case. This is the map of the cases: a new case gets a row here and its class in Transit Sims.
 
 ### Generated code: `GeneratedCodeTest`
 
@@ -203,16 +207,16 @@ What `runTask` of the generated service does with a task. Not the annotations: t
 
 The doer methods, loaders and savers for these checks are in the validation package, in classes and statuses named after what they check (`Generated code 1 param`, `Generated code 2 params`, …). The functional beans know nothing of the tests. Each check is a test method of [`GeneratedCodeTest`](src/test/java/com/doer/generatedcode/GeneratedCodeTest.java).
 
-| | Case | Code |
-|---|---|---|
-| | the beans are injected into the generated service (`_inject_*`), and the method of the right bean is called | `GeneratedCodeMethods`, `GeneratedCodeFailures`, `GeneratedCodeTaskData` |
-| | doer method with 1 parameter: `Task` | `Generated code 1 param`: `GeneratedCodeMethods.oneParam(Task)` |
-| | doer method with 2 parameters, `Task` not first; 1 loader, in a bean without doer methods | `Generated code 2 params`: `GeneratedCodeMethods.twoParams(GeneratedCodeFirstData, Task)` ← `GeneratedCodeTaskData.loadFirst` |
-| | doer method with 3 parameters; 2 loaders, in different beans | `Generated code 3 params`: `GeneratedCodeMethods.threeParams(Task, GeneratedCodeFirstData, GeneratedCodeSecondData)` ← `GeneratedCodeTaskData.loadFirst`, `GeneratedCodeMethods.loadSecond` |
-| | savers: called after the method with the objects the loaders returned; not called after an exception | `GeneratedCodeTaskData.saveFirst`, `GeneratedCodeMethods.saveSecond` |
-| | the method throws a checked exception or a `RuntimeException`: `failingSince` is set, the status goes back to the initial one | `Generated code checked exception`, `Generated code runtime exception`: `GeneratedCodeFailures` |
-| | the method still fails 1 day after `failingSince`, no `@RetryPolicy`: the status is set to `null` (and not before) | `Generated code runtime exception`: `GeneratedCodeFailures.runtimeException` |
-| | the method still fails after `@RetryPolicy(duration)`: the status is set to `fallbackStatus` (and not before) | `Generated code retry policy`: `GeneratedCodeFailures.retryPolicy` |
+| Case | Code |
+|---|---|
+| the beans are injected into the generated service (`_inject_*`), and the method of the right bean is called | `GeneratedCodeMethods`, `GeneratedCodeFailures`, `GeneratedCodeTaskData` |
+| doer method with 1 parameter: `Task` | `Generated code 1 param`: `GeneratedCodeMethods.oneParam(Task)` |
+| doer method with 2 parameters, `Task` not first; 1 loader, in a bean without doer methods | `Generated code 2 params`: `GeneratedCodeMethods.twoParams(GeneratedCodeFirstData, Task)` ← `GeneratedCodeTaskData.loadFirst` |
+| doer method with 3 parameters; 2 loaders, in different beans | `Generated code 3 params`: `GeneratedCodeMethods.threeParams(Task, GeneratedCodeFirstData, GeneratedCodeSecondData)` ← `GeneratedCodeTaskData.loadFirst`, `GeneratedCodeMethods.loadSecond` |
+| savers: called after the method with the objects the loaders returned; not called after an exception | `GeneratedCodeTaskData.saveFirst`, `GeneratedCodeMethods.saveSecond` |
+| the method throws a checked exception or a `RuntimeException`: `failingSince` is set, the status goes back to the initial one | `Generated code checked exception`, `Generated code runtime exception`: `GeneratedCodeFailures` |
+| the method still fails 1 day after `failingSince`, no `@RetryPolicy`: the status is set to `null` (and not before) | `Generated code runtime exception`: `GeneratedCodeFailures.runtimeException` |
+| the method still fails after `@RetryPolicy(duration)`: the status is set to `fallbackStatus` (and not before) | `Generated code retry policy`: `GeneratedCodeFailures.retryPolicy` |
 
 #### The same tests in `*GeneratedCodeITCase` and in e2e
 
@@ -244,87 +248,88 @@ Requests and responses are JSON objects, one per line ([JSON Lines](https://json
 
 ### Beans with doer methods
 
-| | Case | Why it matters | Code | Transit Sims |
-|---|---|---|---|---|
-| | `@ApplicationScoped` bean | the generated service gets a client proxy | `BusDriver`, `ConcurrencyLimitOne`, `TransactionMethods`, `ErrorMethods` | `BusDriver` |
-| | `@Dependent` bean | no proxy; one instance for the lifetime of the generated service, shared by all Doer threads | `SimSupervisor`, `ConcurrencyQueues` | `SimSupervisor` |
-| — | `@jakarta.inject.Singleton` bean | pseudo-scope, no proxy; Spring and CDI treat it differently | | `BeanKindSingleton` |
-| — | bean created by a producer (`@Produces` method or field) | the class has no bean-defining annotation; the generated service injects it by type | | `BeanKindProduced` ← `BeanKindProducers` |
-| — | bean with an interceptor (an interceptor binding of Transit Sims on the class or on a doer method) | the doer method is called through the interceptor chain | | `BeanKindIntercepted`, `@BeanKindTraced` |
-| — | doer method with `@Transactional` of its own | `runTask` is `NOT_SUPPORTED`; the method's own transaction is separate from Doer's status update | | `TransactionMethods` |
-| — | bean with constructor injection (`@Inject` constructor) | CDI needs a no-arg constructor for the proxy as well; `Main` must still be able to build it | | `BeanKindConstructor` |
-| | JAX-RS resource with doer methods | its default scope differs by runtime (singleton in Quarkus, per request elsewhere) | `ValidationResource` (no scope annotation) | `ValidationResource` |
-| | bean in another package | imports and field names in the generated service | every specialized class (`transitsims.validation`) | every specialized class |
-| — | public static nested class | name of the class in the generated service | | `BeanKinds.Nested` |
-| — | doer methods inherited from an abstract base class | which class the generated service calls | | `BeanKindInherited` extends `BeanKindBase` |
+| Case | Why it matters | Code |
+|---|---|---|
+| `@ApplicationScoped` bean | the generated service gets a client proxy | `BusDriver`, `ConcurrencyLimitOne`, `TransactionMethods`, `ErrorMethods` |
+| `@Dependent` bean | no proxy; one instance for the lifetime of the generated service, shared by all Doer threads | `SimSupervisor`, `ConcurrencyQueues` |
+| `@jakarta.inject.Singleton` bean | pseudo-scope, no proxy; Spring and CDI treat it differently | `BeanKindSingleton` |
+| bean created by a producer (`@Produces` method or field) | the class has no bean-defining annotation; the generated service injects it by type | `BeanKindProduced` ← `BeanKindProducers.produce` |
+| bean with an interceptor (an interceptor binding of Transit Sims on the class or on a doer method) | the doer method is called through the interceptor chain | `BeanKindIntercepted.run`, `@BeanKindTraced`, `BeanKindTracedInterceptor` |
+| doer method with `@Transactional` of its own | Doer calls the method outside a transaction; the method's own transaction is separate from Doer's status update | `TransactionMethods.ownTransaction` |
+| bean with constructor injection (`@Inject` constructor) | CDI needs a no-arg constructor for the proxy as well; `Main` must still be able to build it | `BeanKindConstructor` |
+| `@ApplicationScoped` JAX-RS resource with doer methods | without a scope annotation a JAX-RS resource is a singleton in Quarkus, per request in WildFly and Open Liberty, and no bean in Spring Boot | `ValidationResource` |
+| bean in another package | imports and field names in the generated service | every specialized class (`transitsims.validation`) |
+| public static nested class | name of the class in the generated service | `BeanKinds.Nested` |
+| doer methods inherited from an abstract base class | which class the generated service calls | `BeanKindInherited` extends `BeanKindBase` |
 
 ### Doer methods
 
-| | Case | Code | Transit Sims |
-|---|---|---|---|
-| | several `@AcceptStatus` on one method | `ConcurrencyLimitOne.slow` | `ConcurrencyLimitOne.slow` |
-| | `@AcceptStatus` with `delay` | `BusDriver.step`, `SimSupervisor.checkCompletion`, `DoerMethodStatuses.delayed` | `BusDriver.step`, `SimSupervisor.checkCompletion` |
-| | status set to `null` (end of the process) | `SimSupervisor.checkCompletion`, `BusDriver.step`, `BusDriver.resume`, `ValidationResource.second` | `SimSupervisor.checkCompletion`, `BusDriver.step` |
-| — | statuses from constants of another class, from `switch` and lambdas | constants: `BusStatus`, `SimStatus` | `BusStatus`, `SimStatus`; `DoerMethodStatuses` |
-| — | `@RetryPolicy` without `duration` (retries forever) | | `ErrorMethods` |
-| | calls `DoerService` itself (insert a new task, `updateAndBumpVersion`) | `TransactionMethods.updateInMethod` | `DoerMethodCalls`, `TransactionMethods` |
-| — | calls an external service (JAX-RS client to WireMock): success, error, timeout | | `ExternalServiceMethods` |
-| | long-running method | `ConcurrencyLimitOne`, `ConcurrencyQueues.slow` (`Thread.sleep`) | `ConcurrencyLimitOne`, `ConcurrencyQueues` |
-| | the status stays the same; the method runs again after the delay | `BusDriver.step`, `SimSupervisor.checkCompletion` | `BusDriver.step`, `SimSupervisor.checkCompletion` |
+| Case | Code |
+|---|---|
+| several `@AcceptStatus` on one method | `ConcurrencyLimitOne.slow` |
+| `@AcceptStatus` with `delay` | `BusDriver.step`, `SimSupervisor.checkCompletion`, `DoerMethodStatuses.delayed` |
+| status set to `null` (end of the process) | `SimSupervisor.checkCompletion`, `BusDriver.step`, `BusDriver.resume`, `ValidationResource.second` |
+| statuses from constants of another class, from `switch` and lambdas | `BusStatus`, `SimStatus`; `DoerMethodStatuses` with `DoerMethodStatusNames` |
+| `@RetryPolicy` without `duration` (retries forever) | `ErrorMethods.retryForever` |
+| calls `DoerService` itself (insert a new task, `updateAndBumpVersion`) | `DoerMethodCalls.insertTask`, `TransactionMethods.updateInMethod` |
+| calls an external service (JAX-RS client to WireMock): success, error, timeout | `ExternalServiceMethods` |
+| long-running method | `ConcurrencyLimitOne`, `ConcurrencyQueues.slow` (`Thread.sleep`) |
+| the status stays the same; the method runs again after the delay | `BusDriver.step`, `SimSupervisor.checkCompletion` |
 
 ### Concurrency
 
-| | Case | Code | Transit Sims |
-|---|---|---|---|
-| | `@ConcurrencyLimit` on a class and on a method of it | `ConcurrencyQueues`, `ConcurrencyQueues.chainMethod` | `ConcurrencyQueues` |
-| — | `@ConcurrencyGroup` on a class and on a method | | `ConcurrencyGroupFirst`, `ConcurrencyGroupSecond` |
-| — | one group shared by methods of several classes | | `ConcurrencyGroupFirst`, `ConcurrencyGroupSecond` |
-| | moving between domains: class → method → class | `ConcurrencyQueues.chainClass` → `chainMethod` → `chainClassAgain` | `ConcurrencyQueues` |
+| Case | Code |
+|---|---|
+| `@ConcurrencyLimit` on a class and on a method of it | `ConcurrencyQueues`, `ConcurrencyQueues.chainMethod` |
+| `@ConcurrencyGroup` on a class and on a method | `ConcurrencyGroupFirst`, `ConcurrencyGroupSecond.slow` |
+| one group shared by methods of several classes | `ConcurrencyGroupFirst`, `ConcurrencyGroupSecond` |
+| moving between domains: class → method → class | `ConcurrencyQueues.chainClass` → `chainMethod` → `chainClassAgain` |
 
 ### Task data
 
-| | Case | Code | Transit Sims |
-|---|---|---|---|
-| | loader and saver in the same bean as the doer method | `TransactionMethods.load`, `save` | `TransactionMethods` |
-| | loader and saver in another bean | `SimRepository`, `BusRepository`, `GeneratedCodeTaskData` | `GeneratedCodeTaskData`, `SimRepository`, `BusRepository` |
-| — | loader without a saver | | `TaskDataRecord` |
-| | loader and saver in a bean without doer methods | `SimRepository`, `BusRepository`, `GeneratedCodeTaskData` | `GeneratedCodeTaskData`, `SimRepository`, `BusRepository` |
-| | loader and saver in a repository bean (JDBC) | `SimRepository`, `BusRepository` | `SimRepository`, `BusRepository` |
-| | loader and saver join Doer's transaction | `demo_log_tasks` with `txid_current()` in `TransactionMethods` | `TransactionMethods` |
-| — | a record as task data | | `TaskDataRecord` |
-| | `facilitateCoordinatedUpdate` with and without task data, from a validation endpoint | `ValidationResource.coordinatedDataUpdate`, `coordinatedUpdateInTransaction` | `ValidationResource` |
-| | `facilitateCoordinatedUpdate` from a functional endpoint | `SimResource`, `BusResource` | `SimResource`, `BusResource` |
+| Case | Code |
+|---|---|
+| loader and saver in the same bean as the doer method | `TransactionMethods.load`, `save` |
+| loader and saver in another bean | `SimRepository`, `BusRepository`, `GeneratedCodeTaskData` |
+| loader without a saver | `TaskDataMethods.load` |
+| loader and saver in a bean without doer methods | `SimRepository`, `BusRepository`, `GeneratedCodeTaskData` |
+| loader and saver in a repository bean (JDBC) | `SimRepository`, `BusRepository` |
+| loader and saver join Doer's transaction | `demo_log_tasks` with `txid_current()` in `TransactionMethods` |
+| a record as task data | `TaskDataRecord` |
+| `facilitateCoordinatedUpdate` with and without task data, from a validation endpoint | `ValidationResource.coordinatedDataUpdate`, `coordinatedUpdateInTransaction` |
+| `facilitateCoordinatedUpdate` from a functional endpoint | `SimResource`, `BusResource` |
 
 The case "through a repository interface (JDBC in e2e, in memory in `Main`)" was dropped: `Main` calls only the GeneratedCode* beans, so no in-memory implementation is needed.
 
 ### Exception describers
 
-| | Case | Code | Transit Sims |
-|---|---|---|---|
-| | in a bean of its own | `ErrorDescribers` | `ErrorDescribers` |
-| | in a bean with doer methods | `ErrorMethods.describeRuntimeException` | `ErrorMethods` |
-| | for a subtype (`RuntimeException`) next to one for `Exception` | `ErrorMethods.describeRuntimeException`, `ErrorDescribers.describeException` | `ErrorMethods`, `ErrorDescribers` |
-| — | exception with a cause and with suppressed exceptions | | `ErrorMethods` |
+| Case | Code |
+|---|---|
+| in a bean of its own | `ErrorDescribers` |
+| in a bean with doer methods | `ErrorMethods.describeRuntimeException` |
+| for a subtype (`RuntimeException`) next to one for `Exception` | `ErrorMethods.describeRuntimeException`, `ErrorDescribers.describeException` |
+| exception with a cause and with suppressed exceptions | `ErrorMethods.causeAndSuppressed` |
 
 ### REST endpoints
 
-| | Case | Code | Transit Sims |
-|---|---|---|---|
-| | functional endpoint that starts a business operation (inserts a task) | `SimResource.create` | `POST /api/sims` |
-| | `@Transactional` method that inserts tasks and writes Transit Sims data in one transaction (creating a simulation) | `SimRepository.create` | `SimRepository.create`, called by `POST /api/sims` |
-| | other tasks updated in the transaction of a coordinated update, with hijacking (start, pause, resume) | `SimResource` | `SimResource` |
-| | functional endpoint that does a coordinated update, called by many clients at once for the same task (boarding and alighting) | `BusResource.board`, `alight` | `BusResource` board, alight |
-| | validation endpoints: control Doer, read tasks, reset data, report the runtime | `ValidationResource` | `ValidationResource` |
+| Case | Code |
+|---|---|
+| functional endpoint that starts a business operation (inserts a task) | `SimResource.create` |
+| `@Transactional` method that inserts tasks and writes Transit Sims data in one transaction (creating a simulation) | `SimRepository.create` |
+| other tasks updated in the transaction of a coordinated update, with hijacking (start, pause, resume) | `SimResource` |
+| functional endpoint that does a coordinated update, called by many clients at once for the same task (boarding and alighting) | `BusResource.board`, `alight` |
+| validation endpoints: control Doer, read tasks, reset data, report the runtime | `ValidationResource` |
 
 ### Application lifecycle and configuration
 
-| | Case | Code | Transit Sims |
-|---|---|---|---|
-| | Doer started on `Startup`, stopped on `Shutdown` | `DoerLifecycle` | `DoerLifecycle` |
-| | restart with no tasks in progress | `SmokeE2E` | `SmokeE2E` |
-| — | stop with tasks in progress; restart picks them up | | `LifecycleE2E` on a running simulation |
-| — | two nodes on one database | | `LifecycleE2E`: one simulation, boarding through both nodes |
-| — | URLs of external services from environment variables | | `ExternalServiceConfig` |
+| Case | Code |
+|---|---|
+| Doer started on `Startup`, stopped on `Shutdown` | `DoerLifecycle` |
+| restart with no tasks in progress | `SmokeE2E` |
+| restart while a simulation runs; the restarted node runs it to the end | `LifecycleE2E.simulation_should_complete_after_node_restart` |
+| stop while a doer method runs; the task is not left in progress | not covered, see [Decisions](#decisions) |
+| two nodes on one database | `LifecycleE2E.two_nodes_should_run_one_simulation` |
+| URLs of external services from environment variables | `ExternalServiceConfig` |
 
 ## Decisions
 
@@ -335,6 +340,7 @@ These questions were open in the draft.
 
 - **Validation code in functional beans.** No. Validation is only in `transitsims.validation`, and the functional beans know nothing of the tests. `demo_log_tasks` is written only by `TransactionMethods`.
 - **External services.** Transit Sims calls none. The JAX-RS client, WireMock and configuration cases are covered by `ExternalServiceMethods` and `ExternalServiceConfig`.
-- **`@RequestScoped` beans and JAX-RS resources outside a request.** Not in step 3. Doer threads have no active request context, so a doer method in a `@RequestScoped` bean fails at the call. The documentation should say so. `ValidationResource` stays without a scope annotation, as the JAX-RS case. If a runtime makes it per request and that breaks, it is decided in that runtime's step.
+- **`@RequestScoped` beans and JAX-RS resources outside a request.** Not supported. Doer threads have no active request context, so a doer method in a `@RequestScoped` bean fails at the call. A JAX-RS resource without a scope annotation is per request in WildFly and Open Liberty, and in Spring Boot with Jersey it is no Spring bean, so the generated service cannot inject it. So `ValidationResource` gets `@ApplicationScoped`, the same bean in every runtime, and the documentation says that a JAX-RS resource with doer methods needs a scope annotation.
 - **Qualifiers.** Not in Transit Sims. The generated service injects without qualifiers, so a bean with a qualifier, or two beans of one type, is unsatisfied or ambiguous. That is a matter for the documentation, or for a check in the processor.
 - **Decorators and alternatives.** Out of scope.
+- **A doer method in progress when the node stops.** Not in step 3; see the open question in [e2e-design.md](e2e-design.md#open-questions). Found in 3.6 with a doer method of 3 s, stopped by SIGTERM in Quarkus: `DoerService.stop()` does not wait for the tasks in progress; Quarkus stops CDI and JTA, and only then its worker pool (`addLastShutdownTask`), which it interrupts after `quarkus.thread-pool.shutdown-interrupt` (10 s). The method ends, but the last transaction of Doer fails, and the task stays `in_progress` until the reset of stalled tasks (2 hours). A restart of a node while bus steps run is tested: a step takes milliseconds.

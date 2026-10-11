@@ -7,6 +7,7 @@ import com.doer.TaskDataLoader;
 import com.doer.TaskDataSaver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -15,7 +16,8 @@ import javax.sql.DataSource;
 /**
  * Transactions around doer methods, for TransactionsE2E and CoordinatedUpdateE2E. The loader and the saver of
  * {@link TransactionData} write a row of demo_log_tasks with the id of the current transaction, and the trigger on
- * tasks writes one for each update of a task: a test sees which of them ran in the same transaction.
+ * tasks writes one for each update of a task: a test sees which of them ran in the same transaction. A doer method with
+ * its own {@code @Transactional} writes two rows in its transaction.
  */
 @ApplicationScoped
 public class TransactionMethods {
@@ -49,23 +51,33 @@ public class TransactionMethods {
         task.setStatus("Transaction update in method done");
     }
 
+    /** Its own transaction, separate from the ones of Doer: Doer calls a doer method outside a transaction. */
+    @Transactional
+    @AcceptStatus("Transaction own")
+    public void ownTransaction(Task task) throws SQLException {
+        logTransaction(task, "TransactionOwn");
+        logTransaction(task, "TransactionOwn");
+        task.setStatus("Transaction own done");
+    }
+
     @TaskDataLoader
     public TransactionData load(Task task) throws SQLException {
-        logTransaction(task);
+        logTransaction(task, "TransactionData");
         return new TransactionData();
     }
 
     @TaskDataSaver
     public void save(Task task, TransactionData data) throws SQLException {
-        logTransaction(task);
+        logTransaction(task, "TransactionData");
     }
 
-    private void logTransaction(Task task) throws SQLException {
+    private void logTransaction(Task task, String objectType) throws SQLException {
         String sql = "insert into demo_log_tasks (object_type, task_id, in_progress, tx_id) "
-                + "values ('TransactionData', ?, ?, txid_current())";
+                + "values (?, ?, ?, txid_current())";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setLong(1, task.getId());
-            pst.setBoolean(2, task.isInProgress());
+            pst.setString(1, objectType);
+            pst.setLong(2, task.getId());
+            pst.setBoolean(3, task.isInProgress());
             pst.executeUpdate();
         }
     }

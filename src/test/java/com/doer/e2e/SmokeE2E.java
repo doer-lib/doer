@@ -51,19 +51,19 @@ public class SmokeE2E extends E2eTestBase {
     @Order(3)
     void node_should_restart() throws Exception {
         assumeFalse(E2eEnvironment.isExternal(), "no restarts of an external application");
+        // Other test classes may have restarted the node before: only the log of this restart is checked
+        long linesBefore = E2eEnvironment.appLog(1).lines().count();
 
         assertEquals(143, E2eEnvironment.stopNode(1), "exit code after SIGTERM");
         E2eEnvironment.startNode(1);
 
         given().get("/api/validation/info").then().statusCode(200);
-        List<String> log = E2eEnvironment.appLog(1).lines().toList();
+        List<String> log = E2eEnvironment.appLog(1).lines().skip(linesBefore).toList();
         List<String> separators = log.stream().filter(line -> line.startsWith("==== ")).toList();
-        assertEquals(3, separators.size(), () -> "separators: " + separators);
-        assertEquals(List.of(true, false, true), separators.stream().map(s -> s.contains(" started: ")).toList(),
-                () -> "separators: " + separators);
-        int secondStart = log.lastIndexOf(separators.get(2));
-        assertFalse(log.subList(secondStart + 1, log.size()).isEmpty(), "log of the second start");
-        assertFalse(log.subList(1, log.indexOf(separators.get(1))).isEmpty(), "log of the first start");
+        assertEquals(List.of(false, true), separators.stream().map(s -> s.contains(" started: ")).toList(),
+                () -> "separators of the stop and the start: " + separators);
+        int newStart = log.indexOf(separators.get(1));
+        assertFalse(log.subList(newStart + 1, log.size()).isEmpty(), "log of the new start");
 
         // The restarted node runs Doer as the application starts it, with the monitor: a delayed task is processed
         // without /api/validation/check
