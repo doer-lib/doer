@@ -14,16 +14,17 @@ Both questions are asked about the same code: **Transit Sims**, a Jakarta EE bac
 | `*GeneratedCodeITCase` | the annotation processor | JDKs × build tools (javac, Maven, Gradle) | adds its own `Main`, runs `GeneratedCodeTest` without a database |
 | e2e suite (`*E2E` classes) | the generated code in a deployed application (`GeneratedCodeE2E`: the same `GeneratedCodeTest`), and how the runtime serves it | runtimes (`quarkus`, `spring-boot`, `wildfly`, …), one JDK | adds DB migrations and a runtime setup, runs it in Docker, tests it over REST, JDBC and WireMock |
 
-This document describes only the infrastructure: the Transit Sims project, how each suite builds and runs it, and CI. What Transit Sims does and what exactly the suites check is designed in [e2e-test-app.md](e2e-test-app.md). Transit Sims replaces CarWash, the first test application, in [step 3](#3-transit-sims).
+This document describes only the infrastructure: the Transit Sims project, how each suite builds and runs it, and CI. What Transit Sims does and what exactly the suites check is designed in [e2e-test-app.md](e2e-test-app.md). Transit Sims replaced CarWash, the first test application, in [step 3](#3-transit-sims).
 
 `GeneratorITCase`, `GeneratorErrorsITCase`, `DoerServiceJdbcITCase` and the unit tests stay in the JDK matrix. The kinds of tests and how they are built are in [src/test/README.md](src/test/README.md).
 
-## Problems today
+## Problems it solves
 
-- **Only Quarkus is tested.** Nothing tells whether the generated service works where CDI, JTA or the `DataSource` behave differently: WildFly, Open Liberty, Spring Boot.
-- **`QuarkusITCase` runs in every JDK of the matrix**, so the slowest test is built and run 4 times, although it tests the runtime, not the JDK.
-- **The application is assembled in a fragile way.** `QuarkusITCase` generates a project with `quarkus:create` on every run, patches its `pom.xml` with regular expressions, and builds it twice to get the Flyway script.
-- **The processor and the runtime are tested on different code.** `CarWashITCase` has its own toy classes in text blocks, and `QuarkusITCase` uses `src/test/resources/e2e-code`. Code that compiles and runs in `CarWashITCase` is not the code that runs in Quarkus.
+- **Only Quarkus is tested.** Nothing tells whether the generated service works where CDI, JTA or the `DataSource` behave differently: WildFly, Open Liberty, Spring Boot. Steps 4–8 of the [Implementation plan](#implementation-plan).
+- Solved by steps 1–3:
+  - `QuarkusITCase` ran in every JDK of the matrix, so the slowest test was built and run 4 times, although it tests the runtime, not the JDK.
+  - The application was assembled in a fragile way: `QuarkusITCase` generated a project with `quarkus:create` on every run, patched its `pom.xml` with regular expressions, and built it twice to get the Flyway script.
+  - The processor and the runtime were tested on different code: `CarWashITCase` had its own toy classes in text blocks, and `QuarkusITCase` used `src/test/resources/e2e-code`.
 
 ## Overview
 
@@ -66,7 +67,7 @@ All endpoints, functional and validation, are in one application under `@Applica
 
 **Transit Sims imports only `com.doer`, Jakarta Web Profile APIs (CDI, JTA, JAX-RS, JSON-P, JSON-B) and `javax.sql`.** Nothing of Quarkus, Spring or WildFly. Then the same sources compile in `*GeneratedCodeITCase` and run in every runtime.
 
-Today's `DoerResource` breaks the rule with `io.quarkus.runtime.StartupEvent`; it is replaced by the CDI 4 `jakarta.enterprise.event.Startup` event (Jakarta EE 10), which Quarkus, WildFly and Open Liberty fire.
+So `DoerLifecycle` observes the CDI 4 `jakarta.enterprise.event.Startup` event (Jakarta EE 10), which Quarkus, WildFly and Open Liberty fire, not `io.quarkus.runtime.StartupEvent`.
 
 `Main` of `*GeneratedCodeITCase` calls only `TaskRunner` and the GeneratedCode* beans (see [e2e-test-app.md](e2e-test-app.md#the-same-tests-in-generatedcodeitcase-and-in-e2e)). Every other component is only created by `Main` and injected into the generated service, never called. So every component must be constructible without a container. `Main` is in the package `transitsims`, so components of other packages (`transitsims.validation`) get their collaborators through `@Inject` setters or a public constructor.
 
@@ -88,9 +89,7 @@ Transit Sims has no tests of its own: the suites test Transit Sims, not tests in
 
 `V1` and `V2` are what a Doer user would commit: copies of `CreateSchema.sql` and `CreateIndexes.sql`, one file each, as the processor generates them for Transit Sims. One file per generated file keeps them comparable as they are. The e2e suite compares each of them with its generated file in the work folder, fails on a difference and names the generated file to copy over it; so a change of Transit Sims that changes the schema (a new status, a new concurrency group) also changes the migration in the same commit. The application sets up the database itself: it runs these migrations with Flyway at start, before Doer starts (see [What each runtime writes](#what-each-runtime-writes)).
 
-`src/test/resources/e2e-code` is moved here: its Java code becomes the first version of CarWash, its trigger SQL `V3__create_validation_tables.sql`.
-
-**No shared glue folders**, at least at first. What a runtime cannot work without — `pom.xml`, configuration, a `SpringBootApp` class, a `DataSource` producer — is written by that runtime's methods in the test code, as text blocks (see [Runtime setup](#runtime-setup)). When two runtimes need the same text (the producers of WildFly and Open Liberty), it is a shared constant in the test code, not a folder.
+**No shared glue folders**, at least at first. What a runtime cannot work without — `pom.xml`, configuration, a `SpringBootMain` class, a `DataSource` producer — is written by that runtime's methods in the test code, as text blocks (see [Runtime setup](#runtime-setup)). When two runtimes need the same text (the producers of WildFly and Open Liberty), it is a shared constant in the test code, not a folder.
 
 ## `*GeneratedCodeITCase`: the annotation processor
 
@@ -105,8 +104,8 @@ Transit Sims is compiled against the Jakarta EE API jar, which `Toolchain` resol
 |---|---|
 | javac | `JavacGeneratedCodeITCase` |
 | Maven | `MavenGeneratedCodeITCase`: `pom.xml` as a text block, sources copied in, processor in `annotationProcessorPaths` |
-| Gradle | new `GradleGeneratedCodeITCase`: `build.gradle` as a text block with `annotationProcessor "com.java-doer:doer:…"` and `mavenLocal()`; a pinned Gradle version |
-| Eclipse compiler (ecj) | candidate: the compiler of Eclipse and VS Code Java; runs processors differently from javac |
+| Gradle | `GradleGeneratedCodeITCase` ([step 7](#7-more-build-tools-in-generatedcodeitcase)): `build.gradle` as a text block with `annotationProcessor "com.java-doer:doer:…"` and `mavenLocal()`; a pinned Gradle version |
+| Eclipse compiler (ecj) | candidate ([step 7](#7-more-build-tools-in-generatedcodeitcase)): the compiler of Eclipse and VS Code Java; runs processors differently from javac |
 
 That the processor generates nothing when it compiles test sources (`DoerProcessor.isCompilingTests`) is checked by `GeneratorITCase` with two javac runs, as a build tool compiles main and test sources. The build tools are not checked for it: if javac is right, they are right too.
 
@@ -192,19 +191,21 @@ The generated `_GeneratedDoerService` needs a `DataSource` bean, an `Executor` b
 | **quarkus** | `DataSource` (Agroal), `Executor`, JTA (Narayana), CDI events, RESTEasy, Flyway (`quarkus-flyway`, `migrate-at-start`) | `pom.xml`, `application.properties` |
 | **wildfly** | JTA, CDI events, RESTEasy | `pom.xml` (WAR), `WEB-INF/transitsims-ds.xml` with `${env.E2E_DB_URL}`, `Producers.java`: `DataSource` from `@Resource(lookup)`, `Executor` from `ManagedExecutorService`; `FlywayMigration.java` |
 | **open-liberty** | JTA, CDI events, JAX-RS | `pom.xml` (WAR), `server.xml` (features, data source, Postgres driver), the same `Producers.java` and `FlywayMigration.java` |
-| **spring-boot** | `DataSource` (Hikari), transactions (Spring reads the jakarta annotation), Flyway (auto-configured with `flyway-core`) | `pom.xml`, `application.properties`, `SpringBootApp.java` (see below) |
+| **spring-boot** | `DataSource` (Hikari), transactions (Spring reads the jakarta annotation), Flyway (auto-configured with `flyway-core`) | `pom.xml`, `application.properties`, `SpringBootMain.java` (see below) |
 | **jetty** | servlet container only | `pom.xml`, Weld servlet, Jersey and Narayana setup, `web.xml`, producers of a transactional `DataSource` and an `Executor`, `FlywayMigration.java` |
 
 `FlywayMigration.java`, for the runtimes without a Flyway integration, observes `Startup` with a `@Priority` lower than the one of `DoerLifecycle`, so that CDI calls it first, and runs `Flyway.configure().dataSource(ds).load().migrate()`. Flyway is a dependency of the runtime's `pom.xml`, not of Transit Sims: Transit Sims does not import `org.flywaydb`. In Quarkus and Spring Boot the migration runs before the `Startup` event / `ApplicationReadyEvent`, so nothing is written. Every runtime also needs `flyway-database-postgresql`.
 
-`SpringBootApp.java` carries everything Spring does differently from CDI, so that Transit Sims stays free of Spring:
+REST is served by Jersey (`spring-boot-starter-jersey`), not by Spring MVC: the endpoints of Transit Sims stay JAX-RS, as in every other runtime.
+
+`SpringBootMain.java` (package `transitsims`, written into the work folder only) carries everything Spring does differently from CDI, so that Transit Sims stays free of Spring:
 
 - `@Import(_GeneratedDoerService.class)`, because Spring does not know `@ApplicationScoped`;
 - a component scan of `transitsims` with an include filter on CDI scope annotations, and a `ScopeMetadataResolver` that maps `@ApplicationScoped` → singleton, `@Dependent` → prototype;
 - the `DataSource` wrapped in `TransactionAwareDataSourceProxy`: on a plain `DataSource`, `getConnection()` does not join the Spring transaction;
 - exactly one `Executor` bean: with two, `@Inject Executor` is ambiguous;
 - a Jersey `ResourceConfig` that registers the JAX-RS endpoints;
-- `ApplicationReadyEvent` → `doerService.start(false)`, `ContextClosedEvent` → `stop()`: Spring does not fire the CDI events, so the observer in `DoerLifecycle` is never called.
+- `ApplicationReadyEvent` → `doerService.start(true)` (with the monitor, as `DoerLifecycle` does), `ContextClosedEvent` → `stop()`: Spring does not fire the CDI events, so the observer in `DoerLifecycle` is never called.
 
 ### Environment
 
@@ -280,7 +281,7 @@ Plus `appLog(node)` for the application log (`app-<node>-out.txt`), and `stopNod
 
 ## Implementation plan
 
-The plan is worked through top to bottom. A box is ticked when its **Check** passes. When the work shows that the plan or the design is wrong, fix the design first, then the plan, and go on. Steps 1 and 2 are detailed; each later step is detailed when it is next.
+The plan is worked through top to bottom. A box is ticked when its **Check** passes. When the work shows that the plan or the design is wrong, fix the design first, then the plan, and go on. The done steps stay as they were worked through. An open step is detailed when it is next; until then it names only what it delivers and its **Check**.
 
 ### 1. Infrastructure on Quarkus
 
@@ -446,48 +447,109 @@ Then the bus task got only the statuses `Bus resume`, `Bus on route` and `null`.
 
 **3.5 Specialized classes for the missing cases**
 
-- [ ] The cases marked `—` in e2e-test-app.md: kinds of beans, sources of statuses, retry forever, `@ConcurrencyGroup`, task data, exception describers, the external service on WireMock.
-- [ ] **Check:** e2e-test-app.md has no `—` row, except the cases moved out of step 3.
+The cases marked `—` in [e2e-test-app.md](e2e-test-app.md#what-transit-sims-must-cover), one aspect at a time, in `transitsims.validation`. In each sub-step:
+
+- `TransitSimsProcess.MAIN` creates the new beans and injects them into the generated service, and `*GeneratedCodeITCase` still passes: the new beans only have to compile and be constructible without a container;
+- V1 and V2 are copied over from the generated files when the check of `E2eEnvironment` asks for it;
+- the rows of the aspect in e2e-test-app.md lose their `—`, and their *Code* column names the new classes.
+
+*3.5.1 `ValidationResource`*
+
+- [x] `ValidationResource` gets `@ApplicationScoped` (see [e2e-test-app.md](e2e-test-app.md#decisions)): without a scope annotation it is per request in WildFly and Open Liberty, where a Doer thread has no request context, and in Spring Boot it is no bean at all.
+- [x] **Check:** all `*E2E` classes pass.
+
+*3.5.2 Kinds of beans*
+
+- [x] `BeanKindSingleton` (`@jakarta.inject.Singleton`), `BeanKindProduced` with `BeanKindProducers` (a `@Produces` method), `BeanKindIntercepted` with the interceptor binding `@BeanKindTraced` and its interceptor, `BeanKindConstructor` (`@Inject` constructor and a no-arg one for the proxy), `BeanKinds.Nested`, `BeanKindInherited` extends `BeanKindBase`.
+- [x] `BeanKindsE2E` runs a task of each bean through `POST /api/validation/run-task`: the methods and the interceptor write to `CallTrace`, so the trace shows that the method of the right bean was called, through the interceptor where there is one.
+- [x] **Check:** `mvn verify` passes; `BeanKindsE2E` and all other `*E2E` classes pass.
+
+*3.5.3 Doer methods, task data and transactions*
+
+- [x] `DoerMethodStatuses`: statuses from constants of `DoerMethodStatusNames`, from a `switch` and from a lambda.
+- [x] `DoerMethodCalls`: a doer method that inserts a new task with `DoerService`; the new task is run too.
+- [x] `TaskDataMethods`: the loader of the record `TaskDataRecord`, without a saver, and a doer method that gets it.
+- [x] `TransactionMethods.ownTransaction`: a doer method with its own `@Transactional`; `TransactionsE2E` sees its two rows of `demo_log_tasks` in one transaction, apart from the ones of Doer.
+- [x] `DoerMethodsE2E`: the task goes through every status of `DoerMethodStatuses`; the task inserted by `DoerMethodCalls` is run; the method with `TaskDataRecord` gets the loaded record.
+- [x] **Check:** `mvn verify` passes; all `*E2E` classes pass.
+
+*3.5.4 Concurrency groups*
+
+- [x] `ConcurrencyGroupFirst` (the group on the class) and `ConcurrencyGroupSecond` (the same group on a method), with long-running methods.
+- [x] `ConcurrencyE2E`: tasks of both classes together never run more than the limit of the group at once, checked as for `ConcurrencyLimitOne`.
+- [x] **Check:** `mvn verify` passes; all `*E2E` classes pass.
+
+*3.5.5 Errors*
+
+- [x] `ErrorMethods`: a method with `@RetryPolicy` without `duration`, and a method that throws an exception with a cause and with suppressed exceptions.
+- [x] `ErrorsE2E`: the method without `duration` keeps its status after more than a day of failing (`failing_since` moved back over JDBC); `task_logs` describes the exception with its cause and its suppressed exceptions.
+- [x] **Check:** `mvn verify` passes; all `*E2E` classes pass.
+
+*3.5.6 External service*
+
+- [x] `ExternalServiceConfig`: the URL from the environment variable `E2E_EXTERNAL_URL`. `ExternalServiceMethods`: calls through the JAX-RS client API, with a read timeout; the client is created on first use, so `Main` constructs the bean without a JAX-RS implementation.
+- [x] `E2eEnvironment` passes `-e E2E_EXTERNAL_URL=http://wiremock:8080`. `QuarkusApp` adds `quarkus-resteasy-client`: `quarkus-resteasy` has no JAX-RS client.
+- [x] `ExternalServiceE2E`, with WireMock stubs: success (the method moves on, WireMock received the request), an error response (the task is failing) and a timeout (the task is failing; the read timeout of 1 s ends the call, not the delay of 5 s of the stub).
+- [x] **Check:** `mvn verify` passes; all `*E2E` classes pass three runs in a row; e2e-test-app.md has no `—` row except the two of 3.6.
 
 **3.6 Lifecycle on Transit Sims**
 
-- [ ] A node is stopped while tasks are in progress, and the restarted node finishes the simulation.
-- [ ] Two nodes on one database run one simulation, and passengers board through both nodes.
+`LifecycleE2E` on a running simulation, Doer with the monitor.
+
+- [x] A node is stopped with SIGTERM while the buses run, restarted with `startNode`, and the simulation completes; no task stays in progress.
+- [x] A doer method in progress at the stop (3 s, in Quarkus) leaves its task `in_progress` until the reset of stalled tasks. Not in step 3: an open question.
+- [x] A second node on the same database (`startNode(2)`, Doer started through `/api/validation/start?m=true`) runs the same simulation; passengers board through both nodes, and the simulation completes.
+- [x] **Check:** `mvn verify` passes; all `*E2E` classes pass three runs in a row; e2e-test-app.md has no `—` row except the case moved out of step 3.
 
 **3.7 Done**
 
-- [ ] e2e-test-app.md gets the status `implemented`, and its *Code* column is the only map of the cases.
+- [x] e2e-test-app.md gets the status `implemented`. Its *Code* column becomes the only map of the cases: the `—` column and the *Transit Sims* column go, and *The e2e tests* lists the `*E2E` classes as they are.
+- [x] **Check:** every class named in the *Code* column exists: in `src/test/resources/e2e/transitsims`, or the `*E2E` class of a lifecycle case.
 
 ### 4. Spring Boot
 
-- [ ] `SpringBootApp`: `configureSpringBootApp` (`pom.xml` with `flyway-core` and `flyway-database-postgresql`, `application.properties`, `SpringBootApp.java`), `startSpringBootContainer`.
-- [ ] All `*E2E` classes pass with `-Ddoer.e2e.runtime=spring-boot`; fixes in Doer or in the design, if needed.
-- [ ] `spring-boot` in the CI matrix.
+Detailed when it is next.
+
+- [ ] `SpringBootApp implements E2eApp`. `configureSpringBootApp` writes `pom.xml` (`spring-boot-starter-jersey`, `spring-boot-starter-jdbc`, JSON-P and JSON-B for Jersey, the Postgres driver, `flyway-core`, `flyway-database-postgresql`, `doer` as a dependency and in `annotationProcessorPaths`, `spring-boot-maven-plugin`), `application.properties` (`E2E_*` with the defaults of Quarkus, port 8080) and `SpringBootMain.java` (see [What each runtime writes](#what-each-runtime-writes)). `springBootDockerRun`: the jar mounted to `eclipse-temurin:25-jre`, `java -jar`.
+- [ ] **Check:** `SmokeE2E` passes with `-Ddoer.e2e.runtime=spring-boot`.
+- [ ] What Spring does not serve as CDI does (the interceptor binding of `BeanKindIntercepted`, `@Dependent`, the `Startup` and `Shutdown` events, …) is decided case by case: a line in `SpringBootMain.java`, a fix in Doer, or a case that Spring Boot does not support. Each decision goes to *Decisions* of e2e-test-app.md.
+- [ ] **Check:** all `*E2E` classes pass with `spring-boot` three runs in a row, and still with `quarkus`.
+- [ ] `spring-boot` in the CI matrix. **Check:** the `e2e` job is green for both runtimes.
 
 ### 5. Jakarta EE servers: WildFly, Open Liberty
 
-- [ ] `WildflyApp`, `OpenLibertyApp`; the shared `Producers.java` and `FlywayMigration.java` as constants in the test code.
-- [ ] Both in the CI matrix.
+Detailed when it is next.
+
+- [ ] `Producers.java` and `FlywayMigration.java` as shared constants in the test code.
+- [ ] `WildflyApp`: WAR, `WEB-INF/transitsims-ds.xml`, `ROOT.war` mounted to `standalone/deployments` of the WildFly image.
+- [ ] `OpenLibertyApp`: WAR, `server.xml`, `ROOT.war` and `server.xml` mounted to `config/` of the Open Liberty image.
+- [ ] **Check:** all `*E2E` classes pass with `wildfly` and with `open-liberty`, three runs in a row each.
+- [ ] Both in the CI matrix. **Check:** the `e2e` job is green for all runtimes.
 
 ### 6. Jetty
 
-- [ ] Decide the open question about Jetty / Tomcat; then the same as step 5.
+- [ ] Decide the open question about Jetty or Tomcat.
+- [ ] Its `E2eApp`, as in [What each runtime writes](#what-each-runtime-writes): Weld servlet, Jersey, Narayana, `web.xml`, the producers of step 5 and `FlywayMigration.java`.
+- [ ] **Check:** all `*E2E` classes pass three runs in a row; the runtime is in the CI matrix and its job is green.
 
 ### 7. More build tools in `*GeneratedCodeITCase`
 
-- [ ] `GradleGeneratedCodeITCase` (see [`*GeneratedCodeITCase`](#generatedcodeitcase-the-annotation-processor)); decide the open question about Gradle on CI.
-- [ ] Eclipse compiler (ecj), if it is still a candidate.
+- [ ] Decide the open question about Gradle on CI.
+- [ ] `GradleGeneratedCodeITCase` (see [`*GeneratedCodeITCase`](#generatedcodeitcase-the-annotation-processor)). **Check:** it passes with JDK 17 and the newest JDK of the matrix, in the `build` job.
+- [ ] Decide whether the Eclipse compiler (ecj) stays a candidate; if it does, `EcjGeneratedCodeITCase` with the same check.
 
 ### 8. More runtimes in the e2e suite
 
-- [ ] Decide which candidates of the open question about supported runtimes (Payara, TomEE, Helidon MP, …) go into the matrix; each one as in step 5.
+- [ ] Decide which candidates of the open question about supported runtimes (Payara, TomEE, Helidon MP, …) go into the matrix.
+- [ ] Each one as in step 5: its `E2eApp`; **Check:** all `*E2E` classes pass three runs in a row, and its CI job is green.
+- [ ] This document gets the status `implemented`; [CI](#ci) shows the final matrix.
 
 If, after step 5, several runtimes write the same Java files, they stay shared constants in the test code; a separate source folder only if text blocks become hard to maintain.
 
 ## Open questions
 
-- **Which runtimes are "supported"** and go into the matrix? Proposed: Quarkus, Spring Boot, WildFly, Open Liberty, Jetty. Candidates: Payara, TomEE, Helidon MP. Micronaut is not Jakarta EE, but it would test whether its own annotation processor sees the generated service.
-- **Jetty**: assembling CDI, JTA and a transactional `DataSource` by hand shows what a minimal setup needs, but it is the most text to keep in the test. Is that the setup we want, or is Tomcat with the same assembly more common?
-- **Spring Boot with Jersey or with Spring MVC?** Jersey lets the REST endpoints stay in CarWash; most Spring users would use MVC.
-- **Doer components in a dependency jar** (Quarkus needs a Jandex index, WARs need `beans.xml` in the jar): a second layout of CarWash, or out of scope?
-- **Gradle on CI**: rely on the Gradle installed on the runner, or download a pinned distribution in the test?
+- **Which runtimes are "supported"** and go into the matrix? Proposed: Quarkus, Spring Boot, WildFly, Open Liberty, Jetty. Candidates: Payara, TomEE, Helidon MP. Micronaut is not Jakarta EE, but it would test whether its own annotation processor sees the generated service. Decided in [step 8](#8-more-runtimes-in-the-e2e-suite).
+- **Jetty**: assembling CDI, JTA and a transactional `DataSource` by hand shows what a minimal setup needs, but it is the most text to keep in the test. Is that the setup we want, or is Tomcat with the same assembly more common? Decided in [step 6](#6-jetty).
+- **Gradle on CI**: rely on the Gradle installed on the runner, or download a pinned distribution in the test? Decided in [step 7](#7-more-build-tools-in-generatedcodeitcase).
+- **A doer method in progress when the node stops** stays `in_progress` until the reset of stalled tasks (2 hours): `DoerService.stop()` does not wait for it, and Quarkus stops its worker pool after CDI and JTA, so the last transaction of Doer fails (see [e2e-test-app.md](e2e-test-app.md#decisions)). Options: `stop()` interrupts the threads of the tasks in progress and waits for them with a short timeout, while the container is still alive; or the application gives Doer an executor of its own and stops it in a `Shutdown` observer; or a documented limitation. Not in the plan yet.
+- **Doer components in a dependency jar** (Quarkus needs a Jandex index, WARs need `beans.xml` in the jar): a second layout of Transit Sims, or out of scope? Not in the plan.

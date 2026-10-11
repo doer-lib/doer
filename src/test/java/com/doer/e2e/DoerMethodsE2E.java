@@ -6,9 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
-/** Doer methods are called in the runtime: statuses go from method to method, across classes, and after a delay. */
+/**
+ * Doer methods are called in the runtime: statuses go from method to method, across classes, and after a delay; a doer
+ * method calls DoerService; task data is a record.
+ */
 class DoerMethodsE2E extends E2eTestBase {
 
     @Test
@@ -47,5 +51,39 @@ class DoerMethodsE2E extends E2eTestBase {
         // 200ms latency of calling checkReadyTasks(),
         // and more 200ms transaction toll
         assertTrue(actualDelay < 2400);
+    }
+
+    @Test
+    void statuses_from_constants_switch_and_lambda_should_be_set() {
+        resetServer();
+        long taskId = pushTask("Doer method constant");
+        assertEquals("Doer method sources done", waitTaskStatus(taskId, "Doer method sources done"));
+        assertEquals(List.of("Doer method switch", "Doer method lambda", "Doer method sources done"),
+                finalStatuses(taskId));
+    }
+
+    @Test
+    void task_inserted_by_doer_method_should_be_run() {
+        resetServer();
+        long taskId = pushTask("Doer method calls insert");
+        assertEquals("Doer method calls insert done", waitTaskStatus(taskId, "Doer method calls insert done"));
+        Long insertedId = selectLongValue("SELECT max(id) FROM tasks WHERE id <> " + taskId);
+        assertEquals("Doer method calls inserted done",
+                waitTaskStatus(insertedId, "Doer method calls inserted done"));
+    }
+
+    @Test
+    void record_should_be_task_data_without_saver() {
+        resetServer();
+        long taskId = pushTask("Task data record");
+        assertEquals("Task data record done", waitTaskStatus(taskId, "Task data record done"));
+        assertNull(selectStringValue("SELECT exception_type FROM task_logs WHERE task_id = " + taskId));
+    }
+
+    /** The final statuses in the task logs of the task, in order. */
+    private static List<String> finalStatuses(long taskId) {
+        String statuses = selectStringValue(
+                "SELECT string_agg(final_status, '|' ORDER BY id) FROM task_logs WHERE task_id = " + taskId);
+        return List.of(statuses.split("\\|"));
     }
 }

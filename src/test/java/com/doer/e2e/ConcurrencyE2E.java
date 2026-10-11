@@ -9,7 +9,7 @@ import java.util.LinkedList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-/** {@code @ConcurrencyLimit} and the queues of DoerService. */
+/** {@code @ConcurrencyLimit}, {@code @ConcurrencyGroup} and the queues of DoerService. */
 class ConcurrencyE2E extends E2eTestBase {
 
     @Test
@@ -27,6 +27,26 @@ class ConcurrencyE2E extends E2eTestBase {
         RestTask lastTask = restGetTask(task2);
         Duration timeToFinish6TasksBy100msEach = Duration.between(firstTask.created(), lastTask.modified());
         assertTrue(timeToFinish6TasksBy100msEach.compareTo(Duration.ofMillis(600)) >= 0);
+    }
+
+    @Test
+    void concurrency_group_should_run_methods_of_both_classes_one_at_a_time() {
+        resetServer();
+        long task1 = pushTask("Concurrency group first");
+        pushTask("Concurrency group second");
+        pushTask("Concurrency group first");
+        pushTask("Concurrency group second");
+        pushTask("Concurrency group first");
+        long task2 = pushTask("Concurrency group second");
+        assertEquals("Concurrency group second done", waitTaskStatus(task2, "Concurrency group second done"));
+        assertEquals(6, selectLongValue("SELECT count(*) FROM tasks WHERE status LIKE 'Concurrency group % done'"));
+
+        // In two domains of their own, the classes would run in parallel: 300 ms
+        RestTask firstTask = restGetTask(task1);
+        RestTask lastTask = restGetTask(task2);
+        Duration timeToFinish6TasksBy100msEach = Duration.between(firstTask.created(), lastTask.modified());
+        assertTrue(timeToFinish6TasksBy100msEach.compareTo(Duration.ofMillis(600)) >= 0,
+                timeToFinish6TasksBy100msEach::toString);
     }
 
     @Test
