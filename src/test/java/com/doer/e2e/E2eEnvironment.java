@@ -110,6 +110,8 @@ public class E2eEnvironment implements BeforeAllCallback {
         return switch (runtime) {
             case "quarkus" -> new QuarkusApp();
             case "spring-boot" -> new SpringBootApp();
+            case "wildfly" -> new WildflyApp();
+            case "open-liberty" -> new OpenLibertyApp();
             default -> throw new IllegalArgumentException("Unknown doer.e2e.runtime: " + runtime);
         };
     }
