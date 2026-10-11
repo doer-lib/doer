@@ -71,7 +71,7 @@ class ConcurrencyDomainImpl implements ConcurrencyDomain {
     }
 
     @Override
-    public int getValue() {
+    public int getLimit() {
         return numberOfTasksToRunSimultaneously;
     }
 

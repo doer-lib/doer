@@ -1,5 +1,7 @@
 # Doer
 
+[![maven](https://badges.mvnrepository.com/badge/com.java-doer/doer/badge.svg?label=maven)](https://mvnrepository.com/artifact/com.java-doer/doer)
+
 Doer is a Java library designed for building fault-tolerant, cluster-ready backend applications using annotations.
 
 It simplifies distributed task execution, automatic retries, and state transitions, ensuring reliable 
@@ -13,6 +15,8 @@ processing of complex workflows.
 
 ## Usage
 
+Requires Java 17+ and Jakarta EE 10+ (`jakarta.*` namespace).
+
 ```xml
 <dependency>
     <groupId>com.java-doer</groupId>
@@ -20,6 +24,7 @@ processing of complex workflows.
     <version>0.0.16</version>
 </dependency>
 ```
+
 ### Since JDK23
 
 Starting from java 23 you need to enable annotation processing explicitly.
@@ -55,7 +60,7 @@ This example is part of the **Doer Tutorial** [https://github.com/doer-lib/doert
 
 ```java
 @AcceptStatus(GOODS_RESERVED)
-@OnException(retry = "every 5s during 10s", setStatus = PAYMENT_FAILED)
+@RetryPolicy(interval = "5s", duration = "10s", fallbackStatus = PAYMENT_FAILED)
 public void payOrder(Task task, Order order) {
     Check check = bank.processPayment(order);
     order.setPaymentTransactionId(check.transactionId());
@@ -69,7 +74,7 @@ public void reportNoPaymentForOrder(Task task, Order order) {
 }
 
 @AcceptStatus(ORDER_PAID)
-@OnException(retry = "every 5s during 5s", setStatus = ORDER_NOT_SHIPPED)
+@RetryPolicy(interval = "5s", duration = "5s", fallbackStatus = ORDER_NOT_SHIPPED)
 public void shipOrder(Task task, Order order) {
     TrackId trackId = warehouse.shipTheOrder(order);
     order.setDeliveryTrackingId(trackId.token());

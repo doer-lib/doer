@@ -11,11 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        version: [ 8, 11, 17, 21, 23, 25, 26, 27 ]
+        version: [ 17, 21, 25, 27 ]
     steps:
       - uses: actions/checkout@v7
 
-      # Java27 is used to build library (but -target=8)
+      # Per-PR Maven repository cache: each PR build restores the latest cache of this PR and saves a new one
+      - name: Restore Maven repository
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: maven-pr-${{ github.event.pull_request.number }}-
+
+      # Java27 is used to build library (but --release=17)
       - name: Set up JDK 27 (for building)
         uses: actions/setup-java@v6
         with:
@@ -34,7 +43,62 @@ jobs:
       - name: Show mvn version
         run: mvn --version
       - name: Tests Java${{ matrix.version }} jakarta 10.0.0
-        if: ${{ matrix.version > 8 }} # (java8 is too old for jakarta10)
         run: mvn -B --color=always verify
-      - name: Tests Java${{ matrix.version }} jakarta 8.0.0
-        run: mvn -B --color=always -Dtest.doer.jakarta.version=8.0.0 verify
+
+      - name: Save Maven repository
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && matrix.version == 27 }}
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # E2E suite (*E2E classes): Transit Sims in each runtime, in Docker, with one JDK; see e2e-design.md
+  e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [ quarkus ]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Per-PR Maven repository cache, per runtime: the runtimes bring different dependencies
+      - name: Restore Maven repository
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-e2e-${{ matrix.runtime }}-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: maven-e2e-${{ matrix.runtime }}-pr-${{ github.event.pull_request.number }}-
+
+      - name: Set up JDK 27 (for building)
+        uses: actions/setup-java@v6
+        with:
+          java-version: '27'
+          distribution: 'temurin'
+      - name: Build with Maven
+        run: mvn -B --color=always -DskipTests package
+
+      # One JDK for the e2e suite: it builds Transit Sims, and the application runs on a JRE 25 image
+      - name: Set up JDK 25 (for e2e)
+        uses: actions/setup-java@v6
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+      - name: E2E ${{ matrix.runtime }}
+        run: mvn -B --color=always verify -Ddoer.e2e.runtime=${{ matrix.runtime }}
+
+      # Application logs and the generated project, to reproduce a failure
+      - name: Upload application logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-${{ matrix.runtime }}
+          path: target/e2e/
+
+      - name: Save Maven repository
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-e2e-${{ matrix.runtime }}-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}

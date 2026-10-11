@@ -2,108 +2,43 @@ package com.doer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import java.io.IOException;
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
-import org.junit.jupiter.api.BeforeAll;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/** Scheduling logic of DoerService, without database: tasks "from db" are given by the test. */
 public class DoerServiceTest {
 
     TstDoerService service;
     LinkedList<Runnable> executorJobs;
-
-    @BeforeAll
-    static void createdDb() throws Exception {
-        try (Connection con = Utils.getPostgresDataSource().getConnection()) {
-            Utils.createDbSchema(con);
-        }
-    }
+    long nextTaskId = 1000;
 
     @BeforeEach
-    void init() throws Exception {
+    void init() {
         executorJobs = new LinkedList<>();
         service = new TstDoerService();
         service.setExecutor(executorJobs::add);
-        service.self = service;
-        Utils.sqlUpdate("DELETE FROM task_logs");
-        Utils.sqlUpdate("DELETE FROM tasks");
+        service.setSelfReference(service);
     }
+
     void runAllExecutorJobs() {
-        while(!executorJobs.isEmpty()) {
-            Runnable runnable = executorJobs.pollFirst();
-            runnable.run();
+        while (!executorJobs.isEmpty()) {
+            executorJobs.pollFirst().run();
         }
-    }
-
-    @Test
-    void loadTask__should_read_db_values() throws Exception {
-        Utils.sqlUpdate(
-                "INSERT INTO tasks (id, status, failing_since, in_progress) VALUES (743, 'test status', now(), TRUE)");
-
-        Task task = service.loadTask(743);
-
-        assertEquals(743L, task.getId());
-        assertEquals("test status", task.getStatus());
-        assertTrue(task.isInProgress());
-        assertNotNull(task.getCreated());
-        assertNotNull(task.getModified());
-        assertNotNull(task.getFailingSince());
-        assertEquals(0, task.getVersion());
-    }
-
-    @Test
-    void insertTask__should_write_db() throws Exception {
-        Task task = new Task();
-        task.setStatus("test status 3");
-        Instant failingSince = Instant.now().truncatedTo(ChronoUnit.MILLIS);
-        task.setFailingSince(failingSince);
-
-        service.insert(task);
-
-        assertNotNull(task.getId());
-        assertNotNull(task.getCreated());
-        assertEquals(task.getCreated(), task.getModified());
-        assertEquals(failingSince, task.getFailingSince());
-        assertFalse(task.isInProgress());
-    }
-
-    @Test
-    void generateId__should_return_new_id() throws Exception {
-        long id1 = service.generateId();
-        long id2 = service.generateId();
-        assertTrue(id1 >= 1000);
-        assertTrue(id2 > id1);
-    }
-
-    @Test
-    void updateAndBumpVersion__should_update_task() throws Exception {
-        Utils.sqlUpdate("INSERT INTO tasks (id, status, version) VALUES (744, 'test status 744', 3)");
-        Task task = new Task();
-        task.setId(744L);
-        task.setVersion(3);
-        task.setStatus("Updated test status 744");
-
-        service.updateAndBumpVersion(task);
-
-        assertEquals(4, task.getVersion());
-        assertNotNull(task.getCreated());
-        assertNotNull(task.getModified());
-        Task dbTask = service.loadTask(744L);
-        assertEquals("Updated test status 744", dbTask.getStatus());
-        assertEquals(4, dbTask.getVersion());
     }
 
     @Test
@@ -124,7 +59,7 @@ public class DoerServiceTest {
     void start__should_reloadTasksFromDb_and_start_processing_loaded_tasks() throws Exception {
         service.setMinSingleQueueSize(5);
         {
-            // 3 queues (asap, delayed 2 min, retryed 5 min)
+            // 3 queues (asap, delayed 2 min, retry 5 min)
             HashMap<String, Duration> delays = new HashMap<>();
             delays.put("A", Duration.ZERO);
             delays.put("B", Duration.ZERO);
@@ -132,7 +67,7 @@ public class DoerServiceTest {
             service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
         }
         {
-            // 4 quees (asap, delayed 20 sec, retry 20 sec, retry 5 min)
+            // 4 queues (asap, delayed 20 sec, retry 20 sec, retry 5 min)
             HashMap<String, Duration> delays = new HashMap<>();
             delays.put("C", Duration.ZERO);
             delays.put("D_Delayed", Duration.ofSeconds(20));
@@ -171,42 +106,54 @@ public class DoerServiceTest {
     }
 
     @Test
-    void loadTasks__should_skip_nulls() throws Exception {
-        assertTrue(service.loadTasks(Collections.emptyList()).isEmpty());
-        assertTrue(service.loadTasks(Collections.singleton(null)).isEmpty());
+    void monitor__should_run_task_queued_while_idle_after_its_delay() throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        try {
+            service.setExecutor(executor);
+            HashMap<String, Duration> delays = new HashMap<>();
+            delays.put("Delayed", Duration.ofSeconds(1));
+            service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
+            service.start(true);
+            // Nothing to run: the monitor waits for its next planned check, up to a minute
+            waitUntilIdleMonitorWaits();
+
+            Task task = createNewTask("Delayed");
+            service.tst_tasks_by_id.put(task.getId(), task);
+            service.triggerTaskReloadFromDb(task.getId());
+
+            Instant ran = service.tst_runs.poll(10, TimeUnit.SECONDS);
+            assertNotNull(ran, "the task did not run 10 s after it was queued; its delay is 1 s");
+            assertFalse(ran.isBefore(task.getModified().plusSeconds(1)), "the task ran before its delay");
+        } finally {
+            service.stop();
+            executor.shutdown();
+            executor.awaitTermination(5, TimeUnit.SECONDS);
+        }
     }
 
-    @Test
-    void loadTasks__should_skip_duplicates() throws Exception {
-        Task task = createNewTask("Test for load tasks");
-        Long taskId = task.getId();
-
-        Map<Long, Task> result1 = service.loadTasks(Collections.singleton(taskId));
-        Map<Long, Task> result2 = service.loadTasks(Arrays.asList(taskId, taskId));
-        Map<Long, Task> result3 = service.loadTasks(Arrays.asList(taskId, taskId, taskId));
-
-        assertEquals(1, result1.size());
-        assertEquals(1, result2.size());
-        assertEquals(1, result3.size());
-
-        assertEquals(taskId, result1.get(taskId).getId());
-        assertEquals(taskId, result2.get(taskId).getId());
-        assertEquals(taskId, result3.get(taskId).getId());
+    /** Waits until the thread of the idle monitor waits for its next check. */
+    private static void waitUntilIdleMonitorWaits() throws InterruptedException {
+        Instant deadline = Instant.now().plusSeconds(5);
+        while (Instant.now().isBefore(deadline)) {
+            boolean waiting = Thread.getAllStackTraces().keySet().stream()
+                    .anyMatch(t -> t.getName().equals("doer-idle-monitor")
+                            && t.getState() == Thread.State.TIMED_WAITING);
+            if (waiting) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        fail("the idle monitor does not wait");
     }
 
-    @Test
-    void loadTasks__should_skip_missing() throws Exception {
-        Long missingTask = 9839892L;
-
-        Map<Long, Task> result = service.loadTasks(Collections.singleton(missingTask));
-
-        assertEquals(0, result.size());
-    }
-
-    private Task createNewTask(String status) throws Exception {
+    /** Task as inserted to db: queues order tasks by created and modified. */
+    private Task createNewTask(String status) {
         Task task = new Task();
+        task.setId(nextTaskId++);
         task.setStatus(status);
-        service.insert(task);
+        Instant now = Instant.now();
+        task.setCreated(now);
+        task.setModified(now);
         return task;
     }
 
@@ -214,30 +161,14 @@ public class DoerServiceTest {
 
         List<Integer> tst_limits;
         ArrayList<Task> tst_task_from_db = new ArrayList<>();
+        /** Tasks "in db" for {@link #loadTask}. */
+        Map<Long, Task> tst_tasks_by_id = new ConcurrentHashMap<>();
+        /** When {@link #runTask} was called, one entry per call. */
+        BlockingQueue<Instant> tst_runs = new LinkedBlockingQueue<>();
 
         @Override
-        public void runInTransaction(Callable<Object> code) throws Exception {
-            try (Connection con = getConnection()) {
-                con.setAutoCommit(false);
-                try {
-                    code.call();
-                    con.commit();
-                } catch (Exception e) {
-                    try {
-                        con.rollback();
-                    } catch (Exception e2) {
-                        e2.printStackTrace();
-                    }
-                    throw e;
-                } finally {
-                    con.setAutoCommit(true);
-                }
-            }
-        }
-
-        @Override
-        public Connection getConnection() throws SQLException {
-            return Utils.getPostgresDataSource().getConnection();
+        public void runInTransaction(Callable<Object> code) {
+            throw new UnsupportedOperationException();
         }
 
         @Override
@@ -246,16 +177,18 @@ public class DoerServiceTest {
         }
 
         @Override
-        protected Object _callLoader(Class<?> klazz, Task task) throws Exception {
-            return null;
+        protected Object _load(Task task, Class<?> type) {
+            throw new UnsupportedOperationException();
         }
 
         @Override
-        protected void _callUnLoader(Class<?> klazz, Task task, Object data) throws Exception {
+        protected void _save(Task task, Class<?> type, Object data) {
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public void runTask(Task task) throws Exception {
+            tst_runs.add(Instant.now());
             String status = task.getStatus();
             if ("A".equals(status)) {
                 task.setStatus("B");
@@ -267,7 +200,12 @@ public class DoerServiceTest {
         }
 
         @Override
-        public List<Task> loadTasksFromDatabase(List<Integer> limits) throws SQLException, IOException {
+        public Task loadTask(long id) {
+            return tst_tasks_by_id.get(id);
+        }
+
+        @Override
+        public List<Task> loadTasksFromDatabase(List<Integer> limits) {
             tst_limits = limits;
             ArrayList<Task> returnValue = new ArrayList<>(tst_task_from_db);
             tst_task_from_db.clear();
