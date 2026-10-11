@@ -6,9 +6,9 @@ import java.io.IOException;
 import java.nio.file.Path;
 
 /**
- * Transit Sims as {@code ROOT.war} in a Jakarta EE server: what WildFly and Open Liberty have in common. The server gives
- * JTA, CDI and JAX-RS; the WAR adds the producers of the {@code DataSource} and the {@code Executor} and the Flyway
- * migration, written into the work folder only (see e2e-design.md).
+ * Transit Sims as {@code ROOT.war}: what WildFly, Open Liberty and Jetty have in common. The WAR adds the producers of
+ * the {@code DataSource} and the {@code Executor} and the Flyway migration, written into the work folder only (see
+ * e2e-design.md). A server gives JTA, CDI and JAX-RS; in Jetty the WAR brings them.
  */
 abstract class JakartaEeServerApp implements E2eApp {
     static final String JAKARTAEE_API_VERSION = "11.0.0";
@@ -19,8 +19,8 @@ abstract class JakartaEeServerApp implements E2eApp {
     public void configure(Path workdir) throws Exception {
         copySources("e2e/transitsims", workdir.resolve("src/main/java/transitsims"));
         copySources("e2e/db/migration", workdir.resolve("src/main/resources/db/migration"));
-        writeFile(workdir, "pom.xml", warPom(artifactId(), extraPlugins()));
-        writeFile(workdir, "src/main/java/transitsims/Producers.java", PRODUCERS.formatted(dataSourceJndiName()));
+        writeFile(workdir, "pom.xml", warPom(artifactId(), apiDependencies(), extraPlugins()));
+        writeFile(workdir, "src/main/java/transitsims/Producers.java", producers());
         writeFile(workdir, "src/main/java/transitsims/FlywayMigration.java", FLYWAY_MIGRATION);
         configureServer(workdir);
     }
@@ -28,8 +28,20 @@ abstract class JakartaEeServerApp implements E2eApp {
     /** {@code artifactId} of the work folder project. */
     abstract String artifactId();
 
-    /** JNDI name of the data source the server defines. */
-    abstract String dataSourceJndiName();
+    /** {@code Producers.java}: the {@code DataSource}, the {@code Executor} and what else CDI needs as a bean. */
+    abstract String producers();
+
+    /** The Jakarta EE APIs in the {@code pom.xml}: provided by the server. */
+    String apiDependencies() {
+        return """
+                        <dependency>
+                            <groupId>jakarta.platform</groupId>
+                            <artifactId>jakarta.jakartaee-api</artifactId>
+                            <version>%s</version>
+                            <scope>provided</scope>
+                        </dependency>
+                """.formatted(JAKARTAEE_API_VERSION);
+    }
 
     /** Plugins of the {@code pom.xml} besides the compiler and the WAR plugin; empty by default. */
     String extraPlugins() {
@@ -39,7 +51,7 @@ abstract class JakartaEeServerApp implements E2eApp {
     /** Writes the configuration of the server. */
     abstract void configureServer(Path workdir) throws IOException;
 
-    static String warPom(String artifactId, String extraPlugins) {
+    static String warPom(String artifactId, String apiDependencies, String extraPlugins) {
         return """
                 <?xml version="1.0" encoding="UTF-8"?>
                 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -60,13 +72,7 @@ abstract class JakartaEeServerApp implements E2eApp {
                     </properties>
 
                     <dependencies>
-                        <dependency>
-                            <groupId>jakarta.platform</groupId>
-                            <artifactId>jakarta.jakartaee-api</artifactId>
-                            <version>%5$s</version>
-                            <scope>provided</scope>
-                        </dependency>
-                        <dependency>
+                %5$s            <dependency>
                             <groupId>com.java-doer</groupId>
                             <artifactId>doer</artifactId>
                             <version>${doer.version}</version>
@@ -112,50 +118,54 @@ abstract class JakartaEeServerApp implements E2eApp {
                 %6$s        </plugins>
                     </build>
                 </project>
-                """.formatted(artifactId, doerLibVersion, FLYWAY_VERSION, POSTGRESQL_VERSION, JAKARTAEE_API_VERSION,
+                """.formatted(artifactId, doerLibVersion, FLYWAY_VERSION, POSTGRESQL_VERSION, apiDependencies,
                 extraPlugins);
     }
 
-    /**
-     * What Jakarta EE has in JNDI but not as CDI beans, and the bean of a class that CDI does not discover. The JNDI name
-     * of the data source is the parameter.
-     */
-    static final String PRODUCERS = """
-            package transitsims;
+    /** {@code Producers.java} of a server: the data source and the {@code ManagedExecutorService} from JNDI. */
+    static String jndiProducers(String dataSourceJndiName) {
+        return """
+                package transitsims;
 
-            import jakarta.annotation.Resource;
-            import jakarta.enterprise.concurrent.ManagedExecutorService;
-            import jakarta.enterprise.context.ApplicationScoped;
-            import jakarta.enterprise.inject.Produces;
-            import jakarta.inject.Singleton;
-            import java.util.concurrent.Executor;
-            import javax.sql.DataSource;
-            import transitsims.validation.BeanKindSingleton;
-            import transitsims.validation.CallTrace;
+                import jakarta.annotation.Resource;
+                import jakarta.enterprise.concurrent.ManagedExecutorService;
+                import jakarta.enterprise.context.ApplicationScoped;
+                import jakarta.enterprise.inject.Produces;
+                import jakarta.inject.Singleton;
+                import java.util.concurrent.Executor;
+                import javax.sql.DataSource;
+                import transitsims.validation.BeanKindSingleton;
+                import transitsims.validation.CallTrace;
 
-            /** The DataSource and the Executor of the server as CDI beans. Written by the e2e suite (JakartaEeServerApp). */
-            @ApplicationScoped
-            public class Producers {
-                @Resource(lookup = "%s")
-                DataSource dataSource;
+                /** The DataSource and the Executor of the server as CDI beans. Written by the e2e suite (JakartaEeServerApp). */
+                @ApplicationScoped
+                public class Producers {
+                    @Resource(lookup = "%s")
+                    DataSource dataSource;
 
-                /**
-                 * The threads of Doer get the context of the application, and each task its own local transaction
-                 * containment: a connection taken outside a transaction goes back to the pool when the task ends (Open
-                 * Liberty). Not a pool of the ManagedThreadFactory: the containment of its threads never ends.
-                 */
-                @Resource
-                ManagedExecutorService executor;
+                    /**
+                     * The threads of Doer get the context of the application, and each task its own local transaction
+                     * containment: a connection taken outside a transaction goes back to the pool when the task ends (Open
+                     * Liberty). Not a pool of the ManagedThreadFactory: the containment of its threads never ends.
+                     */
+                    @Resource
+                    ManagedExecutorService executor;
 
-                @Produces
-                DataSource dataSource() {
-                    return dataSource;
-                }
+                    @Produces
+                    DataSource dataSource() {
+                        return dataSource;
+                    }
 
-                @Produces
-                Executor executor() {
-                    return executor;
-                }
+                    @Produces
+                    Executor executor() {
+                        return executor;
+                    }
+                %s}
+                """.formatted(dataSourceJndiName, BEAN_KIND_SINGLETON_PRODUCER);
+    }
+
+    /** A member of {@code Producers}: the bean of a class that CDI does not discover. */
+    static final String BEAN_KIND_SINGLETON_PRODUCER = """
 
                 /**
                  * @Singleton alone does not make a class a CDI bean: it is not a bean defining annotation, so a WAR
@@ -168,7 +178,6 @@ abstract class JakartaEeServerApp implements E2eApp {
                     bean.setCallTrace(callTrace);
                     return bean;
                 }
-            }
             """;
 
     /** Migrates the database before Doer starts: CDI calls this observer of Startup before the one of DoerLifecycle. */

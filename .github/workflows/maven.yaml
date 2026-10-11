@@ -58,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [ quarkus, spring-boot, wildfly, open-liberty ]
+        runtime: [ quarkus, spring-boot, wildfly, open-liberty, jetty ]
     steps:
       - uses: actions/checkout@v7
 
