@@ -238,6 +238,12 @@ public class E2eEnvironment implements BeforeAllCallback {
         return appNode(node).stop();
     }
 
+    /** Writes the dump of the threads of the node into its log, for the message of a failed test; see AppNode. */
+    public static synchronized void threadDump(int node) throws Exception {
+        requireDocker("threadDump");
+        appNode(node).threadDump();
+    }
+
     /** Base URL of the node, for example {@code http://127.0.0.1:32801}; RestAssured is set to the one of node 1. */
     public static String baseUrl(int node) {
         requireDocker("baseUrl");
