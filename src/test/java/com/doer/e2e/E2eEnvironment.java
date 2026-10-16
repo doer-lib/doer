@@ -39,10 +39,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 /**
  * Transit Sims running in the runtime given by {@code -Ddoer.e2e.runtime}, with Postgres and WireMock, for the
  * {@code *E2E} test classes ({@code @ExtendWith(E2eEnvironment.class)}). One environment per JVM: the first test
- * class starts it, and it is stopped when the JVM ends. See e2e-design.md.
+ * class starts it, and it is stopped when the JVM ends. See src/test/README.md.
  *
  * <pre>
- * target/e2e/&lt;runtime&gt;/                    the work folder: a complete Maven project of Transit Sims in the runtime
+ * target/e2e-test-workspaces/&lt;runtime&gt;/    the work folder: a complete Maven project of Transit Sims in the runtime
  *     mvn-package-*.txt                     command and output of the build
  *     docker-pull-*.txt                     the same for docker pull of the application image
  *     app-&lt;node&gt;-out.txt, app-&lt;node&gt;-err.txt  stdout and stderr of the application, all starts of the node
@@ -65,7 +65,7 @@ public class E2eEnvironment implements BeforeAllCallback {
 
     public static final String runtime = property("doer.e2e.runtime", "quarkus");
     static final boolean skipBuild = Boolean.parseBoolean(property("doer.e2e.skip-build", "false"));
-    static final Path workdir = Path.of("target", "e2e", runtime).toAbsolutePath();
+    static final Path workdir = Path.of("target", "e2e-test-workspaces", runtime).toAbsolutePath();
 
     private static boolean started;
     private static Throwable startFailure;

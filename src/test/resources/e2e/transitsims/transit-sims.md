@@ -2,9 +2,9 @@
 
 ## Overview
 
-Transit Sims is a browser-based public transport simulation designed to demonstrate and test `doer-lib`, a Jakarta EE library for annotation processing and code generation.
+Transit Sims is a browser-based city bus simulation. It serves as a testbed for `doer-lib` and shows what the library can do.
 
-The backend manages the transport network, buses, and simulation time. Passengers are JavaScript/TypeScript actors running in the browser. The frontend visualizes the city and animates buses and passengers using SVG or D3.
+The backend owns the road network, buses, and simulation clock. All passengers are JavaScript actors running in the browser. The frontend renders the city with SVG or D3 and animates buses and passengers.
 
 ## Transport Network
 

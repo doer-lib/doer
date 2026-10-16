@@ -26,7 +26,7 @@ public interface TaskAndDataUpdater<T> { void update(Task task, T data) throws E
 
 The `TaskUpdater` overload delegates to the other one with `dataType = null` (no loader, no saver).
 
-- **Call it outside a transaction.** Inside one, it fails with `TransactionalException`.
+- **Call it outside a transaction.** Inside one it fails, because the generated service declares `@Transactional(NEVER)`: `TransactionalException` in CDI, `IllegalTransactionStateException` in Spring.
 - **`updater`** runs in Doer's transaction with the task row locked, and may change the task only with `task.setStatus(...)`. It sees the task exactly as it is in the database: a hijacked task still has `isInProgress() == true`. It may throw checked exceptions.
 - **Returns** the task as committed.
 - **Throws:**
@@ -40,37 +40,39 @@ The `TaskUpdater` overload delegates to the other one with `dataType = null` (no
 When `dataType` is not null, the second argument of the updater is loaded with the `@TaskDataLoader` for `dataType` before the updater, and saved with the `@TaskDataSaver` for `dataType` after the task row is written, the same ones that doer methods use. `DoerService` declares two abstract steps, and the generated service implements them with one branch per type, calling the specific loader and saver directly:
 
 ```java
-// generated _GeneratedDoerService
+// generated _GeneratedDoerService (of Transit Sims, the test application)
 @Override
 protected Object _load(Task task, Class<?> type) throws Exception {
-    if (Car.class.equals(type)) {
-        return doerResource.loadCar(task);               // @TaskDataLoader
+    if (Bus.class.equals(type)) {
+        return busRepository.load(task);                 // @TaskDataLoader
     }
+    ...
     throw new IllegalArgumentException("No @TaskDataLoader for " + type.getName());
 }
 
 @Override
 protected void _save(Task task, Class<?> type, Object data) throws Exception {
-    if (Car.class.equals(type)) {
-        doerResource.storeCar(task, (Car) data);         // @TaskDataSaver; no branch → nothing to do
+    if (Bus.class.equals(type)) {
+        busRepository.save(task, (Bus) data);            // @TaskDataSaver; no branch → nothing to do
         return;
     }
+    ...
 }
 ```
 
 Loader and saver are separate steps so that the task row is written between them, as in doer methods.
 
-- **`dataType` is required**, because the generic type of a `TaskAndDataUpdater` is erased at runtime. It must be a plain class: a generic type such as `List<Car>` cannot be passed as a `Class`, so loaders for generic types are skipped here.
+- **`dataType` is required**, because the generic type of a `TaskAndDataUpdater` is erased at runtime. It must be a plain class: a generic type such as `List<Bus>` cannot be passed as a `Class`, so loaders for generic types are skipped here.
 - **A missing `@TaskDataLoader`** is detected only at runtime (`IllegalArgumentException`). For doer methods it is a compile error.
 - **Why the dispatch on `type` stays in generated code:**
-  - typed overloads per loader (`Class<Order>`, `Class<Car>`) all erase to the same signature;
+  - typed overloads per loader (`Class<Order>`, `Class<Bus>`) all erase to the same signature;
   - methods with a separate name per type would exist only on the generated class, while clients inject `DoerService`.
 
 ## Usage
 
 ```java
 public void cancelOrder(UUID orderId) throws Exception {        // no @Transactional
-    Order order = orderRepository.findById(orderId);
+    Order order = orderRepository.findById(orderId);            // a @Transactional repository, see below
     doerService.facilitateCoordinatedUpdate(order.getTaskId(), Duration.ofSeconds(10), false,
             this::cancelLockedOrder);
 }
@@ -80,6 +82,8 @@ private void cancelLockedOrder(Task task) {
     task.setStatus(ORDER_CANCELLED);
 }
 ```
+
+Read what you need before the call in a transaction of its own, for example in a `@Transactional` repository. In Open Liberty a connection taken outside a transaction stays with the request until it ends, so a read before the call and the transaction of the call would need two connections at once, and concurrent requests can exhaust the pool (found with Transit Sims, whose `BusRepository` is `@Transactional` for this reason).
 
 With a loaded parameter:
 
@@ -119,7 +123,7 @@ attemptCoordinatedUpdate (one transaction):
 
 A task that does not exist is reported only by the last attempt, so with a positive `waitDuration` the `TaskNotFoundException` comes after `waitDuration`.
 
-**Names in `task_logs`.** `class_name` / `method_name` are those of the method that called `facilitateCoordinatedUpdate`. The public method finds them once with `StackWalker`: the first frame that is neither a `facilitateCoordinatedUpdate` frame nor a generated/framework frame (class or method name with `$`, class name ending with `_Subclass` / `_ClientProxy` / `_Bean`, or class in a container, interceptor or reflection package such as `io.quarkus.`, `org.jboss.`, `java.lang.reflect.`) and passes them to `attemptCoordinatedUpdate` as Strings. In the usage example these are `OrderService` / `cancelOrder`.
+**Names in `task_logs`.** `class_name` / `method_name` are those of the method that called `facilitateCoordinatedUpdate`. The public method finds them once with `StackWalker`: the first frame that is neither a `facilitateCoordinatedUpdate` frame nor a generated/framework frame (class or method name with `$`, class name ending with `_Subclass` / `_ClientProxy` / `_Bean`, or class in a container, interceptor or reflection package such as `io.quarkus.`, `org.springframework.`, `org.jboss.`, `com.arjuna.` (Narayana), `com.ibm.` and `io.openliberty.` (Open Liberty), `java.lang.reflect.`) and passes them to `attemptCoordinatedUpdate` as Strings. In the usage example these are `OrderService` / `cancelOrder`.
 
 ## Rules
 

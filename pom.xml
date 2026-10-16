@@ -173,7 +173,7 @@
     </build>
     <profiles>
         <profile>
-            <!-- E2E suite (*E2E classes) in the runtime given by -Ddoer.e2e.runtime; see e2e-design.md -->
+            <!-- E2E suite (*E2E classes) in the runtime given by -Ddoer.e2e.runtime; see src/test/README.md -->
             <id>e2e</id>
             <activation>
                 <property>

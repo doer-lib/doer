@@ -8,7 +8,7 @@ import java.nio.file.Path;
 /**
  * Transit Sims as {@code ROOT.war}: what WildFly, Open Liberty and Jetty have in common. The WAR adds the producers of
  * the {@code DataSource} and the {@code Executor} and the Flyway migration, written into the work folder only (see
- * e2e-design.md). A server gives JTA, CDI and JAX-RS; in Jetty the WAR brings them.
+ * src/test/README.md). A server gives JTA, CDI and JAX-RS; in Jetty the WAR brings them.
  */
 abstract class JakartaEeServerApp implements E2eApp {
     static final String JAKARTAEE_API_VERSION = "11.0.0";

@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit;
  * of the {@code *GeneratedCodeITCase} classes. They compile {@link #MAIN} together with Transit Sims and start it with
  * {@link #start}; then every request is a line to the stdin of {@code transitsims.Main}, and every response a line from
  * its stdout. The command is kept in main-cmd.txt of the workspace, the stderr of Main in main-err.txt. See
- * e2e-test-app.md.
+ * src/test/resources/e2e/transitsims/README.md.
  */
 class TransitSimsProcess implements AutoCloseable {
     private final Path workDir;

@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
  * What {@code runTask} of the generated service does with a task: calls the doer method with its parameters, the
  * loaders before it and the savers after it, and sets the status and failingSince after a failure. Each check sends
  * a request to {@code transitsims.validation.TaskRunner} and compares its response. The doer methods are the
- * GeneratedCode* classes of {@code transitsims.validation}. See e2e-test-app.md.
+ * GeneratedCode* classes of {@code transitsims.validation}. See src/test/resources/e2e/transitsims/README.md.
  * <p>
  * The same checks run on Transit Sims built and run in different ways; the implementing class says how:
  * <ul>
