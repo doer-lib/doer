@@ -337,6 +337,5 @@ The compiler then checks the name, and renaming the class with an IDE renames th
 
 An extension point for error handling: when retries run out and `@RetryPolicy` switches the task to `fallbackStatus`, a user method is called with the task, its task data and the exception, and can copy information from the exception into the task data (for example, an error code that a later doer method or the UI needs). The updated data is saved with `@TaskDataSaver` together with the status change.
 
-todo: rename jobs java-compatibility & runtime-e2e
 todo: add test to check test data not saved when fallback status set according to RetryPolicy or default retry policy
 todo: intercepted bean check with errors thrown in after method call

@@ -17,9 +17,9 @@ The annotation processing tests check one feature or edge case per test, each on
 
 | Suffix | Runner | Where in CI |
 |---|---|---|
-| `*Test` | surefire, `mvn test` | job `build`: JDK 17, 21, 25, 27 |
-| `*ITCase` | failsafe, `mvn verify`, one JVM per class | job `build`: JDK 17, 21, 25, 27 |
-| `*E2E` | failsafe in the profile `e2e`, `mvn verify -Ddoer.e2e.runtime=<runtime>`, one JVM for all classes | job `e2e`: one runtime per job, JDK 25 |
+| `*Test` | surefire, `mvn test` | job `java-compatibility`: JDK 17, 21, 25, 27 |
+| `*ITCase` | failsafe, `mvn verify`, one JVM per class | job `java-compatibility`: JDK 17, 21, 25, 27 |
+| `*E2E` | failsafe in the profile `e2e`, `mvn verify -Ddoer.e2e.runtime=<runtime>`, one JVM for all classes | job `runtime-e2e`: one runtime per job, JDK 25 |
 
 ## The same checks for build tools and runtimes
 
