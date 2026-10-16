@@ -8,7 +8,7 @@ import java.util.List;
 
 /**
  * Transit Sims in Spring Boot: an executable jar with Jersey, run with {@code java -jar} in a JRE image. What Spring does
- * differently from CDI is in {@code SpringBootMain.java}, written into the work folder only (see e2e-design.md).
+ * differently from CDI is in {@code SpringBootMain.java}, written into the work folder only (see src/test/README.md).
  */
 class SpringBootApp implements E2eApp {
     static final String SPRING_BOOT_VERSION = "4.1.1";
