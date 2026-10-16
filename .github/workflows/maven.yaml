@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
+  java-compatibility:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -53,7 +53,7 @@ jobs:
           key: maven-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   # E2E suite (*E2E classes): Transit Sims in each runtime, in Docker, with one JDK; see src/test/README.md
-  e2e:
+  runtime-e2e:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
