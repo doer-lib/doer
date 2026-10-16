@@ -7,14 +7,23 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.sql.SQLException;
 
-/** A doer method that calls DoerService itself: it inserts a new task, and Doer runs it too. */
+/**
+ * A doer method that calls DoerService itself: it inserts a new task, and Doer runs it too. DoerService comes through
+ * the constructor, a circular reference that Spring can not resolve even with allow-circular-references; it works
+ * because the generated service injects a Provider of this bean. The client proxy of the scope needs a no-arg
+ * constructor as well.
+ */
 @ApplicationScoped
 public class DoerMethodCalls {
-    DoerService doerService;
+    final DoerService doerService;
 
     @Inject
-    public void setDoerService(DoerService doerService) {
+    public DoerMethodCalls(DoerService doerService) {
         this.doerService = doerService;
+    }
+
+    protected DoerMethodCalls() {
+        this(null);
     }
 
     @AcceptStatus("Doer method calls insert")

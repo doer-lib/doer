@@ -65,9 +65,12 @@ public class DoerProcessor extends AbstractProcessor {
     static final Duration DEFAULT_RETRY_DURATION = Duration.ofDays(1);
 
     private static final Pattern DURATION_PATTERN = Pattern.compile("\\s*(\\d+)\\s*(\\w+)\\s*");
-    /** Names of parameters and locals of the generated service that would hide a bean field. */
+    /**
+     * Names a bean does not get in its {@code _inject_<name>} method: "self" is the self reference. The others were
+     * reserved while beans were fields of the generated service, and are kept so that the method names stay the same.
+     */
     private static final Set<String> RESERVED_FIELD_NAMES = Set.of(
-            "task", "status", "args", "dataSource", "data", "type", "updater", "exception", "builder");
+            "task", "status", "args", "dataSource", "data", "type", "updater", "exception", "builder", "self");
     /**
      * Types the generated service refers to by short names. Includes the java.lang ones, because an import of
      * a user class with the same short name would hide them.
@@ -76,7 +79,7 @@ public class DoerProcessor extends AbstractProcessor {
             "com.doer.Task", "com.doer.DoerService", "com.doer.TaskUpdater", "com.doer.TaskAndDataUpdater",
             "java.lang.Override", "java.lang.Exception", "java.lang.Throwable", "java.lang.String",
             "java.lang.Object", "java.lang.Class", "java.lang.Integer", "java.lang.IllegalArgumentException",
-            "jakarta.transaction.Transactional", "jakarta.inject.Inject",
+            "jakarta.transaction.Transactional", "jakarta.inject.Inject", "jakarta.inject.Provider",
             "jakarta.enterprise.context.ApplicationScoped", "jakarta.annotation.Generated",
             "jakarta.json.JsonObjectBuilder", "jakarta.json.JsonObject", "jakarta.json.JsonArrayBuilder",
             "jakarta.json.JsonArray", "jakarta.json.Json", "jakarta.json.JsonWriterFactory",
@@ -656,10 +659,6 @@ public class DoerProcessor extends AbstractProcessor {
             out.println("@ApplicationScoped");
             out.println("@Generated(value = \"" + getClass().getName() + "\", date = \"" + LocalDate.now() + "\")");
             out.println("public class _GeneratedDoerService extends DoerService {");
-            out.println();
-            for (String bean : beans) {
-                out.println("    " + shortcuts.get(bean) + " " + fieldNames.get(bean) + ";");
-            }
             out.print("""
 
                         public _GeneratedDoerService() {
@@ -667,10 +666,9 @@ public class DoerProcessor extends AbstractProcessor {
                             initializeDomains();
                         }
 
-                        @Override
                         @Inject
-                        public void setSelfReference(DoerService self) {
-                            super.setSelfReference(self);
+                        public void _inject_self(Provider<DoerService> provider) {
+                            beanProviders.put(DoerService.class, provider::get);
                         }
 
                         @Override
@@ -686,10 +684,12 @@ public class DoerProcessor extends AbstractProcessor {
                         }
 
                     """);
+            // Providers instead of beans: the beans may inject DoerService (see DoerService.beanProviders)
             for (String bean : beans) {
                 out.println("    @Inject");
-                out.println("    public void _inject_" + fieldNames.get(bean) + "(" + shortcuts.get(bean) + " value) {");
-                out.println("        this." + fieldNames.get(bean) + " = value;");
+                out.println("    public void _inject_" + fieldNames.get(bean) + "(Provider<" + shortcuts.get(bean)
+                        + "> provider) {");
+                out.println("        beanProviders.put(" + shortcuts.get(bean) + ".class, provider::get);");
                 out.println("    }");
                 out.println();
             }
@@ -719,7 +719,7 @@ public class DoerProcessor extends AbstractProcessor {
                         }
 
                     """);
-            generateExtraJson(out, shortcuts, fieldNames);
+            generateExtraJson(out, shortcuts);
             out.print("""
 
                         @Override
@@ -737,11 +737,11 @@ public class DoerProcessor extends AbstractProcessor {
                         }
 
                     """);
-            generateLoad(out, shortcuts, fieldNames);
+            generateLoad(out, shortcuts);
             out.println();
-            generateSave(out, shortcuts, fieldNames);
+            generateSave(out, shortcuts);
             out.println();
-            generateRunTask(out, shortcuts, fieldNames);
+            generateRunTask(out, shortcuts);
             out.println();
             generateInitializeDomains(out);
             out.println();
@@ -749,7 +749,7 @@ public class DoerProcessor extends AbstractProcessor {
         }
     }
 
-    private void generateExtraJson(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
+    private void generateExtraJson(PrintWriter out, Map<String, String> shortcuts) {
         out.print("""
                     @Override
                     public String createExtraJson(Task task, Exception exception) {
@@ -787,7 +787,7 @@ public class DoerProcessor extends AbstractProcessor {
         for (ExceptionDescriberInfo describer : describers) {
             String exceptionType = shortcuts.get(describer.type());
             out.println("        if (exception instanceof " + exceptionType + ") {");
-            out.println("            " + fieldNames.get(describer.className()) + "." + describer.methodName()
+            out.println("            " + beanRef(describer.className(), shortcuts) + "." + describer.methodName()
                     + "(task, (" + exceptionType + ") exception, builder);");
             out.println("        }");
         }
@@ -816,12 +816,12 @@ public class DoerProcessor extends AbstractProcessor {
                 """);
     }
 
-    private void generateLoad(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
+    private void generateLoad(PrintWriter out, Map<String, String> shortcuts) {
         out.println("    @Override");
         out.println("    protected Object _load(Task task, Class<?> type) throws Exception {");
         for (TypedMethodInfo loader : firstByType(loaders).values()) {
             out.println("        if (" + shortcuts.get(loader.type()) + ".class.equals(type)) {");
-            out.println("            return " + fieldNames.get(loader.className()) + "." + loader.methodName()
+            out.println("            return " + beanRef(loader.className(), shortcuts) + "." + loader.methodName()
                     + "(task);");
             out.println("        }");
         }
@@ -829,13 +829,13 @@ public class DoerProcessor extends AbstractProcessor {
         out.println("    }");
     }
 
-    private void generateSave(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
+    private void generateSave(PrintWriter out, Map<String, String> shortcuts) {
         out.println("    @Override");
         out.println("    protected void _save(Task task, Class<?> type, Object data) throws Exception {");
         for (TypedMethodInfo saver : firstByType(savers).values()) {
             String typeName = shortcuts.get(saver.type());
             out.println("        if (" + typeName + ".class.equals(type)) {");
-            out.println("            " + fieldNames.get(saver.className()) + "." + saver.methodName()
+            out.println("            " + beanRef(saver.className(), shortcuts) + "." + saver.methodName()
                     + "(task, (" + typeName + ") data);");
             out.println("            return;");
             out.println("        }");
@@ -843,7 +843,7 @@ public class DoerProcessor extends AbstractProcessor {
         out.println("    }");
     }
 
-    private void generateRunTask(PrintWriter out, Map<String, String> shortcuts, Map<String, String> fieldNames) {
+    private void generateRunTask(PrintWriter out, Map<String, String> shortcuts) {
         Map<String, TypedMethodInfo> loadersByType = firstByType(loaders);
         Map<String, TypedMethodInfo> saversByType = firstByType(savers);
         Set<String> missingLoadersReported = new HashSet<>();
@@ -875,7 +875,7 @@ public class DoerProcessor extends AbstractProcessor {
                 }
                 TypedMethodInfo loader = loadersByType.get(paramClass);
                 if (loader != null) {
-                    out.println("                    args[" + p + "] = " + fieldNames.get(loader.className()) + "."
+                    out.println("                    args[" + p + "] = " + beanRef(loader.className(), shortcuts) + "."
                             + loader.methodName() + "(task);");
                     continue;
                 }
@@ -895,14 +895,14 @@ public class DoerProcessor extends AbstractProcessor {
                 argumentCodes.add(Task.class.getName().equals(params.get(p)) ? "task"
                         : "(" + shortcuts.get(params.get(p)) + ")args[" + p + "]");
             }
-            out.println("                    " + fieldNames.get(info.className) + "." + info.methodName + "("
+            out.println("                    " + beanRef(info.className, shortcuts) + "." + info.methodName + "("
                     + String.join(", ", argumentCodes) + ");");
             out.println("                    return null;");
             out.println("                }, () -> {");
             for (int p = params.size() - 1; p >= 0; p--) {
                 TypedMethodInfo saver = saversByType.get(params.get(p));
                 if (saver != null && !params.get(p).equals(Task.class.getName())) {
-                    out.println("                    " + fieldNames.get(saver.className()) + "." + saver.methodName()
+                    out.println("                    " + beanRef(saver.className(), shortcuts) + "." + saver.methodName()
                             + "(task, (" + shortcuts.get(params.get(p)) + ")args[" + p + "]);");
                 }
             }
@@ -1322,6 +1322,11 @@ public class DoerProcessor extends AbstractProcessor {
         Map<String, TypedMethodInfo> result = new LinkedHashMap<>();
         methods.forEach(m -> result.putIfAbsent(m.type(), m));
         return result;
+    }
+
+    /** Expression of the generated service that gives the bean of the class. */
+    private static String beanRef(String className, Map<String, String> shortcuts) {
+        return "bean(" + shortcuts.get(className) + ".class)";
     }
 
     /** Classes injected into the generated service, with duplicates. */
