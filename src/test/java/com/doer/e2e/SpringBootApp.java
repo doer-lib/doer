@@ -132,8 +132,6 @@ class SpringBootApp implements E2eApp {
                 spring.datasource.username=${E2E_DB_USER:doer}
                 spring.datasource.password=${E2E_DB_PASSWORD:doer}
                 spring.datasource.hikari.maximum-pool-size=4
-                # The generated service injects itself (setSelfReference)
-                spring.main.allow-circular-references=true
                 # @ApplicationPath of TransitSimsApplication: Spring Boot reads the path from the ResourceConfig bean
                 spring.jersey.application-path=/api
                 server.port=8080

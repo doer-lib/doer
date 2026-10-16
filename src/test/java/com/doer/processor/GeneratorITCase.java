@@ -52,7 +52,7 @@ public class GeneratorITCase implements InWorkspace {
                     public static void main(String[] args) throws Exception {
                         System.out.println("Main method called");
                         var doer = new TestDoerService();
-                        doer._inject_doer1(new Doer1());
+                        doer._inject_doer1(Doer1::new);
                         Task task = new Task();
                         task.setStatus("A");
                         doer.runTask(task);
@@ -65,6 +65,49 @@ public class GeneratorITCase implements InWorkspace {
 
         assertEquals("""
                 Main method called
+                Doer1 method1 called
+                """, result.stdOut());
+    }
+
+    @Test
+    void generated_service__should_look_up_bean_on_first_use_once() throws Exception {
+        writeSource("Doer1.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Doer1 {
+                    @AcceptStatus("A")
+                    public void method1(Task task) {
+                        System.out.println("Doer1 method1 called");
+                    }
+                }
+                """);
+        writeSource("TestDoerService.java", TEST_DOER_SERVICE);
+        writeSource("Main.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Main {
+                    public static void main(String[] args) throws Exception {
+                        var doer = new TestDoerService();
+                        doer._inject_doer1(() -> {
+                            System.out.println("Doer1 looked up");
+                            return new Doer1();
+                        });
+                        System.out.println("Provider injected");
+                        Task task = new Task();
+                        task.setStatus("A");
+                        doer.runTask(task);
+                        doer.runTask(task);
+                    }
+                }
+                """);
+        javac("Doer1.java", "TestDoerService.java", "Main.java").assertStatus(0);
+
+        var result = java("demo.test.Main").assertStatus(0);
+
+        assertEquals("""
+                Provider injected
+                Doer1 looked up
+                Doer1 method1 called
                 Doer1 method1 called
                 """, result.stdOut());
     }
@@ -90,7 +133,7 @@ public class GeneratorITCase implements InWorkspace {
                     public static void main(String[] args) throws Exception {
                         System.out.println("---main---");
                         var doer = new TestDoerService();
-                        doer._inject_doer1(new Doer1());
+                        doer._inject_doer1(Doer1::new);
                         Task task = new Task();
                         task.setStatus("A");
                         doer.runTask(task);
@@ -244,8 +287,8 @@ public class GeneratorITCase implements InWorkspace {
                     public static void main(String[] args) throws Exception {
                         System.out.println("---main---");
                         var doer = new TestDoerService();
-                        doer._inject_doer1(new Doer1());
-                        doer._inject_demoClassLoader(new DemoClassLoader());
+                        doer._inject_doer1(Doer1::new);
+                        doer._inject_demoClassLoader(DemoClassLoader::new);
                         Task task = new Task();
                         task.setStatus("A");
                         doer.runTask(task);
@@ -274,7 +317,7 @@ public class GeneratorITCase implements InWorkspace {
                     public static void main(String[] args) throws Exception {
                         System.out.println("---main---");
                         var doer = new TestDoerService();
-                        doer._inject_main(new Main());
+                        doer._inject_main(Main::new);
                         Task task = new Task();
                         task.setStatus("A");
                         doer.runTask(task);
@@ -331,7 +374,7 @@ public class GeneratorITCase implements InWorkspace {
                                 _save(task, type, data);
                             }
                         };
-                        doer._inject_main(new Main());
+                        doer._inject_main(Main::new);
                         Task task = new Task();
                         task.setStatus("A");
 
@@ -404,7 +447,7 @@ public class GeneratorITCase implements InWorkspace {
                 public class Main {
                     public static void main(String[] args) throws Exception {
                         var doer = new TestDoerService();
-                        doer._inject_orders(new Orders());
+                        doer._inject_orders(Orders::new);
                         Task task = new Task();
                         task.setStatus("A");
                         doer.runTask(task);
@@ -422,7 +465,7 @@ public class GeneratorITCase implements InWorkspace {
                 """, result.stdOut());
         String service = generatedService();
         assertThat(service, containsString("import demo.test.Orders.CancellationContext;"));
-        assertThat(service, containsString("orders.cancel(task, (CancellationContext)args[1]);"));
+        assertThat(service, containsString("bean(Orders.class).cancel(task, (CancellationContext)args[1]);"));
     }
 
     /**
@@ -499,7 +542,7 @@ public class GeneratorITCase implements InWorkspace {
                 public class Main {
                     public static void main(String[] args) throws Exception {
                         var doer = new TestDoerService();
-                        doer._inject_orders(new Orders());
+                        doer._inject_orders(Orders::new);
                         Task task = new Task();
                         task.setStatus("A");
 
@@ -570,7 +613,7 @@ public class GeneratorITCase implements InWorkspace {
                 public class Main {
                     public static void main(String[] args) throws Exception {
                         var doer = new TestDoerService();
-                        doer._inject_describers(new Describers());
+                        doer._inject_describers(Describers::new);
                         Task task = new Task();
                         System.out.println(doer.createExtraJson(task, new Exception()));
                         System.out.println("---");

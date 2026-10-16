@@ -49,7 +49,7 @@ You can enable it for all processors using -Dmaven.compiler.proc=full, or config
 
 ### What the library provides
 
-Define workflows in your backend using annotations. The annotation processor generates the implementation of `com.doer.DoerService`, which your backend can inject and use as a regular dependency.
+Define workflows in your backend using annotations. The annotation processor generates the implementation of `com.doer.DoerService`, which your backend can inject and use as a regular dependency. Beans with doer methods may inject `DoerService` too: the generated service injects providers of the beans and looks them up on first use, so there is no circular reference to resolve, in Spring as well.
 
 ```java
 @ApplicationScoped

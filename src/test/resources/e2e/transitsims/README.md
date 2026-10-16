@@ -133,7 +133,7 @@ What `runTask` of the generated service does. The variety of annotations is the 
 
 | Case | Code |
 |---|---|
-| the beans are injected into the generated service (`_inject_*`), and the method of the right bean is called | `GeneratedCodeMethods`, `GeneratedCodeFailures`, `GeneratedCodeTaskData` |
+| the providers of the beans are injected into the generated service (`_inject_*`), the bean is looked up on first use, and the method of the right bean is called | `GeneratedCodeMethods`, `GeneratedCodeFailures`, `GeneratedCodeTaskData` |
 | doer method with 1 parameter: `Task` | `GeneratedCodeMethods.oneParam` |
 | 2 parameters, `Task` not first; a loader in a bean without doer methods | `GeneratedCodeMethods.twoParams` ← `GeneratedCodeTaskData.loadFirst` |
 | 3 parameters; 2 loaders in different beans | `GeneratedCodeMethods.threeParams` ← `GeneratedCodeTaskData.loadFirst`, `GeneratedCodeMethods.loadSecond` |
@@ -153,6 +153,7 @@ What `runTask` of the generated service does. The variety of annotations is the 
 | an interceptor binding on a doer method | the method is called through the interceptor | `BeanKindIntercepted`, `@BeanKindTraced`, `BeanKindTracedInterceptor` |
 | a doer method with its own `@Transactional` | its transaction is apart from Doer's | `TransactionMethods.ownTransaction` |
 | an `@Inject` constructor | CDI also needs a no-arg one for the proxy | `BeanKindConstructor` |
+| a bean that injects `DoerService` through its constructor | a circular reference that Spring does not resolve; the generated service injects a `Provider` of the bean | `DoerMethodCalls` |
 | a JAX-RS resource with doer methods | it needs a scope (see [Rules](#rules-of-the-code)) | `ValidationResource` |
 | a bean in another package, a nested class, inherited doer methods | names and imports in the generated service | `transitsims.validation`, `BeanKinds.Nested`, `BeanKindInherited` |
 
@@ -219,5 +220,6 @@ What the code of Transit Sims follows, and why. A Doer user meets the same quest
 - **`@jakarta.inject.Singleton` alone does not make a CDI bean** (nor does `@Named`): a WAR without `beans.xml` does not discover `BeanKindSingleton`. Quarkus does; the servers get a producer, Jetty the mode `all`.
 - **Reads that precede a coordinated update run in a transaction** (`BusRepository` is `@Transactional`). In Open Liberty a connection taken outside a transaction stays with the request until it ends, so reading a bus and then updating it needed two connections at once, and concurrent boardings exhausted the pool.
 - **No qualifiers, decorators or alternatives** on beans with doer methods: the generated service injects by type.
+- **Beans with doer methods may inject `DoerService`**, also through the constructor (`DoerMethodCalls`). The generated service injects `Provider`s of the beans and of itself and looks the beans up on first use, so Spring Boot needs no `spring.main.allow-circular-references`.
 - **Doer runs with the monitor** (`DoerLifecycle` starts it with `start(true)`), so a delayed task runs after its delay. `E2eEnvironment` stops Doer right after the first start of a node, so that the tests of aspects control Doer through the validation endpoints; a node restarted by a test keeps Doer running.
 - **Open: a doer method in progress when the node stops** stays `in_progress` until the reset of stalled tasks (2 hours): `DoerService.stop()` does not wait for it, and the runtime may stop its transactions before the method ends.

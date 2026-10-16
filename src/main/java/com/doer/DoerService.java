@@ -27,11 +27,13 @@ import java.util.Scanner;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -41,7 +43,16 @@ public abstract class DoerService {
     private static final long MAX_MONITOR_TIMEOUT_MS = 60 * 1000;
     protected static final Logger LOG = Logger.getLogger(DoerService.class.getName());
 
-    private DoerService self;
+    /**
+     * Providers of the beans not looked up yet. The generated service puts a provider here in each @Inject method
+     * instead of the bean, and the bean is looked up on first use (see {@link #bean}). DoerService and the beans it
+     * calls may refer to each other, and DoerService calls itself through the container, so with providers no
+     * container has to resolve a circular reference. A provider is removed after the first successful lookup, so it
+     * can be garbage collected.
+     */
+    protected final ConcurrentHashMap<Class<?>, Supplier<?>> beanProviders = new ConcurrentHashMap<>();
+    /** Beans looked up by their providers, and the self reference. */
+    private final ConcurrentHashMap<Class<?>, Object> beans = new ConcurrentHashMap<>();
     private Executor executor;
     private DataSource dataSource;
 
@@ -68,11 +79,36 @@ public abstract class DoerService {
     Instant lastStalledTaskChecked = Instant.now();
 
     public DoerService getSelfReference() {
-        return self;
+        return self();
     }
 
     public void setSelfReference(DoerService self) {
-        this.self = self;
+        beans.put(DoerService.class, self);
+        beanProviders.remove(DoerService.class);
+    }
+
+    /** This service as the container gives it to other beans, so that calls go through its interceptors. */
+    private DoerService self() {
+        return bean(DoerService.class);
+    }
+
+    /**
+     * The bean of the type, looked up by its provider on first use, once. When the provider throws or returns null,
+     * nothing is stored and the next call asks the provider again. A provider must not create a bean that calls
+     * DoerService while it is created: the lookup of another bean inside a lookup fails ("Recursive update").
+     */
+    protected <T> T bean(Class<T> type) {
+        return type.cast(beans.computeIfAbsent(type, t -> {
+            Supplier<?> provider = beanProviders.get(t);
+            if (provider == null) {
+                throw new IllegalStateException("No provider of bean " + t.getName() + " was injected");
+            }
+            Object bean = provider.get();
+            if (bean != null) {
+                beanProviders.remove(t);
+            }
+            return bean;
+        }));
     }
 
     public Executor getExecutor() {
@@ -141,7 +177,7 @@ public abstract class DoerService {
             taskLoadRequired = true;
             if (!loadingInProgress) {
                 loadingInProgress = true;
-                executor.execute(self::reloadTasksFromDb);
+                executor.execute(self()::reloadTasksFromDb);
             }
         }
     }
@@ -368,7 +404,7 @@ public abstract class DoerService {
 
     private void reloadQueuedTask(long taskId) {
         try {
-            Task task = self.loadTask(taskId);
+            Task task = self().loadTask(taskId);
             if (task != null && !task.isInProgress()) {
                 synchronized (this) {
                     for (Task t : inProgressTasks) {
@@ -419,12 +455,12 @@ public abstract class DoerService {
             Iterator<Task> iterator = reCheckTasks.iterator();
             while (iterator.hasNext()) {
                 Task task = iterator.next();
-                Task dbTask = self.loadTask(task.getId());
+                Task dbTask = self().loadTask(task.getId());
                 if (dbTask == null) {
                     iterator.remove();
                 } else if (dbTask.getVersion() > task.getVersion()) {
                     iterator.remove();
-                    self.triggerTaskReloadFromDb(task.getId());
+                    self().triggerTaskReloadFromDb(task.getId());
                 } else if (getDbNow().isAfter(dbTask.getModified().plusSeconds(10))) {
                     iterator.remove();
                 }
@@ -464,7 +500,7 @@ public abstract class DoerService {
             lastSelectTime = getDbNow();
         }
         try {
-            List<Task> tasksFromDb = self.loadTasksFromDatabase(limits);
+            List<Task> tasksFromDb = self().loadTasksFromDatabase(limits);
             String infoMessage;
             synchronized (this) {
                 if (isRunning) {
@@ -481,10 +517,10 @@ public abstract class DoerService {
         } finally {
             synchronized (this) {
                 if (taskLoadRequired) {
-                    executor.execute(self::reloadTasksFromDb);
+                    executor.execute(self()::reloadTasksFromDb);
                 } else {
                     loadingInProgress = false;
-                    executor.execute(self::checkTasksBecomeReady);
+                    executor.execute(self()::checkTasksBecomeReady);
                 }
             }
         }
@@ -699,7 +735,7 @@ public abstract class DoerService {
             String className, String methodName, Duration errorTimeout, String onErrorStatus) throws Exception {
         String initialStatus = task.getStatus();
         long t0 = System.currentTimeMillis();
-        self.runInTransaction(() -> {
+        self().runInTransaction(() -> {
             task.setInProgress(true);
             updateAndBumpVersionOrThrow(task);
             loader.call();
@@ -715,7 +751,7 @@ public abstract class DoerService {
         }
         if (exception == null) {
             try {
-                self.runInTransaction(() -> {
+                self().runInTransaction(() -> {
                     task.setFailingSince(null);
                     task.setInProgress(false);
                     updateAndBumpVersionOrThrow(task);
@@ -733,7 +769,7 @@ public abstract class DoerService {
             }
         }
         Exception finalException = exception;
-        self.runInTransaction(() -> {
+        self().runInTransaction(() -> {
             if (task.getFailingSince() == null) {
                 task.setFailingSince(getDbNow());
                 task.setStatus(initialStatus);
@@ -822,7 +858,7 @@ public abstract class DoerService {
     private <T> Task attemptCoordinatedUpdate(long taskId, boolean allowInProgressRowLock, boolean allowHijacking,
             Class<T> dataType, TaskAndDataUpdater<T> updater, String className, String methodName) throws Exception {
         Task[] result = new Task[1];
-        self.runInTransaction(() -> {
+        self().runInTransaction(() -> {
             Task task = selectTaskForUpdate(taskId, allowInProgressRowLock);
             if (task == null) {
                 if (allowInProgressRowLock) {
@@ -891,7 +927,7 @@ public abstract class DoerService {
     public void triggerStalledTaskReset() {
         executor.execute(() -> {
             try {
-                self.resetStalledInProgressTasks(stalledTaskTimeout);
+                self().resetStalledInProgressTasks(stalledTaskTimeout);
             } catch (SQLException e) {
                 LOG.log(Level.WARNING, "Error resetting stalled tasks", e);
             }
