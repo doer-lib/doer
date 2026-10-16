@@ -131,6 +131,58 @@ public class DoerServiceTest {
         }
     }
 
+    @Test
+    void bean__should_look_up_bean_on_first_use_once_and_drop_provider() {
+        List<String> lookups = new ArrayList<>();
+        service.beanProviders.put(StringBuilder.class, () -> {
+            lookups.add("lookup");
+            return new StringBuilder("bean");
+        });
+        assertEquals(List.of(), lookups);
+
+        StringBuilder first = service.bean(StringBuilder.class);
+        StringBuilder second = service.bean(StringBuilder.class);
+
+        assertSame(first, second);
+        assertEquals(List.of("lookup"), lookups);
+        assertFalse(service.beanProviders.containsKey(StringBuilder.class));
+    }
+
+    @Test
+    void bean__should_keep_provider_when_it_returns_null_or_throws() {
+        LinkedList<Object> results = new LinkedList<>(List.of("null", "fail", "bean"));
+        service.beanProviders.put(String.class, () -> switch ((String) results.poll()) {
+            case "null" -> null;
+            case "fail" -> throw new IllegalStateException("not ready");
+            default -> "bean";
+        });
+
+        assertNull(service.bean(String.class));
+        assertEquals("not ready", assertThrows(IllegalStateException.class, () -> service.bean(String.class))
+                .getMessage());
+        assertTrue(service.beanProviders.containsKey(String.class));
+        assertEquals("bean", service.bean(String.class));
+        assertFalse(service.beanProviders.containsKey(String.class));
+    }
+
+    @Test
+    void bean__should_fail_without_provider() {
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> service.bean(String.class));
+
+        assertEquals("No provider of bean java.lang.String was injected", e.getMessage());
+    }
+
+    @Test
+    void setSelfReference__should_replace_provider_of_self() {
+        TstDoerService other = new TstDoerService();
+        other.beanProviders.put(DoerService.class, () -> fail("the provider must not be used"));
+
+        other.setSelfReference(service);
+
+        assertSame(service, other.getSelfReference());
+        assertFalse(other.beanProviders.containsKey(DoerService.class));
+    }
+
     /** Waits until the thread of the idle monitor waits for its next check. */
     private static void waitUntilIdleMonitorWaits() throws InterruptedException {
         Instant deadline = Instant.now().plusSeconds(5);
