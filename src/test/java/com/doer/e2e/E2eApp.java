@@ -7,7 +7,7 @@ import java.util.List;
 
 /**
  * Transit Sims in one runtime: turns the Transit Sims sources into a Maven project in the work folder and says how to run the
- * built artifact in Docker. {@link E2eEnvironment} builds the project and runs it. See e2e-design.md.
+ * built artifact in Docker. {@link E2eEnvironment} builds the project and runs it. See src/test/README.md.
  */
 public interface E2eApp {
 

@@ -319,3 +319,24 @@ There is no common base exception. `DoerService` methods also throw `SQLExceptio
   - `retry` and `error_status` of doer methods become `interval`, `duration` and `fallback_status`;
   - the sections `unloaders` and `extra_json_appenders` become `savers` and `exception_describers`.
 - README, the tutorial repository and `sync-with-doerservice-design.md` use the old names and need updating with the release.
+
+## Ideas for later
+
+Not part of v1; noted so they are not lost.
+
+### Concurrency domains named by classes
+
+`@ConcurrencyGroup` takes a class instead of a string: `@ConcurrencyGroup(OrderProcessor.class)`.
+
+- A class without `@ConcurrencyGroup` runs in the domain of the class itself, as today.
+- Wherever `@ConcurrencyGroup` is used, on a class or on a method, it names a class.
+
+The compiler then checks the name, and renaming the class with an IDE renames the domain too. Joining another class's domain is no longer a special case: `@ConcurrencyGroup(OrderProcessor.class)` always refers to an existing class. Open question: what happens to the `Class.method` domains that a method-level `@ConcurrencyLimit` creates today.
+
+### Updating task data on fallback
+
+An extension point for error handling: when retries run out and `@RetryPolicy` switches the task to `fallbackStatus`, a user method is called with the task, its task data and the exception, and can copy information from the exception into the task data (for example, an error code that a later doer method or the UI needs). The updated data is saved with `@TaskDataSaver` together with the status change.
+
+todo: rename jobs java-compatibility & runtime-e2e
+todo: add test to check test data not saved when fallback status set according to RetryPolicy or default retry policy
+todo: intercepted bean check with errors thrown in after method call
