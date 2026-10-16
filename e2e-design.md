@@ -13,7 +13,7 @@ Both ask it about the same code: [Transit Sims](src/test/resources/e2e/transitsi
 
 ## Done
 
-1. **Infrastructure on Quarkus.** `E2eEnvironment`: Postgres and WireMock in Docker, the application as `docker run` of an artifact built by Maven in a work folder, restarts and a second node; the Maven profile `e2e`; the CI job `e2e`. `QuarkusITCase` and its fragile project generation are gone.
+1. **Infrastructure on Quarkus.** `E2eEnvironment`: Postgres and WireMock in Docker, the application as `docker run` of an artifact built by Maven in a work folder, restarts and a second node; the Maven profile `e2e`; the CI job `runtime-e2e`. `QuarkusITCase` and its fragile project generation are gone.
 2. **The generated code on the same sources.** `GeneratedCodeTest` runs the same checks with javac, Maven and in every runtime.
 3. **Transit Sims** replaced CarWash: a simulation of buses and passengers, and validation classes for every aspect of Doer; the map of the cases is in its README.
 4. **Spring Boot**, with Jersey; what Spring does differently from CDI is in a generated `SpringBootMain.java`.
