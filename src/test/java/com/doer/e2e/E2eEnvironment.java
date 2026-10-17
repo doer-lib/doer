@@ -2,6 +2,8 @@ package com.doer.e2e;
 
 import static com.doer.testkit.Toolchain.property;
 
+import com.doer.e2e.runtime.DockerRunSpec;
+import com.doer.e2e.runtime.E2eApp;
 import com.doer.testkit.Postgres;
 import com.doer.testkit.Processes;
 import com.doer.testkit.RunResult;
@@ -71,7 +73,7 @@ public class E2eEnvironment implements BeforeAllCallback {
     private static Throwable startFailure;
     private static DataSource dataSource;
     private static Network network;
-    private static E2eApp.DockerRun dockerRun;
+    private static DockerRunSpec dockerRun;
     private static Map<String, String> appEnv;
     private static final Map<Integer, AppNode> nodes = new TreeMap<>();
 
@@ -105,20 +107,8 @@ public class E2eEnvironment implements BeforeAllCallback {
         return EXTERNAL.equals(runtime);
     }
 
-    /** The {@link E2eApp} of the runtime. */
-    static E2eApp app(String runtime) {
-        return switch (runtime) {
-            case "quarkus" -> new QuarkusApp();
-            case "spring-boot" -> new SpringBootApp();
-            case "wildfly" -> new WildflyApp();
-            case "open-liberty" -> new OpenLibertyApp();
-            case "jetty" -> new JettyApp();
-            default -> throw new IllegalArgumentException("Unknown doer.e2e.runtime: " + runtime);
-        };
-    }
-
     private static void startInDocker() throws Exception {
-        E2eApp app = app(runtime);
+        E2eApp app = E2eApp.of(runtime);
         Runtime.getRuntime().addShutdownHook(new Thread(E2eEnvironment::destroyNodes));
 
         long t0 = System.currentTimeMillis();
@@ -146,7 +136,9 @@ public class E2eEnvironment implements BeforeAllCallback {
         } else {
             Workspaces.recreate(workdir);
             app.configure(workdir);
-            RunResult build = Toolchain.mvn(workdir, "mvn-package", "package");
+            // The doer of doer.lib.version, not the default of doer.version in the pom.xml of the runtime
+            RunResult build = Toolchain.mvn(workdir, "mvn-package", "package",
+                    "-Ddoer.version=" + Toolchain.doerLibVersion);
             build.assertStatus(0);
             System.out.printf("✔ Transit Sims for %s built in %s ms: %s%n", runtime, build.runMilliseconds(), workdir);
         }

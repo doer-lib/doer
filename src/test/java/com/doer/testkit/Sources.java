@@ -23,29 +23,37 @@ public final class Sources {
         Files.writeString(file, content);
     }
 
-    /** Copies a folder of test resources (for example {@code e2e/transitsims}) into the target folder. */
-    public static void copyResources(String resourceFolder, Path target) throws IOException {
+    /** The folder of test resources (for example {@code e2e/transitsims}) on the file system. */
+    public static Path resourceFolder(String resourceFolder) throws IOException {
         URL url = Sources.class.getClassLoader().getResource(resourceFolder);
         if (url == null) {
             throw new IOException("No test resource folder " + resourceFolder);
         }
-        Path source;
         try {
-            source = Path.of(url.toURI());
+            return Path.of(url.toURI());
         } catch (URISyntaxException e) {
             throw new IOException(e);
         }
+    }
+
+    /** Copies a folder of test resources (for example {@code e2e/transitsims}) into the target folder. */
+    public static void copyResources(String resourceFolder, Path target) throws IOException {
+        Path source = resourceFolder(resourceFolder);
         try (Stream<Path> files = Files.walk(source)) {
             files.filter(Files::isRegularFile).forEach(file -> {
-                Path copy = target.resolve(source.relativize(file).toString());
                 try {
-                    Files.createDirectories(copy.getParent());
-                    Files.copy(file, copy, StandardCopyOption.REPLACE_EXISTING);
+                    copy(file, target.resolve(source.relativize(file).toString()));
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
             });
         }
+    }
+
+    /** Copies the file to the target file, creating its folders. */
+    public static void copy(Path source, Path target) throws IOException {
+        Files.createDirectories(target.getParent());
+        Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
     }
 
     /** Paths of the .java files under the folder, relative to it. */

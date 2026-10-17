@@ -24,7 +24,7 @@ import org.springframework.util.ClassUtils;
 
 /**
  * Transit Sims in Spring Boot: what a Spring application gives Doer. The CDI annotations of Transit Sims are Spring ones
- * here (rewrite.yml), and its JAX-RS resources and providers are Spring beans. Written by the e2e suite (SpringBootApp).
+ * here (rewrite.yml), and its JAX-RS resources and providers are Spring beans. Copied by the e2e suite (SpringBootApp).
  */
 @SpringBootApplication
 @Import(_GeneratedDoerService.class) // generated in com.doer.generated, outside the scan

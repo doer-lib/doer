@@ -1,0 +1,3 @@
+embed-server --std-out=echo
+/subsystem=ee/managed-executor-service=default:write-attribute(name=core-threads, value=200)
+stop-embedded-server
