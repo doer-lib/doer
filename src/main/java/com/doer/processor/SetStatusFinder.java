@@ -21,12 +21,8 @@ import com.sun.source.util.TreePathScanner;
 import com.sun.source.util.Trees;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 import javax.annotation.processing.ProcessingEnvironment;
-import javax.annotation.processing.RoundEnvironment;
-import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
-import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
@@ -35,25 +31,29 @@ import javax.lang.model.type.TypeMirror;
 /**
  * Finds constant statuses passed to {@link Task#setStatus(String)} in method
  * bodies and adds them to {@link DoerMethodInfo#emitList}.
+ * <p>
+ * Must scan only classes that javac has already attributed (after the ANALYZE task event), so that
+ * {@link Trees#getElement} only reads symbols. Attributing method bodies from an annotation processor,
+ * before the classes it generates exist, breaks compilation of anonymous classes on javac 17-25.
  */
-public class SetStatusFinder {
+class SetStatusFinder {
 
-    private final RoundEnvironment roundEnv;
     private final Trees trees;
-    private List<DoerMethodInfo> methods;
+    private final List<DoerMethodInfo> methods;
 
-    public SetStatusFinder(RoundEnvironment roundEnv, ProcessingEnvironment processingEnv) {
-        this.roundEnv = roundEnv;
+    /** @param methods doer methods; methods that set a status but are not doer methods are added to it */
+    SetStatusFinder(ProcessingEnvironment processingEnv, List<DoerMethodInfo> methods) {
         this.trees = Trees.instance(processingEnv);
+        this.methods = methods;
     }
 
-    public void updateDoerMethods(List<DoerMethodInfo> methods) {
-        this.methods = methods;
-        for (Element element : roundEnv.getRootElements()) {
-            if (element instanceof TypeElement) {
-                scanType((TypeElement) element);
-            }
+    /** Scans a top-level class with its nested classes. */
+    void scanTopLevelType(TypeElement type) {
+        if (type == null || trees.getPath(type) == null) {
+            // package-info and module-info have no class tree
+            return;
         }
+        scanType(type);
     }
 
     private void scanType(TypeElement type) {
@@ -61,28 +61,23 @@ public class SetStatusFinder {
             return;
         }
         for (Element enclosed : type.getEnclosedElements()) {
-            if (enclosed instanceof TypeElement) {
-                scanType((TypeElement) enclosed);
-            } else if (enclosed instanceof ExecutableElement) {
-                scanExecutable((ExecutableElement) enclosed);
+            if (enclosed instanceof TypeElement nested) {
+                scanType(nested);
+            } else if (enclosed instanceof ExecutableElement executable) {
+                scanExecutable(executable);
             }
         }
     }
 
     private boolean isClassGenerated(TypeElement e) {
-        for (AnnotationMirror annotationMirror : e.getAnnotationMirrors()) {
-            if (annotationMirror.getAnnotationType().toString().endsWith(".Generated")) {
-                return true;
-            }
-        }
-        return false;
+        return e.getAnnotationMirrors().stream()
+                .anyMatch(a -> a.getAnnotationType().toString().endsWith(".Generated"));
     }
 
     private void scanExecutable(ExecutableElement e) {
         TreePath methodPath = trees.getPath(e);
         if (methodPath == null) {
-            // Enum and record can have methods without body
-            // We just skip them
+            // Implicit methods of enums and records have no tree
             return;
         }
         BlockTree body = ((MethodTree) methodPath.getLeaf()).getBody();
@@ -101,7 +96,7 @@ public class SetStatusFinder {
                 .stream()
                 .map(VariableElement::asType)
                 .map(TypeMirror::toString)
-                .collect(Collectors.toList());
+                .toList();
         DoerMethodInfo doerMethod = findDoerMethodInfo(className, methodName, parameterTypes);
         if (doerMethod.element == null) {
             doerMethod.element = e;
@@ -110,19 +105,19 @@ public class SetStatusFinder {
     }
 
     private DoerMethodInfo findDoerMethodInfo(String className, String methodName, List<String> parameterTypes) {
-        for (DoerMethodInfo method : methods) {
-            if (className.equals(method.className)
-                    && methodName.equals(method.methodName)
-                    && parameterTypes.equals(method.parameterTypes)) {
-                return method;
-            }
-        }
-        DoerMethodInfo newMethod = new DoerMethodInfo();
-        newMethod.className = className;
-        newMethod.methodName = methodName;
-        newMethod.parameterTypes = parameterTypes;
-        methods.add(newMethod);
-        return newMethod;
+        return methods.stream()
+                .filter(m -> className.equals(m.className)
+                        && methodName.equals(m.methodName)
+                        && parameterTypes.equals(m.parameterTypes))
+                .findFirst()
+                .orElseGet(() -> {
+                    DoerMethodInfo newMethod = new DoerMethodInfo();
+                    newMethod.className = className;
+                    newMethod.methodName = methodName;
+                    newMethod.parameterTypes = parameterTypes;
+                    methods.add(newMethod);
+                    return newMethod;
+                });
     }
 
     // Walks the whole method body and collects statuses of every Task.setStatus call.
@@ -144,26 +139,10 @@ public class SetStatusFinder {
             if (!"setStatus".contentEquals(memberSelect.getIdentifier())) {
                 return false;
             }
-            ExpressionTree receiver = memberSelect.getExpression();
-            TreePath receiverPath = new TreePath(new TreePath(getCurrentPath(), methodSelect), receiver);
-            Element element = trees.getElement(receiverPath);
-
-            String className;
-            if (element == null) {
-                // WORKAROUND for Java 1.8
-                // javac 1.8 may not provide element here.
-                // So we use heuristics to find if it is Task object whose setStatus is being called.
-                String name = receiver.toString();
-                boolean looksLikeTask = name.toLowerCase().endsWith("task") || name.equals("t");
-                className = looksLikeTask ? Task.class.getName() : "UnknownType";
-            } else if (element.getKind() == ElementKind.METHOD) {
-                className = ((ExecutableElement) element).getReturnType().toString();
-            } else if (element.getKind() == ElementKind.CONSTRUCTOR) {
-                className = element.getEnclosingElement().toString();
-            } else {
-                className = element.asType().toString();
-            }
-            return Task.class.getName().equals(className);
+            TreePath receiverPath = new TreePath(new TreePath(getCurrentPath(), methodSelect),
+                    memberSelect.getExpression());
+            TypeMirror receiverType = trees.getTypeMirror(receiverPath);
+            return receiverType != null && Task.class.getName().equals(receiverType.toString());
         }
     }
 
@@ -172,54 +151,31 @@ public class SetStatusFinder {
     private void collectConstantValues(TreePath path, List<String> statuses) {
         Tree expression = path.getLeaf();
         switch (expression.getKind()) {
-            case NULL_LITERAL:
-                statuses.add(null);
-                break;
-            case STRING_LITERAL:
-                statuses.add(((LiteralTree) expression).getValue().toString());
-                break;
-            case PARENTHESIZED:
-                collectConstantValues(new TreePath(path, ((ParenthesizedTree) expression).getExpression()), statuses);
-                break;
-            case TYPE_CAST:
-                collectConstantValues(new TreePath(path, ((TypeCastTree) expression).getExpression()), statuses);
-                break;
-            case CONDITIONAL_EXPRESSION:
+            case NULL_LITERAL -> statuses.add(null);
+            case STRING_LITERAL -> statuses.add(((LiteralTree) expression).getValue().toString());
+            case PARENTHESIZED -> collectConstantValues(
+                    new TreePath(path, ((ParenthesizedTree) expression).getExpression()), statuses);
+            case TYPE_CAST -> collectConstantValues(
+                    new TreePath(path, ((TypeCastTree) expression).getExpression()), statuses);
+            case CONDITIONAL_EXPRESSION -> {
                 ConditionalExpressionTree conditional = (ConditionalExpressionTree) expression;
                 collectConstantValues(new TreePath(path, conditional.getTrueExpression()), statuses);
                 collectConstantValues(new TreePath(path, conditional.getFalseExpression()), statuses);
-                break;
-            case IDENTIFIER:
-            case MEMBER_SELECT:
-                addConstantVariableValue(trees.getElement(path), statuses);
-                break;
-            default:
-                // Compared by name, because Kind.SWITCH_EXPRESSION does not exist in Java 1.8
-                if ("SWITCH_EXPRESSION".equals(expression.getKind().name())) {
-                    new SwitchResultScanner(statuses).scan(path, null);
+            }
+            case IDENTIFIER, MEMBER_SELECT -> {
+                // Only String constants: final fields and locals initialized with a constant expression
+                if (trees.getElement(path) instanceof VariableElement variable
+                        && variable.getConstantValue() instanceof String value) {
+                    statuses.add(value);
                 }
-                break;
-        }
-    }
-
-    private void addConstantVariableValue(Element element, List<String> statuses) {
-        if (element == null) {
-            // workaround for java 1.8
-            // no workaround found
-            return;
-        }
-        ElementKind kind = element.getKind();
-        if ((kind == ElementKind.FIELD || kind == ElementKind.LOCAL_VARIABLE)
-                && "java.lang.String".equals(element.asType().toString())) {
-            Object value = ((VariableElement) element).getConstantValue();
-            if (value != null) {
-                statuses.add(value.toString());
+            }
+            case SWITCH_EXPRESSION -> new SwitchResultScanner(statuses).scan(path, null);
+            default -> {
             }
         }
     }
 
     // Collects results of a single switch expression: arrow case expressions and yield values.
-    // Loaded only for switch expressions, so Java 1.8 never touches classes missing there.
     private class SwitchResultScanner extends TreePathScanner<Void, Void> {
         private final List<String> statuses;
         private SwitchExpressionTree root;
