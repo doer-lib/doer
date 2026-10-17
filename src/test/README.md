@@ -71,12 +71,12 @@ mvn verify -Ddoer.e2e.runtime=external -Ddoer.e2e.base-url=… -Ddoer.e2e.jdbc-u
 
 ### Runtimes
 
-Each runtime is one class in [`com.doer.e2e`](java/com/doer/e2e). Transit Sims stays the same; what a runtime needs is written into the work folder only, as text blocks with a comment on why. These are the settings a Doer user needs in that runtime.
+Each runtime is one class in [`com.doer.e2e`](java/com/doer/e2e). Transit Sims stays the same (Spring Boot compiles it with Spring annotations, see below); what a runtime needs is written into the work folder only, as text blocks with a comment on why. These are the settings a Doer user needs in that runtime.
 
 | Runtime | Class | Artifact and image | What the test adds |
 |---|---|---|---|
 | Quarkus 3 | `QuarkusApp` | `quarkus-app` in a JRE 25 image | `application.properties`: data source, Flyway at start |
-| Spring Boot 4 | `SpringBootApp` | executable jar in a JRE 25 image | `SpringBootMain.java`: CDI scopes as Spring scopes, a transaction-aware `DataSource`, the `Executor`, Jersey resources bound to Spring beans, Doer started and stopped by a `SmartLifecycle`, a `@Bean` for the CDI producer, CDI interceptors as a Spring advisor |
+| Spring Boot 4 | `SpringBootApp` | executable jar in a JRE 25 image | the sources as a Spring application: `@Scope("prototype")` next to `@Dependent` and the CDI `@Produces`, `@Component` on the JAX-RS classes without a scope, then OpenRewrite (`e2e/spring-boot/rewrite.yml`, run as `rewrite-maven-plugin:runNoFork` in a `git init` work folder: it skips the files git ignores) replaces the CDI annotations with Spring ones. From [`e2e/spring-boot`](resources/e2e/spring-boot): `SpringBootMain.java` (`@Import` of the generated service, a transaction-aware `DataSource`, the `Executor`, the Jersey resources registered from the Spring beans), `DoerLifecycle` as a `SmartLifecycle` (Spring has no `Startup`/`Shutdown` events), `BeanKindTracedInterceptor` as an aspect. OpenRewrite needs JDK 25 to parse Java 25 (it fails on JDK 27) |
 | WildFly 41 | `WildflyApp` | `ROOT.war` in the WildFly image | `transitsims-ds.xml` with system properties (WildFly does not read environment variables there); JSON-B instead of Jackson; `core-threads=200` of the `ManagedExecutorService` (by default as many as processors); a start command with `exec` (`standalone.sh` turns the exit code 143 into 0) |
 | Open Liberty 26 | `OpenLibertyApp` | `ROOT.war`, `server.xml` and the driver in the Open Liberty image | `server.xml`: features, data source, context root `/`, INFO on the console, `coreThreads=200`; `flyway.location` (how Flyway finds a location in Liberty) |
 | Jetty 12 | `JettyApp` | `ROOT.war` with Weld, Jersey, Narayana and Agroal in the Jetty image | `beans.xml` with the mode `all` (Jersey makes resources without a scope CDI beans only if CDI discovers them), `web.xml`, a transactional `DataSource` of Agroal and Narayana, the `Executor` |
