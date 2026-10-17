@@ -3,6 +3,7 @@ package com.doer.e2e;
 import static java.nio.file.StandardOpenOption.APPEND;
 import static java.nio.file.StandardOpenOption.CREATE;
 
+import com.doer.e2e.runtime.DockerRunSpec;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
@@ -41,13 +42,13 @@ class AppNode {
     private final String runtime;
     private final String network;
     private final Map<String, String> env;
-    private final E2eApp.DockerRun dockerRun;
+    private final DockerRunSpec dockerRun;
     private Process process;
     private String name;
     private int starts;
 
     AppNode(String runtime, int node, Path workdir, String network, Map<String, String> env,
-            E2eApp.DockerRun dockerRun) {
+            DockerRunSpec dockerRun) {
         this.runtime = runtime;
         this.node = node;
         this.network = network;

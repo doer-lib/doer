@@ -7,7 +7,7 @@ import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.springframework.stereotype.Component;
 
-/** The Spring version of the interceptor of {@link BeanKindTraced}: an aspect. Written by the e2e suite (SpringBootApp). */
+/** The Spring version of the interceptor of {@link BeanKindTraced}: an aspect. Copied by the e2e suite (SpringBootApp). */
 @Aspect
 @Component
 public class BeanKindTracedInterceptor {

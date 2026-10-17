@@ -8,7 +8,7 @@ import org.springframework.stereotype.Component;
 /**
  * The Spring version of DoerLifecycle (Spring does not fire the CDI events Startup and Shutdown). Doer starts, with the
  * monitor of delayed tasks, before Tomcat accepts requests and stops after Tomcat has stopped accepting them, before the
- * DataSource and the Executor are destroyed: the phase is below the ones of the web server. Written by the e2e suite
+ * DataSource and the Executor are destroyed: the phase is below the ones of the web server. Copied by the e2e suite
  * (SpringBootApp).
  */
 @Component

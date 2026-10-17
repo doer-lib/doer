@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<datasources xmlns="http://www.jboss.org/ironjacamar/schema">
+    <!-- The defaults are for a run from the IDE (doer.e2e.runtime=external) -->
+    <datasource jndi-name="java:jboss/datasources/TransitSims" pool-name="TransitSims">
+        <connection-url>${e2e.db.url:jdbc:postgresql://localhost:5432/doer}</connection-url>
+        <!-- The driver of the WAR, registered as ROOT.war_<driver class>_<major>_<minor>: 42.7 is postgresql.version
+             of pom.xml -->
+        <driver>ROOT.war_org.postgresql.Driver_42_7</driver>
+        <pool>
+            <max-pool-size>4</max-pool-size>
+        </pool>
+        <security>
+            <user-name>${e2e.db.user:doer}</user-name>
+            <password>${e2e.db.password:doer}</password>
+        </security>
+    </datasource>
+</datasources>
