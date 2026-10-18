@@ -33,7 +33,7 @@ v1 is the last chance to rename public types without a deprecation cycle. This d
 5. **`OnException` has a mini-language and a required field that is sometimes ignored.** `retry = "every 5s during 10s"` mixes two durations in one string, while `AcceptStatus.delay` is a plain duration (`"5s"`). `setStatus` is required, but without `during ...` the task retries forever and the status is never used.
 6. **`OptimisticLockException` has the same simple name as `jakarta.persistence.OptimisticLockException`.** Code that uses JPA and Doer together has to qualify one of them. Unlike the other two task exceptions, it also does not expose the task id.
 7. **`ConcurrencyDomain` is public but unreachable.** No public method returns it; `DoerService` keeps the domains in a private field. Its `getValue()` is a leftover from the annotation's `value()`.
-8. **`DoerConcurrency` cannot group methods from different classes.** The domain name is derived from the annotated element: the class name for a class, `Class.method` for a method. v1 adds a separate annotation that names the domain (see below).
+8. **`DoerConcurrency` cannot group methods from different classes.** The domain name is derived from the annotated element: the class name for a class, `Class.method` for a method. v1 adds a separate annotation that puts a method or class into the group of another class (see below).
 
 ## Naming rules
 
@@ -51,7 +51,7 @@ v1 is the last chance to rename public types without a deprecation cycle. This d
 | `@AcceptStatus(value, delay)` | `@AcceptStatus(value, delay)` | Already fits the rules. |
 | `@AcceptStatuses` | `@AcceptStatuses` | Standard Java container name for a repeatable annotation. |
 | `@OnException(retry, setStatus)` | `@RetryPolicy(interval, duration, fallbackStatus)` | Rules 3, 4 and 5; see below. |
-| `@DoerConcurrency(value)` | `@ConcurrencyLimit(value)` and `@ConcurrencyGroup(value)` | Rule 3; the limit and the domain name are separate settings; adds named domains; see below. |
+| `@DoerConcurrency(value)` | `@ConcurrencyLimit(value)` and `@ConcurrencyGroup(value)` | Rule 3; joining a group and declaring its limit are separate settings; groups are identified by classes; see below. |
 | `@DoerLoader` | `@TaskDataLoader` | Rules 3 and 6. |
 | `@DoerUnloader` | `@TaskDataSaver` | Rules 3 and 6; "save" is the usual word. |
 | `@DoerExtraJson` | `@ExceptionDescriber` | Names the role of the method (problem 4); see below. |
@@ -169,22 +169,22 @@ Retrying forever has to be asked for explicitly. To keep the 0.x behaviour, anno
 @RetryPolicy(interval = "5m")    // no duration: retry every 5 minutes, forever
 ```
 
-## `@ConcurrencyGroup`, `@ConcurrencyLimit` and named domains
+## `@ConcurrencyGroup`, `@ConcurrencyLimit` and concurrency groups
 
-`@DoerConcurrency` is split into two annotations: one names the concurrency domain, the other sets its limit.
+`@DoerConcurrency` is split into two annotations: one puts a class or method into a concurrency group, the other declares a group with its limit. A group is identified by a class.
 
 ```java
 @Target({ ElementType.METHOD, ElementType.TYPE })
 @Retention(RetentionPolicy.CLASS)
 public @interface ConcurrencyGroup {
-    /** Name of the concurrency domain the annotated method or class runs in. */
-    String value();
+    /** Class that identifies the concurrency group the annotated method or class runs in. */
+    Class<?> value();
 }
 
 @Target({ ElementType.METHOD, ElementType.TYPE })
 @Retention(RetentionPolicy.CLASS)
 public @interface ConcurrencyLimit {
-    /** Maximum number of tasks of this domain that run at the same time on one node. */
+    /** Maximum number of tasks of this group that run at the same time on one node. */
     int value();
 }
 ```
@@ -192,52 +192,58 @@ public @interface ConcurrencyLimit {
 Usage:
 
 ```java
-@ConcurrencyGroup("com.example.OrderProcessor")
 @ConcurrencyLimit(5)
+public class OrderProcessor { ... }
+
+public class PaymentService {
+    @ConcurrencyGroup(OrderProcessor.class)
+    @AcceptStatus(GOODS_RESERVED)
+    public void payOrder(Task task, Order order) { ... }
+}
 ```
 
-**Why two annotations.** The domain name and the limit are independent settings. Each annotation has a single `value`, so both always use the short form, and the 0.x short form `@DoerConcurrency(5)` becomes `@ConcurrencyLimit(5)`. A method can join a domain with `@ConcurrencyGroup` alone, without repeating the limit declared elsewhere (see "Joining a domain").
+**Why two annotations.** Joining a group and declaring its limit are separate settings. Each annotation has a single `value`, so both always use the short form, and the 0.x short form `@DoerConcurrency(5)` becomes `@ConcurrencyLimit(5)`. A method joins a group with `@ConcurrencyGroup` alone, without repeating the limit.
 
-**Why `ConcurrencyGroup` and not `ConcurrencyDomain`.** `@ConcurrencyDomain` would collide with the runtime interface of the same name in `com.doer`. "Group" says what the annotation does: methods and classes with the same name are grouped under one limit.
+**Why a class and not a string.** The compiler checks the reference, and renaming the class with an IDE renames the group too. A string could also name a group that does not exist, or collide with the name derived from a class.
+
+**Why `ConcurrencyGroup` and not `ConcurrencyDomain`.** `@ConcurrencyDomain` would collide with the runtime interface of the same name in `com.doer`. "Group" says what the annotation does: methods and classes that reference the same class are grouped under one limit.
 
 **Why `ConcurrencyLimit` and not `Concurrency`.** The number is a limit. "Limit 5" reads naturally; "concurrency 5" does not say whether 5 is a minimum, a maximum or an exact count.
 
-### Which domain a doer method belongs to
+### Declaring a group
 
-The first rule that applies wins:
+- `@ConcurrencyLimit(n)` on a class declares the group identified by that class, with limit `n`.
+- `@ConcurrencyLimit(n)` on a doer method creates a dedicated group named `<class FQN>.<method>`, used only by that method. No other class or method can join it.
+- A group without a declared limit, for example the group of a class without annotations, gets limit 2 (as today).
+- A class can be just a marker for a group: `@ConcurrencyLimit(3) interface MailGroup {}` and `@ConcurrencyGroup(MailGroup.class)` on the members.
 
-1. The method has `@ConcurrencyGroup`: its `value`.
-2. The method has `@ConcurrencyLimit`: `<class FQN>.<method>` (as today).
-3. The class has `@ConcurrencyGroup`: its `value`.
-4. Otherwise: `<class FQN>` (as today).
+Each group has exactly one place where its limit can be declared: the class that identifies it, or the method. So two limits can never disagree.
 
-`@ConcurrencyLimit` sets the limit of the domain that its element (method or class) resolves to. A class-level `@ConcurrencyLimit` therefore does not apply to a method that has its own `@ConcurrencyGroup` or `@ConcurrencyLimit`. A domain for which no `@ConcurrencyLimit` declares a limit gets limit 2 (as today).
+### Which group a doer method belongs to
 
-Without `@ConcurrencyGroup`, every v1 program gets the same domains as in 0.x.
+The group of a class X:
 
-### Joining a domain
+1. X has `@ConcurrencyGroup(Y.class)` with Y ≠ X: the group of Y. References are followed: if Y has `@ConcurrencyGroup(Z.class)`, the group is the group of Z.
+2. Otherwise (no `@ConcurrencyGroup`, or `@ConcurrencyGroup(X.class)`): the group identified by X.
 
-- **Methods and classes with the same `@ConcurrencyGroup` share one domain**: one limit, one set of queues, across all of them.
-- **An explicit name may equal a derived name, but only to join an existing implicit domain.** `@ConcurrencyGroup("com.example.OrderProcessor")` on a method of another class joins the default domain of class `com.example.OrderProcessor`. This is intended, and it is the reason the example above uses a class FQN. If that implicit domain does not exist (the class declares its own `@ConcurrencyGroup`, or none of its doer methods runs in the class domain), compilation fails. The same applies to a `Class.method` name: that method must be a doer method with its own `@ConcurrencyLimit` and no `@ConcurrencyGroup`.
-- **The limit can be declared once.** It is enough to put `@ConcurrencyLimit` on one member of the domain; the others join it with `@ConcurrencyGroup` alone.
-- **If the limit is declared in several places, it must be the same.** If two `@ConcurrencyLimit` annotations apply to the same domain with different values, compilation fails and the error lists all of them. Shared constants keep them in sync:
+The group of a doer method of class K. The first rule that applies wins:
 
-  ```java
-  public static final String ORDER_DOMAIN = "com.example.OrderProcessor";
-  public static final int ORDER_LIMIT = 5;
+1. The method has `@ConcurrencyGroup(Y.class)`: the group of Y.
+2. The method has `@ConcurrencyLimit`: its dedicated group `<K FQN>.<method>` (as today).
+3. Otherwise: the group of K.
 
-  @ConcurrencyGroup(ORDER_DOMAIN)
-  @ConcurrencyLimit(ORDER_LIMIT)
-  ```
+The domain name is the qualified name of the class that identifies the group, or `<class FQN>.<method>` for a dedicated group. Without `@ConcurrencyGroup`, every v1 program gets the same domains as in 0.x.
 
-  This is stricter than "the largest value wins", but a mismatch is almost always a mistake, and a silent choice would hide it.
-- **Only declared limits are compared.** The default limit 2 applies only when no annotation declares a limit for the domain. So if class `com.example.OrderProcessor` has no annotation and another method joins its domain with `@ConcurrencyGroup("com.example.OrderProcessor")` and `@ConcurrencyLimit(5)`, the shared domain has limit 5.
-- **Joining is always explicit.** A method or class without `@ConcurrencyGroup` never joins a named domain.
+### Rules
+
+- On a class, both annotations may be present, but `@ConcurrencyGroup` must then reference the class itself. A class with its own limit identifies its own group and can not join another one.
+- On a method, at most one of `@ConcurrencyGroup` and `@ConcurrencyLimit` may be present, and a method with either must have `@AcceptStatus`.
+- `@ConcurrencyGroup` references must not form a cycle (`A → B → A`).
 - `doer.json` and `doer.dot` group methods by the resolved domain name, so the diagram shows which methods share a limit.
 
 ### Concurrency domains in `doer.json`
 
-`doer.json` must list **every** concurrency domain the generated service sets up: named ones (`@ConcurrencyGroup`) and implicit ones (derived from a class or method name, including classes with no `@ConcurrencyLimit` and the default limit 2).
+`doer.json` must list **every** concurrency domain the generated service sets up: the ones that doer methods join with `@ConcurrencyGroup` and the implicit ones (a class without `@ConcurrencyGroup`, a method with `@ConcurrencyLimit`), including groups without a declared limit, which get the default limit 2.
 
 Today the `domains` array is built from the `@DoerConcurrency` annotations only. A class without the annotation still gets its own domain with limit 2 at runtime, but that domain is missing from `doer.json`. Methods also show only their own method-level `concurrency`, so a reader cannot tell which domain a method runs in.
 
@@ -255,7 +261,7 @@ In v1:
 
 - `domains` has one entry per domain the runtime creates, sorted by name. It matches the `setupConcurrencyDomain` calls in the generated service one to one.
 - `limit` is the limit the runtime uses: the declared value, or 2 when no annotation declares one. It was called `concurrency`; the new name matches `@ConcurrencyLimit`.
-- `implicit` is `true` when the name was derived from a class or method rather than given in `@ConcurrencyGroup`. A domain is not implicit if any `@ConcurrencyGroup` names it. This applies even when the name equals a class name.
+- `implicit` is `false` when a doer method runs in the domain because of a `@ConcurrencyGroup`, on the method or on its class (even `@ConcurrencyGroup` of the class itself), and `true` otherwise.
 - Each method has a `domain` field with the resolved domain name. It replaces the per-method `concurrency` field, whose value is now on the domain.
 
 ### `ConcurrencyDomain` interface
@@ -271,11 +277,14 @@ The processor fails compilation when:
 - a status in `@AcceptStatus.value` or `@RetryPolicy.fallbackStatus` is empty (an empty `fallbackStatus` means `null` and is allowed), starts or ends with whitespace, or is longer than 50 characters (the size of `tasks.status`);
 - `@AcceptStatus.delay`, `@RetryPolicy.interval` or `@RetryPolicy.duration` is not a duration;
 - `@RetryPolicy.fallbackStatus` is set without `duration`;
-- two `@ConcurrencyLimit` annotations of one domain have different values, or a value is less than 1;
-- `@ConcurrencyGroup` is empty, or uses a class or method name whose implicit domain does not exist;
+- a `@ConcurrencyLimit` value is less than 1;
+- a class has `@ConcurrencyLimit` and `@ConcurrencyGroup` of another class;
+- a method has both `@ConcurrencyGroup` and `@ConcurrencyLimit`, or has one of them without `@AcceptStatus`;
+- the `@ConcurrencyGroup` value is not a class or interface (e.g. `int.class`), or `@ConcurrencyGroup` references form a cycle;
+- the dedicated group of a method with `@ConcurrencyLimit` has the name of another group (an overloaded doer method with `@ConcurrencyLimit`, or a nested class named like the method);
 - a doer method has a parameter of a type without a `@TaskDataLoader` (reported once per type).
 
-It warns about every doer method without `@RetryPolicy`, and about a `@ConcurrencyLimit` whose domain has no doer methods.
+It warns about every doer method without `@RetryPolicy`, and about a class-level `@ConcurrencyLimit` whose group has no doer methods.
 
 ## Updater interfaces
 
@@ -323,15 +332,6 @@ There is no common base exception. `DoerService` methods also throw `SQLExceptio
 ## Ideas for later
 
 Not part of v1; noted so they are not lost.
-
-### Concurrency domains named by classes
-
-`@ConcurrencyGroup` takes a class instead of a string: `@ConcurrencyGroup(OrderProcessor.class)`.
-
-- A class without `@ConcurrencyGroup` runs in the domain of the class itself, as today.
-- Wherever `@ConcurrencyGroup` is used, on a class or on a method, it names a class.
-
-The compiler then checks the name, and renaming the class with an IDE renames the domain too. Joining another class's domain is no longer a special case: `@ConcurrencyGroup(OrderProcessor.class)` always refers to an existing class. Open question: what happens to the `Class.method` domains that a method-level `@ConcurrencyLimit` creates today.
 
 ### Updating task data on fallback
 

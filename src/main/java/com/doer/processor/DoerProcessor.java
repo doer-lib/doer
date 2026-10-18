@@ -43,6 +43,7 @@ import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.ExecutableType;
+import javax.lang.model.type.MirroredTypeException;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
@@ -400,125 +401,184 @@ public class DoerProcessor extends AbstractProcessor {
         return className;
     }
 
-    /**
-     * Name of the concurrency domain a doer method (or a class) runs in. The first rule that applies wins:
-     * method's {@code @ConcurrencyGroup}, {@code Class.method} when the method has {@code @ConcurrencyLimit},
-     * class's {@code @ConcurrencyGroup}, class name.
-     */
+    /** Name of the concurrency domain a doer method (or a class) runs in: the name of its group element. */
     private String resolveDomainName(Element element) {
-        ConcurrencyGroup group = element.getAnnotation(ConcurrencyGroup.class);
-        if (group != null) {
-            return group.value();
-        }
-        if (element.getKind() == ElementKind.METHOD && element.getAnnotation(ConcurrencyLimit.class) == null) {
-            return resolveDomainName(element.getEnclosingElement());
-        }
-        return describeElement(element);
+        return describeElement(groupElement(element));
     }
 
     /**
-     * Name of the implicit domain the element runs in, or null when it runs in a named domain
-     * ({@code @ConcurrencyGroup} on the method or its class).
+     * Element that identifies the concurrency group of a doer method (or a class). The first rule that applies wins:
+     * the group of the class in method's {@code @ConcurrencyGroup}, the method itself when it has
+     * {@code @ConcurrencyLimit}, the group of its class. See {@link #groupOf(TypeElement)} for the group of a class.
      */
-    private String derivedDomainName(Element element) {
-        if (element.getAnnotation(ConcurrencyGroup.class) != null) {
+    private Element groupElement(Element element) {
+        if (element.getKind() != ElementKind.METHOD) {
+            return groupOf((TypeElement) element);
+        }
+        TypeElement group = concurrencyGroupClass(element);
+        if (group != null) {
+            return groupOf(group);
+        }
+        if (element.getAnnotation(ConcurrencyLimit.class) != null) {
+            return element;
+        }
+        return groupOf((TypeElement) element.getEnclosingElement());
+    }
+
+    /**
+     * Class that identifies the concurrency group of the class: the last class of its {@code @ConcurrencyGroup}
+     * chain. On a cycle (reported by {@link #checkConcurrencyAnnotations}) it is the class itself.
+     */
+    private TypeElement groupOf(TypeElement type) {
+        List<TypeElement> chain = groupChain(type);
+        return hasCycle(chain) ? type : chain.get(chain.size() - 1);
+    }
+
+    /**
+     * The class followed by the classes that {@code @ConcurrencyGroup} references one after another, up to a class
+     * without {@code @ConcurrencyGroup} or with {@code @ConcurrencyGroup} of itself. On a cycle, the last class is
+     * the first repeated one.
+     */
+    private List<TypeElement> groupChain(TypeElement type) {
+        List<TypeElement> chain = new ArrayList<>();
+        TypeElement next = type;
+        while (next != null && !chain.contains(next)) {
+            chain.add(next);
+            TypeElement group = concurrencyGroupClass(next);
+            next = next.equals(group) ? null : group;
+        }
+        if (next != null) {
+            chain.add(next);
+        }
+        return chain;
+    }
+
+    private static boolean hasCycle(List<TypeElement> chain) {
+        return chain.indexOf(chain.get(chain.size() - 1)) < chain.size() - 1;
+    }
+
+    /** Class given in {@code @ConcurrencyGroup} of the element; null without it or when the value is not a class. */
+    private TypeElement concurrencyGroupClass(Element element) {
+        TypeMirror type = concurrencyGroupType(element);
+        if (type == null || type.getKind() != TypeKind.DECLARED) {
             return null;
         }
-        if (element.getKind() == ElementKind.METHOD && element.getAnnotation(ConcurrencyLimit.class) == null) {
-            return derivedDomainName(element.getEnclosingElement());
+        return (TypeElement) processingEnv.getTypeUtils().asElement(type);
+    }
+
+    /** Value of {@code @ConcurrencyGroup} of the element; null without it. */
+    private static TypeMirror concurrencyGroupType(Element element) {
+        ConcurrencyGroup group = element.getAnnotation(ConcurrencyGroup.class);
+        if (group == null) {
+            return null;
         }
-        return describeElement(element);
+        try {
+            group.value();
+            throw new IllegalStateException("@ConcurrencyGroup value is available as a Class only at runtime");
+        } catch (MirroredTypeException e) {
+            return e.getTypeMirror();
+        }
+    }
+
+    /** True when the doer method runs in its group because of a {@code @ConcurrencyGroup}. */
+    private static boolean isInNamedGroup(Element method) {
+        return method.getAnnotation(ConcurrencyGroup.class) != null
+                || (method.getAnnotation(ConcurrencyLimit.class) == null
+                        && method.getEnclosingElement().getAnnotation(ConcurrencyGroup.class) != null);
     }
 
     /** {@code Class.method} for a method, the class name for a class. */
     private String describeElement(Element element) {
         if (element.getKind() == ElementKind.METHOD) {
-            return element.getEnclosingElement().asType().toString() + "." + element.getSimpleName();
+            return describeElement(element.getEnclosingElement()) + "." + element.getSimpleName();
         }
-        return element.asType().toString();
+        return ((TypeElement) element).getQualifiedName().toString();
     }
 
     /**
      * Validates {@code @ConcurrencyGroup} and {@code @ConcurrencyLimit}, fills {@code namedDomains} with the
-     * names given in {@code @ConcurrencyGroup} and {@code limits} with the declared limit of each domain.
+     * domains doer methods run in because of a {@code @ConcurrencyGroup} and {@code limits} with the declared limit
+     * of each domain.
      */
     private void loadConcurrencyDomains(RoundEnvironment roundEnv) {
-        Elements elementUtils = processingEnv.getElementUtils();
-        Set<String> usedDomains = new HashSet<>();
-        Set<String> implicitDomains = new HashSet<>();
+        Map<String, Set<Element>> groupElementsByName = new TreeMap<>();
         for (DoerMethodInfo method : doerMethods) {
-            usedDomains.add(method.domainName);
-            String derived = derivedDomainName(method.element);
-            if (derived != null) {
-                implicitDomains.add(derived);
+            Element group = groupElement(method.element);
+            groupElementsByName.computeIfAbsent(method.domainName, k -> new LinkedHashSet<>()).add(group);
+            ConcurrencyLimit limit = group.getAnnotation(ConcurrencyLimit.class);
+            if (limit != null && limit.value() >= 1) {
+                limits.put(method.domainName, limit.value());
+            }
+            if (isInNamedGroup(method.element)) {
+                namedDomains.add(method.domainName);
             }
         }
-
-        for (Element element : roundEnv.getElementsAnnotatedWith(ConcurrencyGroup.class)) {
-            String name = element.getAnnotation(ConcurrencyGroup.class).value();
-            if (name.trim().isEmpty()) {
-                error("@ConcurrencyGroup value must not be empty.", element);
-                continue;
-            }
-            namedDomains.add(name);
-            if (implicitDomains.contains(name)) {
-                continue;
-            }
-            // A name that equals a class or Class.method name may only join the implicit domain of that
-            // class or method, and only when that domain exists.
-            String kind = null;
-            if (elementUtils.getTypeElement(name) != null) {
-                kind = "class";
-            } else if (name.contains(".")) {
-                String className = name.substring(0, name.lastIndexOf('.'));
-                String methodName = name.substring(name.lastIndexOf('.') + 1);
-                TypeElement owner = elementUtils.getTypeElement(className);
-                if (owner != null && owner.getEnclosedElements().stream().anyMatch(e ->
-                        e.getKind() == ElementKind.METHOD && e.getSimpleName().contentEquals(methodName))) {
-                    kind = "method";
-                }
-            }
-            if (kind != null) {
-                error("@ConcurrencyGroup(\"" + name + "\") uses the name of " + kind
-                        + " " + name + ", but no doer method runs in the implicit concurrency domain of that " + kind
-                        + " (it is not a doer method or class, or it declares its own @ConcurrencyGroup).\n"
-                        + "A class or method name can be used only to join an existing implicit domain. "
-                        + "Use the @ConcurrencyGroup name of that " + kind
-                        + " or a name that is not a class or method name.", element);
-            }
-        }
-
-        Map<String, List<Element>> limitElements = new TreeMap<>();
-        for (Element element : roundEnv.getElementsAnnotatedWith(ConcurrencyLimit.class)) {
-            if (element.getAnnotation(ConcurrencyLimit.class).value() < 1) {
-                error("@ConcurrencyLimit value must be at least 1.", element);
-                continue;
-            }
-            limitElements.computeIfAbsent(resolveDomainName(element), k -> new ArrayList<>()).add(element);
-        }
-        limitElements.forEach((domainName, elements) -> {
-            elements.sort(Comparator.comparing(this::describeElement));
-            Set<Integer> values = elements.stream()
-                    .map(e -> e.getAnnotation(ConcurrencyLimit.class).value())
-                    .collect(Collectors.toSet());
-            if (values.size() > 1) {
-                String list = elements.stream()
-                        .map(e -> "    " + describeElement(e) + ": " + e.getAnnotation(ConcurrencyLimit.class).value())
-                        .collect(Collectors.joining("\n"));
-                for (Element element : elements) {
-                    error("Different @ConcurrencyLimit values for concurrency domain \"" + domainName + "\":\n"
-                            + list, element);
-                }
-                return;
-            }
-            limits.put(domainName, values.iterator().next());
-            if (!usedDomains.contains(domainName)) {
-                for (Element element : elements) {
-                    warning("@ConcurrencyLimit has no effect: no doer method runs in concurrency domain \""
-                            + domainName + "\".", element);
-                }
+        // The group of a method with @ConcurrencyLimit is used only by that method
+        groupElementsByName.forEach((name, groups) -> {
+            if (groups.size() > 1) {
+                groups.stream().filter(e -> e.getKind() == ElementKind.METHOD).forEach(e -> error(
+                        "The concurrency group of this method, created by @ConcurrencyLimit, has the same name \""
+                                + name + "\" as the group of another doer method or class, so they would share "
+                                + "one limit. Rename the method.", e));
             }
         });
+
+        Set<Element> elements = new LinkedHashSet<>(roundEnv.getElementsAnnotatedWith(ConcurrencyGroup.class));
+        elements.addAll(roundEnv.getElementsAnnotatedWith(ConcurrencyLimit.class));
+        for (Element element : elements) {
+            checkConcurrencyAnnotations(element, groupElementsByName.keySet());
+        }
+    }
+
+    /** Reports the errors and warnings of {@code @ConcurrencyGroup} and {@code @ConcurrencyLimit} of the element. */
+    private void checkConcurrencyAnnotations(Element element, Set<String> usedDomains) {
+        TypeMirror groupType = concurrencyGroupType(element);
+        ConcurrencyLimit limit = element.getAnnotation(ConcurrencyLimit.class);
+        boolean isMethod = element.getKind() == ElementKind.METHOD;
+        if (limit != null && limit.value() < 1) {
+            error("@ConcurrencyLimit value must be at least 1.", element);
+        }
+        if (isMethod && element.getAnnotationsByType(AcceptStatus.class).length == 0) {
+            error((groupType != null ? "@ConcurrencyGroup" : "@ConcurrencyLimit")
+                    + " can be used only on doer methods (@AcceptStatus methods) and on classes.", element);
+            return;
+        }
+        if (isMethod && groupType != null && limit != null) {
+            error("@ConcurrencyGroup and @ConcurrencyLimit can not be used together on a method: @ConcurrencyLimit "
+                    + "creates a concurrency group used only by this method. Remove @ConcurrencyGroup to give the "
+                    + "method a group of its own, or remove @ConcurrencyLimit to run it in the group of "
+                    + groupType + ".", element);
+            return;
+        }
+        if (groupType != null) {
+            if (groupType.getKind() == TypeKind.ERROR) {
+                return;
+            }
+            TypeElement group = concurrencyGroupClass(element);
+            if (group == null) {
+                error("@ConcurrencyGroup value must be a class, not " + groupType + ".", element);
+                return;
+            }
+            if (!isMethod && limit != null && !group.equals(element)) {
+                String name = describeElement(element);
+                error("@ConcurrencyGroup of a class with @ConcurrencyLimit must reference the class itself: "
+                        + "@ConcurrencyLimit declares the concurrency group of " + name + ". Remove "
+                        + "@ConcurrencyLimit to run the class in the group of " + group.getQualifiedName()
+                        + ", or use @ConcurrencyGroup(" + ((TypeElement) element).getSimpleName() + ".class).",
+                        element);
+                return;
+            }
+            List<TypeElement> chain = groupChain(isMethod ? group : (TypeElement) element);
+            if (hasCycle(chain)) {
+                error("@ConcurrencyGroup references form a cycle, so the concurrency group can not be resolved:\n    "
+                        + chain.stream().map(this::describeElement).collect(Collectors.joining(" -> ")), element);
+                return;
+            }
+        }
+        if (!isMethod && limit != null && limit.value() >= 1 && !usedDomains.contains(describeElement(element))) {
+            warning("@ConcurrencyLimit has no effect: no doer method runs in concurrency domain \""
+                    + describeElement(element) + "\".", element);
+        }
     }
 
     private void loadLoaders(RoundEnvironment roundEnv) {

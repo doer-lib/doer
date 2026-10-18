@@ -47,7 +47,6 @@ public class DoerServiceJdbcITCase {
     static final String ORDERS = """
             package demo.jdbc;
             import com.doer.*;
-            @ConcurrencyGroup("a_orders")
             public class Orders {
                 @AcceptStatus("NEW")
                 @AcceptStatus("PAID")
@@ -61,7 +60,6 @@ public class DoerServiceJdbcITCase {
     static final String PAYMENTS = """
             package demo.jdbc;
             import com.doer.*;
-            @ConcurrencyGroup("b_payments")
             public class Payments {
                 @AcceptStatus("CHARGE")
                 public void charge(Task task) {
