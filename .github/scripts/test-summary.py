@@ -117,17 +117,19 @@ def matrix_summary(title, job_name, artifact_prefix, reports_dir, jobs):
 
     lines = [f"## {title}", ""]
     run = counts[PASSED] + counts[FAILED]
-    icon = ":x:" if counts[FAILED] else ":white_check_mark:"
+    icon = "❌" if counts[FAILED] else "✅"
     started = [parse_time(job["started_at"]) for job in jobs.values() if job.get("started_at")]
     completed = [parse_time(job["completed_at"]) for job in jobs.values() if job.get("completed_at")]
     wallclock = format_duration((max(completed) - min(started)).total_seconds()) if started and completed else "n/a"
-    lines.append(f"{icon} **{run}** tests run, **{counts[FAILED]}** failed, **{counts[SKIPPED]}** skipped"
-                 f" · wallclock **{wallclock}**")
-    lines.append("")
+    # HTML: Markdown is not rendered inside <summary>
+    header = (f"{icon} <b>{run}</b> tests run, <b>{counts[FAILED]}</b> failed, <b>{counts[SKIPPED]}</b> skipped"
+              f" · wallclock <b>{wallclock}</b>")
     if not classes:
-        lines += ["No test reports.", ""]
+        lines += [header, "", "No test reports.", ""]
         return lines
 
+    # The table is collapsed; the blank line after <summary> makes GitHub render the Markdown table
+    lines += [f"<details><summary>{header}</summary>", ""]
     lines.append("| Test | " + " | ".join(escape(value) for value in values) + " |")
     lines.append("|:---|" + "---:|" * len(values))
     for test_class in sorted(classes.values(), key=lambda c: natural_key(c.name)):
@@ -138,7 +140,7 @@ def matrix_summary(title, job_name, artifact_prefix, reports_dir, jobs):
             results = test_class.tests[test_name]
             lines.append(f"| &emsp;{escape(test_name)} | "
                          + " | ".join(cell(results.get(value)) for value in values) + " |")
-    lines.append("")
+    lines += ["", "</details>", ""]
     return lines
 
 
