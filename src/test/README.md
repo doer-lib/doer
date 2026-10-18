@@ -61,6 +61,8 @@ The ITCase and E2E classes use the doer jar of the current build, `0.0.0-IT-SNAP
 
 The tests use REST (RestAssured), JDBC to Postgres and the WireMock client; `stopNode` (SIGTERM, the exit code must be 143), `startNode` (also a second node on the same database), `appLog` and `threadDump`.
 
+Before a node is stopped, `AppNode` measures what its container used since its start (CPU time, disk and network I/O, as `docker stats` counts them; the shutdown itself is not counted, a container of `--rm` has no statistics after it exits). When the JVM ends, `E2eEnvironment` writes all containers and their total to `container-usage.json` of the work folder. CI uploads it with the test reports, and the table *E2E runtimes* of the run summary starts with the sum over the containers of each runtime (node 1, node 2 and restarts).
+
 ```
 mvn verify -Ddoer.e2e.runtime=quarkus                 # build, run all *E2E classes
 mvn verify -Ddoer.e2e.runtime=quarkus -Ddoer.e2e.skip-build=true -Dit.test=SmokeE2E

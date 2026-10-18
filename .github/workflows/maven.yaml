@@ -115,7 +115,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: test-reports-e2e-${{ matrix.runtime }}
-          path: target/failsafe-reports/TEST-*.xml
+          # CPU and I/O of the application containers, for the first rows of the table of E2E runtimes
+          path: |
+            target/failsafe-reports/TEST-*.xml
+            target/e2e-test-workspaces/*/container-usage.json
           if-no-files-found: ignore
           overwrite: true
           retention-days: 7
