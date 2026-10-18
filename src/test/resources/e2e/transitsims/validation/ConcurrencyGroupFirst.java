@@ -7,10 +7,11 @@ import com.doer.Task;
 import jakarta.enterprise.context.ApplicationScoped;
 
 /**
- * The concurrency group "Concurrency group" on a class, with the limit of the group: one task at a time, together
- * with the method of {@link ConcurrencyGroupSecond} in the same group. For ConcurrencyE2E; each method takes 100 ms.
+ * The concurrency group of this class, declared with the limit and a reference to the class itself: one task at a
+ * time, together with the method of {@link ConcurrencyGroupSecond} that joins the group. For ConcurrencyE2E; each
+ * method takes 100 ms.
  */
-@ConcurrencyGroup("Concurrency group")
+@ConcurrencyGroup(ConcurrencyGroupFirst.class)
 @ConcurrencyLimit(1)
 @ApplicationScoped
 public class ConcurrencyGroupFirst {

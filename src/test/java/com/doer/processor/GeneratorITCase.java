@@ -198,7 +198,7 @@ public class GeneratorITCase implements InWorkspace {
         writeSource("Orders.java", """
                 package demo.test;
                 import com.doer.*;
-                @ConcurrencyGroup("orders")
+                @ConcurrencyGroup(Orders.class)
                 @ConcurrencyLimit(5)
                 public class Orders {
                     @AcceptStatus("A")
@@ -209,12 +209,13 @@ public class GeneratorITCase implements InWorkspace {
         writeSource("Payments.java", """
                 package demo.test;
                 import com.doer.*;
+                @ConcurrencyGroup(Orders.class)
                 public class Payments {
-                    @ConcurrencyGroup("orders")
                     @AcceptStatus("B")
                     @RetryPolicy(interval = "5s", duration = "10 min", fallbackStatus = "Payment failed")
                     public void pay(Task task) {}
 
+                    @ConcurrencyLimit(3)
                     @AcceptStatus("C")
                     @RetryPolicy(interval = "5m")
                     public void refund(Task task) {}
@@ -224,7 +225,7 @@ public class GeneratorITCase implements InWorkspace {
                 package demo.test;
                 import com.doer.*;
                 public class Shipping {
-                    @ConcurrencyGroup("demo.test.Payments")
+                    @ConcurrencyGroup(Payments.class)
                     @AcceptStatus("D")
                     @RetryPolicy(interval = "5m")
                     public void ship(Task task) {}
@@ -234,18 +235,44 @@ public class GeneratorITCase implements InWorkspace {
                     public void track(Task task) {}
                 }
                 """);
+        writeSource("MailGroup.java", """
+                package demo.test;
+                import com.doer.*;
+                @ConcurrencyLimit(4)
+                public interface MailGroup {
+                }
+                """);
+        writeSource("Notifications.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Notifications {
+                    @ConcurrencyGroup(MailGroup.class)
+                    @AcceptStatus("F")
+                    @RetryPolicy(interval = "5m")
+                    public void send(Task task) {}
+                }
+                """);
 
-        javac("Orders.java", "Payments.java", "Shipping.java").assertStatus(0);
+        javac("Orders.java", "Payments.java", "Shipping.java", "MailGroup.java", "Notifications.java")
+                .assertStatus(0);
 
         JsonPath json = doerJson();
-        assertEquals(List.of("demo.test.Payments", "demo.test.Shipping", "orders"), json.getList("domains.name"));
-        assertEquals(List.of(2, 2, 5), json.getList("domains.limit"));
-        assertEquals(List.of(false, true, false), json.getList("domains.implicit"));
-        assertEquals(List.of("orders", "orders", "demo.test.Payments", "demo.test.Payments", "demo.test.Shipping"),
+        assertEquals(List.of("demo.test.MailGroup", "demo.test.Orders", "demo.test.Payments.refund",
+                "demo.test.Shipping"), json.getList("domains.name"));
+        assertEquals(List.of(4, 5, 3, 2), json.getList("domains.limit"));
+        assertEquals(List.of(false, false, true, true), json.getList("domains.implicit"));
+        // Notifications.send, Orders.accept, Payments.pay, Payments.refund, Shipping.ship, Shipping.track
+        assertEquals(List.of("demo.test.MailGroup", "demo.test.Orders", "demo.test.Orders",
+                "demo.test.Payments.refund", "demo.test.Orders", "demo.test.Shipping"),
                 json.getList("doer_methods.domain"));
-        assertEquals("5s", json.getString("doer_methods[1].interval"));
-        assertEquals("10 min", json.getString("doer_methods[1].duration"));
-        assertEquals("Payment failed", json.getString("doer_methods[1].fallback_status"));
+        assertEquals("5s", json.getString("doer_methods[2].interval"));
+        assertEquals("10 min", json.getString("doer_methods[2].duration"));
+        assertEquals("Payment failed", json.getString("doer_methods[2].fallback_status"));
+        assertThat(generatedService(), allOf(
+                containsString("setupConcurrencyDomain(\"demo.test.MailGroup\", 4, delays, retryDelays);"),
+                containsString("setupConcurrencyDomain(\"demo.test.Orders\", 5, delays, retryDelays);"),
+                containsString("setupConcurrencyDomain(\"demo.test.Payments.refund\", 3, delays, retryDelays);"),
+                containsString("setupConcurrencyDomain(\"demo.test.Shipping\", 2, delays, retryDelays);")));
     }
 
     @Test

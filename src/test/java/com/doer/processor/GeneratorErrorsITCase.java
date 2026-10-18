@@ -197,64 +197,37 @@ public class GeneratorErrorsITCase implements InWorkspace {
     }
 
     @Test
-    void ConcurrencyGroup__should_fail_on_class_name_without_implicit_domain() throws Exception {
-        writeSource("OrderProcessor.java", """
-                package demo.test;
-                import com.doer.*;
-                @ConcurrencyGroup("orders")
-                public class OrderProcessor {
-                    @AcceptStatus("A")
-                    @RetryPolicy(interval = "5m")
-                    public void accept(Task task) {}
-                }
-                """);
-        writeSource("Payments.java", """
-                package demo.test;
-                import com.doer.*;
-                public class Payments {
-                    @ConcurrencyGroup("demo.test.OrderProcessor")
-                    @AcceptStatus("B")
-                    @RetryPolicy(interval = "5m")
-                    public void pay(Task task) {}
-                }
-                """);
-
-        var result = javac("OrderProcessor.java", "Payments.java").assertStatus(1);
-
-        assertThat(result.stdErr(), containsString("@ConcurrencyGroup(\"demo.test.OrderProcessor\") uses the name "
-                + "of class demo.test.OrderProcessor, but no doer method runs in the implicit concurrency domain"));
-    }
-
-    @Test
-    void ConcurrencyGroup__should_fail_on_method_name_without_implicit_domain() throws Exception {
+    void ConcurrencyGroup__should_fail_on_method_without_AcceptStatus() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
                 import com.doer.*;
                 public class Orders {
-                    @ConcurrencyGroup("orders")
                     @AcceptStatus("A")
                     public void accept(Task task) {}
 
-                    @ConcurrencyGroup("demo.test.Orders.accept")
-                    @AcceptStatus("B")
-                    public void pay(Task task) {}
+                    @ConcurrencyGroup(Orders.class)
+                    public void cancel(Task task) {}
                 }
                 """);
 
         var result = javac("Orders.java").assertStatus(1);
 
-        assertThat(result.stdErr(), containsString("@ConcurrencyGroup(\"demo.test.Orders.accept\") uses the name "
-                + "of method demo.test.Orders.accept, but no doer method runs in the implicit concurrency domain "
-                + "of that method"));
+        assertEquals("""
+                Orders.java:8: error: @ConcurrencyGroup can be used only on doer methods (@AcceptStatus methods) and on classes.
+                    public void cancel(Task task) {}
+                                ^
+                1 error
+                """, result.stdErr());
     }
 
     @Test
-    void ConcurrencyGroup__should_fail_on_empty_value() throws Exception {
+    void ConcurrencyGroup__should_fail_on_method_with_ConcurrencyLimit() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
                 import com.doer.*;
                 public class Orders {
-                    @ConcurrencyGroup(" ")
+                    @ConcurrencyGroup(Orders.class)
+                    @ConcurrencyLimit(3)
                     @AcceptStatus("A")
                     public void accept(Task task) {}
                 }
@@ -263,7 +236,7 @@ public class GeneratorErrorsITCase implements InWorkspace {
         var result = javac("Orders.java").assertStatus(1);
 
         assertEquals("""
-                Orders.java:6: error: @ConcurrencyGroup value must not be empty.
+                Orders.java:7: error: @ConcurrencyGroup and @ConcurrencyLimit can not be used together on a method: @ConcurrencyLimit creates a concurrency group used only by this method. Remove @ConcurrencyGroup to give the method a group of its own, or remove @ConcurrencyLimit to run it in the group of demo.test.Orders.
                     public void accept(Task task) {}
                                 ^
                 1 error
@@ -271,31 +244,132 @@ public class GeneratorErrorsITCase implements InWorkspace {
     }
 
     @Test
-    void ConcurrencyLimit__should_fail_on_different_values_in_one_domain() throws Exception {
+    void ConcurrencyGroup__should_fail_on_class_with_limit_referencing_another_class() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
                 import com.doer.*;
-                @ConcurrencyGroup("orders")
-                @ConcurrencyLimit(3)
                 public class Orders {
                     @AcceptStatus("A")
-                    @RetryPolicy(interval = "5m")
                     public void accept(Task task) {}
-
-                    @ConcurrencyGroup("orders")
-                    @ConcurrencyLimit(5)
+                }
+                """);
+        writeSource("Payments.java", """
+                package demo.test;
+                import com.doer.*;
+                @ConcurrencyGroup(Orders.class)
+                @ConcurrencyLimit(3)
+                public class Payments {
                     @AcceptStatus("B")
-                    @RetryPolicy(interval = "5m")
                     public void pay(Task task) {}
+                }
+                """);
+
+        var result = javac("Orders.java", "Payments.java").assertStatus(1);
+
+        assertEquals("""
+                Payments.java:5: error: @ConcurrencyGroup of a class with @ConcurrencyLimit must reference the class itself: @ConcurrencyLimit declares the concurrency group of demo.test.Payments. Remove @ConcurrencyLimit to run the class in the group of demo.test.Orders, or use @ConcurrencyGroup(Payments.class).
+                public class Payments {
+                       ^
+                1 error
+                """, result.stdErr());
+    }
+
+    @Test
+    void ConcurrencyGroup__should_fail_on_primitive_class() throws Exception {
+        writeSource("Orders.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Orders {
+                    @ConcurrencyGroup(int.class)
+                    @AcceptStatus("A")
+                    public void accept(Task task) {}
                 }
                 """);
 
         var result = javac("Orders.java").assertStatus(1);
 
-        assertThat(result.stdErr(), allOf(
-                containsString("Different @ConcurrencyLimit values for concurrency domain \"orders\""),
-                containsString("demo.test.Orders: 3"),
-                containsString("demo.test.Orders.pay: 5")));
+        assertEquals("""
+                Orders.java:6: error: @ConcurrencyGroup value must be a class, not int.
+                    public void accept(Task task) {}
+                                ^
+                1 error
+                """, result.stdErr());
+    }
+
+    @Test
+    void ConcurrencyGroup__should_fail_on_cycle() throws Exception {
+        writeSource("Orders.java", """
+                package demo.test;
+                import com.doer.*;
+                @ConcurrencyGroup(Payments.class)
+                public class Orders {
+                    @AcceptStatus("A")
+                    public void accept(Task task) {}
+                }
+                """);
+        writeSource("Payments.java", """
+                package demo.test;
+                import com.doer.*;
+                @ConcurrencyGroup(Orders.class)
+                public class Payments {
+                    @AcceptStatus("B")
+                    public void pay(Task task) {}
+                }
+                """);
+        writeSource("Shipping.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Shipping {
+                    @ConcurrencyGroup(Orders.class)
+                    @AcceptStatus("C")
+                    public void ship(Task task) {}
+                }
+                """);
+
+        var result = javac("Orders.java", "Payments.java", "Shipping.java").assertStatus(1);
+
+        assertEquals("""
+                Orders.java:4: error: @ConcurrencyGroup references form a cycle, so the concurrency group can not be resolved:
+                public class Orders {
+                       ^
+                      demo.test.Orders -> demo.test.Payments -> demo.test.Orders
+                Payments.java:4: error: @ConcurrencyGroup references form a cycle, so the concurrency group can not be resolved:
+                public class Payments {
+                       ^
+                      demo.test.Payments -> demo.test.Orders -> demo.test.Payments
+                Shipping.java:6: error: @ConcurrencyGroup references form a cycle, so the concurrency group can not be resolved:
+                    public void ship(Task task) {}
+                                ^
+                      demo.test.Orders -> demo.test.Payments -> demo.test.Orders
+                3 errors
+                """, result.stdErr());
+    }
+
+    @Test
+    void ConcurrencyLimit__should_fail_when_method_group_has_the_name_of_another_group() throws Exception {
+        writeSource("Orders.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Orders {
+                    @ConcurrencyLimit(3)
+                    @AcceptStatus("A")
+                    public void accept(Task task) {}
+
+                    public static class accept {
+                        @AcceptStatus("B")
+                        public void run(Task task) {}
+                    }
+                }
+                """);
+
+        var result = javac("Orders.java").assertStatus(1);
+
+        assertEquals("""
+                Orders.java:6: error: The concurrency group of this method, created by @ConcurrencyLimit, has the same name "demo.test.Orders.accept" as the group of another doer method or class, so they would share one limit. Rename the method.
+                    public void accept(Task task) {}
+                                ^
+                1 error
+                """, result.stdErr());
     }
 
     @Test
@@ -321,7 +395,7 @@ public class GeneratorErrorsITCase implements InWorkspace {
     }
 
     @Test
-    void ConcurrencyLimit__should_warn_when_domain_has_no_doer_methods() throws Exception {
+    void ConcurrencyLimit__should_fail_on_method_without_AcceptStatus() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
                 import com.doer.*;
@@ -334,12 +408,40 @@ public class GeneratorErrorsITCase implements InWorkspace {
                 }
                 """);
 
-        var result = javac("Orders.java").assertStatus(0);
+        var result = javac("Orders.java").assertStatus(1);
 
         assertEquals("""
-                Orders.java:8: warning: @ConcurrencyLimit has no effect: no doer method runs in concurrency domain "demo.test.Orders.cancel".
+                Orders.java:8: error: @ConcurrencyLimit can be used only on doer methods (@AcceptStatus methods) and on classes.
                     public void cancel(Task task) {}
                                 ^
+                1 error
+                """, result.stdErr());
+    }
+
+    @Test
+    void ConcurrencyLimit__should_warn_when_class_group_has_no_doer_methods() throws Exception {
+        writeSource("OrderGroup.java", """
+                package demo.test;
+                import com.doer.*;
+                @ConcurrencyLimit(3)
+                public class OrderGroup {
+                }
+                """);
+        writeSource("Orders.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Orders {
+                    @AcceptStatus("A")
+                    public void accept(Task task) {}
+                }
+                """);
+
+        var result = javac("OrderGroup.java", "Orders.java").assertStatus(0);
+
+        assertEquals("""
+                OrderGroup.java:4: warning: @ConcurrencyLimit has no effect: no doer method runs in concurrency domain "demo.test.OrderGroup".
+                public class OrderGroup {
+                       ^
                 1 warning
                 """, result.stdErr());
     }

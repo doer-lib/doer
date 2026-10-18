@@ -175,7 +175,7 @@ What `runTask` of the generated service does. The variety of annotations is the 
 | Case | Code |
 |---|---|
 | `@ConcurrencyLimit` on a class and on a method | `ConcurrencyQueues`, `ConcurrencyQueues.chainMethod` |
-| `@ConcurrencyGroup` on a class and on a method, shared by two classes | `ConcurrencyGroupFirst`, `ConcurrencyGroupSecond.slow` |
+| `@ConcurrencyGroup` of the class itself next to `@ConcurrencyLimit`, and on a method of another class that joins the group | `ConcurrencyGroupFirst`, `ConcurrencyGroupSecond.slow` |
 | moving between domains: class → method → class | `ConcurrencyQueues.chainClass` → `chainMethod` → `chainClassAgain` |
 
 ### Task data and coordinated updates
