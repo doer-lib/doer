@@ -24,7 +24,7 @@ import org.testcontainers.DockerClientFactory;
  * One node of the application: a {@code docker run --rm} process. Its stdout and stderr are appended to
  * {@code app-<node>-out.txt} and {@code app-<node>-err.txt} of the work folder, with a separator line at every start
  * and stop, and every command to {@code app-<node>-cmd.txt}, for all starts in this run. The host port is kept
- * across restarts.
+ * across restarts. Before a stop the resources the container used are measured, see {@link ContainerUsage}.
  */
 class AppNode {
     static final int STOP_TIMEOUT_SECONDS = 60;
@@ -39,6 +39,8 @@ class AppNode {
     final Path out;
     final Path err;
     final Path cmd;
+    /** The resources used by the containers of the node, one per stopped start. */
+    final List<ContainerUsage> usages = new ArrayList<>();
     private final String runtime;
     private final String network;
     private final Map<String, String> env;
@@ -108,20 +110,44 @@ class AppNode {
         if (process == null) {
             throw new IllegalStateException("Node " + node + " is not started");
         }
+        String usage = measureUsage();
         long t0 = System.currentTimeMillis();
         process.destroy();
         boolean exited = process.waitFor(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         double seconds = (System.currentTimeMillis() - t0) / 1000.0;
         if (!exited) {
-            separator(String.format(Locale.ROOT, "node %s did not stop in %.1f s", node, seconds));
+            separator(String.format(Locale.ROOT, "node %s did not stop in %.1f s%s", node, seconds, usage));
             process.destroyForcibly();
             process = null;
             throw new IllegalStateException("Node " + node + " did not stop in " + STOP_TIMEOUT_SECONDS + " s");
         }
         int exitCode = process.exitValue();
         process = null;
-        separator(String.format(Locale.ROOT, "node %s stopped in %.1f s, exit code %s", node, seconds, exitCode));
+        separator(String.format(Locale.ROOT, "node %s stopped in %.1f s, exit code %s%s", node, seconds, exitCode,
+                usage));
         return exitCode;
+    }
+
+    /**
+     * Measures the resources the running container used, into {@link #usages}. A failure does not fail the test: the
+     * measure is for the test summary only.
+     *
+     * @return the usage, or the failure, for the separator line of the stop
+     */
+    private String measureUsage() {
+        if (exitCode() != null) {
+            return "";
+        }
+        try {
+            ContainerUsage usage = ContainerUsage.measure(name, node);
+            usages.add(usage);
+            return ", used " + usage.summary();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return ", usage not measured: interrupted";
+        } catch (RuntimeException e) {
+            return ", usage not measured: " + e;
+        }
     }
 
     /**

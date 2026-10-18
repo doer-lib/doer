@@ -4,9 +4,12 @@
 Per matrix: tests run/failed/skipped, wallclock of the matrix jobs, and a table
 with a row per test class (time of the class) and a row per test method, a column per matrix value.
 Time of a failed test is red; a cell is empty when the test did not run there.
+When an artifact has container-usage.json (written by the e2e suite, see E2eEnvironment), the table starts with
+the CPU, disk and network I/O of the application containers, summed over all of them (node 1, node 2, restarts).
 
 Input:
   --reports DIR      downloaded artifacts: DIR/<artifact-prefix><value>/**/TEST-*.xml (surefire/failsafe reports)
+                     and DIR/<artifact-prefix><value>/**/container-usage.json
   --jobs FILE        JSON Lines of the jobs of the run: {"name", "started_at", "completed_at"}
   --matrix TITLE JOB ARTIFACT_PREFIX   one table: jobs "JOB (<value>)", artifacts "<ARTIFACT_PREFIX><value>"
 """
@@ -77,6 +80,61 @@ def read_reports(directory, value, classes, counts):
         class_result.add(float(suite.get("time") or 0), class_status)
 
 
+class Usage:
+    """Resources used by the application containers of a matrix value, summed over the containers."""
+
+    def __init__(self):
+        self.containers = 0
+        self.cpu_seconds = 0.0
+        self.disk_read = self.disk_write = self.net_in = self.net_out = 0
+
+    def add(self, container):
+        self.containers += 1
+        self.cpu_seconds += float(container.get("cpuSeconds") or 0)
+        self.disk_read += int(container.get("diskReadBytes") or 0)
+        self.disk_write += int(container.get("diskWriteBytes") or 0)
+        self.net_in += int(container.get("netInBytes") or 0)
+        self.net_out += int(container.get("netOutBytes") or 0)
+
+
+def read_usage(directory):
+    """Usage of the containers in container-usage.json files of the artifact, or None without such a file."""
+    usage = None
+    for file in sorted(directory.rglob("container-usage.json")):
+        usage = usage or Usage()
+        for container in json.loads(file.read_text()).get("containers", []):
+            usage.add(container)
+    return usage
+
+
+def format_bytes(count):
+    """Decimal units, as docker stats."""
+    value = float(count)
+    for unit in ("B", "kB", "MB", "GB"):
+        if value < 1000 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1000
+
+
+def usage_rows(usages, values):
+    """Rows of the usage of the application containers; none when no value has it."""
+    if not usages:
+        return []
+
+    def row(title, text):
+        return (f"| {title} | "
+                + " | ".join(text(usages[value]) if value in usages else "" for value in values) + " |")
+
+    return [
+        row("**App containers**", lambda u: str(u.containers)),
+        row("&emsp;CPU", lambda u: f"{u.cpu_seconds:.1f} s"),
+        row("&emsp;Disk read / write",
+            lambda u: f"{format_bytes(u.disk_read)} / {format_bytes(u.disk_write)}"),
+        row("&emsp;Network in / out",
+            lambda u: f"{format_bytes(u.net_in)} / {format_bytes(u.net_out)}"),
+    ]
+
+
 def parse_time(text):
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
@@ -107,12 +165,15 @@ def cell(result):
 def matrix_summary(title, job_name, artifact_prefix, reports_dir, jobs):
     jobs = matrix_jobs(jobs, job_name)
     classes = {}
+    usages = {}  # value -> Usage
     counts = {PASSED: 0, FAILED: 0, SKIPPED: 0}
     values = set(jobs)
     for directory in reports_dir.glob(artifact_prefix + "*"):
         value = directory.name.removeprefix(artifact_prefix)
         values.add(value)
         read_reports(directory, value, classes, counts)
+        if (usage := read_usage(directory)) is not None:
+            usages[value] = usage
     values = sorted(values, key=natural_key)
 
     lines = [f"## {title}", ""]
@@ -132,6 +193,7 @@ def matrix_summary(title, job_name, artifact_prefix, reports_dir, jobs):
     lines += [f"<details><summary>{header}</summary>", ""]
     lines.append("| Test | " + " | ".join(escape(value) for value in values) + " |")
     lines.append("|:---|" + "---:|" * len(values))
+    lines += usage_rows(usages, values)
     for test_class in sorted(classes.values(), key=lambda c: natural_key(c.name)):
         simple_name = test_class.name.rsplit(".", 1)[-1]
         lines.append(f"| **{escape(simple_name)}** | "

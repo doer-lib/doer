@@ -49,6 +49,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *     docker-pull-*.txt                     the same for docker pull of the application image
  *     app-&lt;node&gt;-out.txt, app-&lt;node&gt;-err.txt  stdout and stderr of the application, all starts of the node
  *     app-&lt;node&gt;-cmd.txt                    docker run command of every start
+ *     container-usage.json                  CPU, disk and network I/O of every container of the application and
+ *                                           their total, written when the JVM ends; for the test summary of CI
  * </pre>
  *
  * Properties:
@@ -68,6 +70,7 @@ public class E2eEnvironment implements BeforeAllCallback {
     public static final String runtime = property("doer.e2e.runtime", "quarkus");
     static final boolean skipBuild = Boolean.parseBoolean(property("doer.e2e.skip-build", "false"));
     static final Path workdir = Path.of("target", "e2e-test-workspaces", runtime).toAbsolutePath();
+    static final Path usageFile = workdir.resolve("container-usage.json");
 
     private static boolean started;
     private static Throwable startFailure;
@@ -110,6 +113,8 @@ public class E2eEnvironment implements BeforeAllCallback {
     private static void startInDocker() throws Exception {
         E2eApp app = E2eApp.of(runtime);
         Runtime.getRuntime().addShutdownHook(new Thread(E2eEnvironment::destroyNodes));
+        // The work folder is kept with doer.e2e.skip-build: no usage of a previous run if this one does not end
+        Files.deleteIfExists(usageFile);
 
         long t0 = System.currentTimeMillis();
         network = Network.newNetwork();
@@ -328,7 +333,14 @@ public class E2eEnvironment implements BeforeAllCallback {
         }
     }
 
+    /** For the shutdown hook: stops the running nodes and writes the usage of all their containers. */
     private static synchronized void destroyNodes() {
         nodes.values().forEach(AppNode::destroy);
+        List<ContainerUsage> usages = nodes.values().stream().flatMap(n -> n.usages.stream()).toList();
+        try {
+            Files.writeString(usageFile, ContainerUsage.json(runtime, usages));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 }
