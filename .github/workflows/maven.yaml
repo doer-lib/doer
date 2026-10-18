@@ -45,6 +45,19 @@ jobs:
       - name: Tests Java${{ matrix.version }} jakarta 10.0.0
         run: mvn -B --color=always verify
 
+      # For the job test-summary
+      - name: Upload test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-java-${{ matrix.version }}
+          path: |
+            target/surefire-reports/TEST-*.xml
+            target/failsafe-reports/TEST-*.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
       - name: Save Maven repository
         if: ${{ !cancelled() && github.event_name == 'pull_request' && matrix.version == 27 }}
         uses: actions/cache/save@v6
@@ -96,9 +109,50 @@ jobs:
           name: e2e-${{ matrix.runtime }}
           path: target/e2e-test-workspaces/
 
+      # For the job test-summary
+      - name: Upload test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-e2e-${{ matrix.runtime }}
+          path: target/failsafe-reports/TEST-*.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
       - name: Save Maven repository
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         uses: actions/cache/save@v6
         with:
           path: ~/.m2/repository
           key: maven-e2e-${{ matrix.runtime }}-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  # Tables of test times per JDK and per runtime in the summary of the run
+  test-summary:
+    needs: [ java-compatibility, runtime-e2e ]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # the jobs of the run, for the wallclock of each matrix
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/scripts
+      - name: Download test reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: test-reports-*
+          path: test-reports
+      - name: Get jobs of the run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs"
+          --jq '.jobs[] | {name, started_at, completed_at}' > jobs.jsonl
+      - name: Write test summary
+        run: >
+          python3 .github/scripts/test-summary.py --reports test-reports --jobs jobs.jsonl
+          --matrix "Java versions" java-compatibility test-reports-java-
+          --matrix "E2E runtimes" runtime-e2e test-reports-e2e-
+          >> "$GITHUB_STEP_SUMMARY"
