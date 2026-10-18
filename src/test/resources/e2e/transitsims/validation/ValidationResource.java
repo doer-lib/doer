@@ -19,6 +19,7 @@ import jakarta.ws.rs.core.MediaType;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.time.Duration;
+import java.util.Map;
 import javax.sql.DataSource;
 
 /**
@@ -65,58 +66,61 @@ public class ValidationResource {
 
     @Path("start")
     @GET
-    public String startDoer(@QueryParam("m") @DefaultValue("false") boolean monitor) {
+    public Map<String, Object> startDoer(@QueryParam("m") @DefaultValue("false") boolean monitor) {
         doerService.start(monitor);
-        return "{\"status\": \"Doer Started\", \"monitor\": " + monitor + "}";
+        return Map.of("status", "Doer Started", "monitor", monitor);
     }
 
     @Path("stop")
     @GET
-    public String stopDoer() {
+    public Map<String, Object> stopDoer() {
         doerService.stop();
-        return "{\"status\": \"Doer Stopped\"}";
+        return Map.of("status", "Doer Stopped");
     }
 
     @Path("load")
     @GET
-    public String reload() {
+    public Map<String, Object> reload() {
         doerService.triggerQueuesReloadFromDb();
-        return "{\"status\": \"Doer Reloaded\"}";
+        return Map.of("status", "Doer Reloaded");
     }
 
     @Path("check")
     @GET
-    public String checkTasksBecomeReady() {
+    public Map<String, Object> checkTasksBecomeReady() {
         doerService.checkTasksBecomeReady();
-        return "{\"status\": \"check\"}";
+        return Map.of("status", "check");
     }
 
     @Path("fix")
     @GET
-    public String fixStalled() throws Exception {
+    public Map<String, Object> fixStalled() throws Exception {
         doerService.resetStalledInProgressTasks(Duration.ofSeconds(1));
-        return "{\"status\":\"fixed\"}";
+        return Map.of("status", "fixed");
     }
 
     /** Stops Doer, deletes all tasks and logs, and starts Doer again, with the monitor when {@code m} is true. */
     @Path("reset")
     @GET
-    public String resetDoer(@QueryParam("m") @DefaultValue("false") boolean monitor) throws Exception {
+    public Map<String, Object> resetDoer(@QueryParam("m") @DefaultValue("false") boolean monitor) throws Exception {
         doerService.stop();
         String sql = "DELETE FROM task_logs; DELETE FROM tasks; DELETE FROM demo_log_tasks; DELETE FROM buses; "
                 + "DELETE FROM sims";
         int updatedLogs;
         int updatedTasks;
         int updatedDemoLog;
+        // Doer starts again even if the delete fails: the next tests run on the same application
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             updatedLogs = pst.executeUpdate();
             pst.getMoreResults();
             updatedTasks = pst.getUpdateCount();
             pst.getMoreResults();
             updatedDemoLog = pst.getUpdateCount();
+        } finally {
+            doerService.start(monitor);
         }
-        doerService.start(monitor);
-        return "{\"status\": \"Doer Reset\",\n\"cleared\": {\n\"tasks\": " + updatedTasks + ",\n\"logs\": " + updatedLogs + ",\n\"demo_logs\": " + updatedDemoLog + "}}";
+        return Map.of("status", "Doer Reset",
+                "cleared", Map.of("tasks", updatedTasks, "logs", updatedLogs, "demo_logs", updatedDemoLog));
     }
 
     @Path("add_task")

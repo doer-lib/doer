@@ -11,6 +11,8 @@ import java.nio.file.Path;
  * See src/test/README.md.
  */
 public interface E2eApp {
+    /** The image of the runtimes that run an executable jar. */
+    String JRE_IMAGE = "eclipse-temurin:25-jre";
 
     /** The app of the runtime given by {@code -Ddoer.e2e.runtime}, for example {@code quarkus}. */
     static E2eApp of(String runtime) {
@@ -38,8 +40,12 @@ public interface E2eApp {
         Sources.copyResources(resourceFolder, target);
     }
 
-    /** Copies the file of {@link #customSourcesFolder()} (for example {@code pom.xml}) to the target file. */
+    /**
+     * Copies the file of {@link #customSourcesFolder()} (for example {@code pom.xml}) into the target folder, or, as
+     * {@code cp}, to the target file when the target has the name of the file. The files are not renamed.
+     */
     default void copyCustomSource(String name, Path target) throws IOException {
-        Sources.copy(Sources.resourceFolder(customSourcesFolder()).resolve(name), target);
+        Path file = target.getFileName().toString().equals(name) ? target : target.resolve(name);
+        Sources.copy(Sources.resourceFolder(customSourcesFolder()).resolve(name), file);
     }
 }

@@ -2,6 +2,7 @@ package transitsims.validation;
 
 import com.doer.AcceptStatus;
 import com.doer.Task;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.client.Client;
@@ -11,12 +12,12 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * A doer method that calls an external service through the JAX-RS client API, for ExternalServiceE2E. The task moves
- * on when the service answers 2xx, and fails on an error response or after the read timeout of 1 s. The client is
+ * on when the service answers 2xx, and fails on an error response or after the timeout of 1 s. The client is
  * created on first use, so the bean can be constructed without a JAX-RS implementation.
  */
 @ApplicationScoped
 public class ExternalServiceMethods {
-    static final long READ_TIMEOUT_MS = 1000;
+    static final long TIMEOUT_MS = 1000;
 
     ExternalServiceConfig config;
     private Client client;
@@ -43,10 +44,17 @@ public class ExternalServiceMethods {
     private synchronized Client client() {
         if (client == null) {
             client = ClientBuilder.newBuilder()
-                    .connectTimeout(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                    .readTimeout(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    .connectTimeout(TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    .readTimeout(TIMEOUT_MS, TimeUnit.MILLISECONDS)
                     .build();
         }
         return client;
+    }
+
+    @PreDestroy
+    synchronized void close() {
+        if (client != null) {
+            client.close();
+        }
     }
 }

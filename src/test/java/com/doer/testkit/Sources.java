@@ -36,11 +36,14 @@ public final class Sources {
         }
     }
 
-    /** Copies a folder of test resources (for example {@code e2e/transitsims}) into the target folder. */
+    /**
+     * Copies a folder of test resources (for example {@code e2e/transitsims}) into the target folder, without its
+     * documentation ({@code *.md}).
+     */
     public static void copyResources(String resourceFolder, Path target) throws IOException {
         Path source = resourceFolder(resourceFolder);
         try (Stream<Path> files = Files.walk(source)) {
-            files.filter(Files::isRegularFile).forEach(file -> {
+            files.filter(f -> Files.isRegularFile(f) && !f.toString().endsWith(".md")).forEach(file -> {
                 try {
                     copy(file, target.resolve(source.relativize(file).toString()));
                 } catch (IOException e) {

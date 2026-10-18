@@ -16,11 +16,7 @@ public class Producers {
     @Resource(lookup = "java:jboss/datasources/TransitSims")
     DataSource dataSource;
 
-    /**
-     * The threads of Doer get the context of the application, and each task its own local transaction
-     * containment: a connection taken outside a transaction goes back to the pool when the task ends (Open
-     * Liberty). Not a pool of the ManagedThreadFactory: the containment of its threads never ends.
-     */
+    /** The threads of Doer get the context of the application. */
     @Resource
     ManagedExecutorService executor;
 

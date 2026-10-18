@@ -15,21 +15,22 @@ class WildflyApp implements E2eApp {
     @Override
     public void configure(Path workdir) throws Exception {
         Path sources = workdir.resolve("src/main/java/transitsims");
+        Path migrations = workdir.resolve("src/main/resources/db/migration");
         Path webInf = workdir.resolve("src/main/webapp/WEB-INF");
         copySources("e2e/transitsims", sources);
-        copySources("e2e/db/migration", workdir.resolve("src/main/resources/db/migration"));
-        copyCustomSource("pom.xml", workdir.resolve("pom.xml"));
+        copySources("e2e/db/migration", migrations);
+        copyCustomSource("pom.xml", workdir);
         // The DataSource and the ManagedExecutorService of the server as CDI beans, and BeanKindSingleton
-        copyCustomSource("Producers.java", sources.resolve("Producers.java"));
+        copyCustomSource("Producers.java", sources);
         // Flyway at start, before DoerLifecycle starts Doer
-        copyCustomSource("FlywayMigration.java", sources.resolve("FlywayMigration.java"));
+        copyCustomSource("FlywayMigration.java", sources);
         // The data source with system properties: WildFly does not read environment variables there
-        copyCustomSource("transitsims-ds.xml", webInf.resolve("transitsims-ds.xml"));
+        copyCustomSource("transitsims-ds.xml", webInf);
         // RESTEasy of WildFly writes JSON with Jackson; Transit Sims uses JSON-B
-        copyCustomSource("web.xml", webInf.resolve("web.xml"));
+        copyCustomSource("web.xml", webInf);
         // The pool of the ManagedExecutorService has as many threads as processors (4 on a runner of GitHub Actions)
         // and an unbounded queue: Doer would run fewer tasks at once than its limits. 200, as the pool of Quarkus.
-        copyCustomSource("executor.cli", workdir.resolve("src/main/wildfly/executor.cli"));
+        copyCustomSource("executor.cli", workdir.resolve("src/main/wildfly"));
     }
 
     /**
@@ -37,12 +38,14 @@ class WildflyApp implements E2eApp {
      * Java in the background and turns its exit code after SIGTERM (143) into 0; in the foreground it runs Java without
      * {@code exec}, and the signals of the container do not reach Java. So the container runs a copy of the script that
      * starts Java with {@code exec} in the foreground: Java gets the signals, and its exit code is the one of the container.
-     * The data source gets the {@code E2E_DB_*} variables as system properties. Before the start, {@code executor.cli}
-     * configures the server with the embedded server of {@code jboss-cli.sh}.
+     * If {@code sed} finds nothing to change in a new {@code standalone.sh}, the container fails at once, rather than the
+     * test of the exit code after SIGTERM. The data source gets the {@code E2E_DB_*} variables as system properties.
+     * Before the start, {@code executor.cli} configures the server with the embedded server of {@code jboss-cli.sh}.
      */
     static final String START = """
             "$JBOSS_HOME/bin/jboss-cli.sh" --file=/opt/jboss/e2e/executor.cli
             sed 's/eval \\\\"\\$JAVA\\\\" -D/eval exec \\\\"$JAVA\\\\" -D/' "$JBOSS_HOME/bin/standalone.sh" > "$JBOSS_HOME/bin/standalone-exec.sh"
+            grep -q 'eval exec' "$JBOSS_HOME/bin/standalone-exec.sh" || { echo 'No exec in standalone-exec.sh' >&2; exit 1; }
             LAUNCH_JBOSS_IN_BACKGROUND= exec sh "$JBOSS_HOME/bin/standalone-exec.sh" -b 0.0.0.0 \\
                 -De2e.db.url="$E2E_DB_URL" -De2e.db.user="$E2E_DB_USER" -De2e.db.password="$E2E_DB_PASSWORD"
             """;

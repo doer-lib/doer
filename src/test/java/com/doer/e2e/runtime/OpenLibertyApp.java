@@ -18,18 +18,18 @@ class OpenLibertyApp implements E2eApp {
     @Override
     public void configure(Path workdir) throws Exception {
         Path sources = workdir.resolve("src/main/java/transitsims");
-        Path migration = workdir.resolve("src/main/resources/db/migration");
+        Path migrations = workdir.resolve("src/main/resources/db/migration");
         copySources("e2e/transitsims", sources);
-        copySources("e2e/db/migration", migration);
-        copyCustomSource("pom.xml", workdir.resolve("pom.xml"));
+        copySources("e2e/db/migration", migrations);
+        copyCustomSource("pom.xml", workdir);
         // The DataSource and the ManagedExecutorService of the server as CDI beans, and BeanKindSingleton
-        copyCustomSource("Producers.java", sources.resolve("Producers.java"));
+        copyCustomSource("Producers.java", sources);
         // Flyway at start, before DoerLifecycle starts Doer
-        copyCustomSource("FlywayMigration.java", sources.resolve("FlywayMigration.java"));
+        copyCustomSource("FlywayMigration.java", sources);
         // Flyway finds a classpath location in WebSphere and Open Liberty by this empty file in it
-        copyCustomSource("flyway.location", migration.resolve("flyway.location"));
+        copyCustomSource("flyway.location", migrations);
         // Features, the data source, the context root /, INFO on the console, the threads of the ManagedExecutorService
-        copyCustomSource("server.xml", workdir.resolve("src/main/liberty/server.xml"));
+        copyCustomSource("server.xml", workdir.resolve("src/main/liberty"));
     }
 
     /** The command of the image: {@code server run defaultServer}. */
