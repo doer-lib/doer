@@ -3,12 +3,11 @@ package com.doer.e2e.runtime;
 import static com.doer.testkit.Toolchain.doerLibVersion;
 
 import com.doer.testkit.Processes;
-import com.doer.testkit.Sources;
 import com.doer.testkit.Toolchain;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.regex.Pattern;
 
 /**
  * Transit Sims in Spring Boot: an executable jar with Jersey, run with {@code java -jar} in a JRE image. The sources become
@@ -20,13 +19,8 @@ class SpringBootApp implements E2eApp {
     static final String REWRITE_PLUGIN_VERSION = "6.46.1";
     static final int GIT_INIT_TIMEOUT_SECONDS = 30;
 
-    /** A class-level JAX-RS annotation, and a CDI scope (a line that starts with it is on the class). */
-    static final Pattern JAX_RS_CLASS = Pattern.compile("(?m)^@(Path|Provider)\\b");
-    static final Pattern CDI_SCOPE = Pattern.compile("(?m)^@(ApplicationScoped|Dependent|Singleton)\\b");
-    /** A line with {@code @Dependent} or {@code @Produces} alone, and its indent. */
-    static final Pattern DEPENDENT = Pattern.compile("(?m)^(\\s*)@Dependent$");
-    static final Pattern PRODUCES = Pattern.compile("(?m)^(\\s*)@Produces$");
-    static final String PROTOTYPE = "$0\n$1@org.springframework.context.annotation.Scope(\"prototype\")";
+    static final String PROTOTYPE = "@org.springframework.context.annotation.Scope(\"prototype\")";
+    static final String COMPONENT = "@org.springframework.stereotype.Component";
 
     @Override
     public String customSourcesFolder() {
@@ -36,21 +30,21 @@ class SpringBootApp implements E2eApp {
     @Override
     public void configure(Path workdir) throws Exception {
         Path sources = workdir.resolve("src/main/java/transitsims");
-        Path resources = workdir.resolve("src/main/resources");
+        Path migrations = workdir.resolve("src/main/resources/db/migration");
         copySources("e2e/transitsims", sources);
-        copySources("e2e/db/migration", resources.resolve("db/migration"));
+        copySources("e2e/db/migration", migrations);
         addSpringAnnotations(sources);
-        copyCustomSource("pom.xml", workdir.resolve("pom.xml"));
+        copyCustomSource("pom.xml", workdir);
         // The data source and Jersey at /api
-        copyCustomSource("application.properties", resources.resolve("application.properties"));
+        copyCustomSource("application.properties", workdir.resolve("src/main/resources"));
         // The generated service, a transaction-aware DataSource, the Executor and the Jersey resources as Spring beans
-        copyCustomSource("SpringBootMain.java", sources.resolve("SpringBootMain.java"));
+        copyCustomSource("SpringBootMain.java", sources);
         // Instead of the one of Transit Sims: a SmartLifecycle, Spring has no Startup and Shutdown events
-        copyCustomSource("DoerLifecycle.java", sources.resolve("DoerLifecycle.java"));
+        copyCustomSource("DoerLifecycle.java", sources);
         // Instead of the one of Transit Sims: an aspect, Spring has no CDI interceptors
-        copyCustomSource("BeanKindTracedInterceptor.java", sources.resolve("validation/BeanKindTracedInterceptor.java"));
+        copyCustomSource("BeanKindTracedInterceptor.java", sources.resolve("validation"));
         // The recipe of OpenRewrite that replaces the CDI annotations with Spring ones
-        copyCustomSource("rewrite.yml", workdir.resolve("rewrite.yml"));
+        copyCustomSource("rewrite.yml", workdir);
         // OpenRewrite skips the files git ignores, and the work folder is in target/ of this repository
         Processes.run(workdir, "git-init", GIT_INIT_TIMEOUT_SECONDS, List.of("git", "init", "-q")).assertStatus(0);
         Toolchain.mvn(workdir, "mvn-rewrite",
@@ -61,25 +55,33 @@ class SpringBootApp implements E2eApp {
     @Override
     public DockerRunSpec dockerRun(Path workdir) {
         return new DockerRunSpec(List.of("-v", workdir.resolve("target/transitsims.jar") + ":/app/transitsims.jar:ro"),
-                QuarkusApp.JRE_IMAGE, List.of("java", "-jar", "/app/transitsims.jar"));
+                JRE_IMAGE, List.of("java", "-jar", "/app/transitsims.jar"));
     }
 
     /**
-     * The Spring annotations that rewrite.yml cannot add (it replaces the CDI ones afterwards): {@code @Scope("prototype")}
-     * next to {@code @Dependent} and a CDI {@code @Produces} without a scope, and {@code @Component} on the JAX-RS
-     * resources and providers without a scope ({@code SimResource}, ...), so that Jersey takes them from Spring.
+     * The Spring annotations that rewrite.yml cannot add (it replaces the CDI ones afterwards). A new bean of these kinds
+     * in Transit Sims needs a line here.
      */
-    static void addSpringAnnotations(Path sources) throws Exception {
-        for (String name : Sources.javaFiles(sources)) {
-            Path file = sources.resolve(name);
-            String source = DEPENDENT.matcher(Files.readString(file)).replaceAll(PROTOTYPE);
-            if (source.contains("import jakarta.enterprise.inject.Produces;")) {
-                source = PRODUCES.matcher(source).replaceAll(PROTOTYPE);
-            }
-            if (JAX_RS_CLASS.matcher(source).find() && !CDI_SCOPE.matcher(source).find()) {
-                source = source.replaceFirst("(?m)^public class ", "@org.springframework.stereotype.Component\npublic class ");
-            }
-            Files.writeString(file, source);
+    static void addSpringAnnotations(Path sources) throws IOException {
+        // @Dependent: one instance per injection point
+        insertBefore(sources.resolve("SimSupervisor.java"), "public class SimSupervisor", PROTOTYPE + "\n");
+        insertBefore(sources.resolve("validation/ConcurrencyQueues.java"), "public class ConcurrencyQueues",
+                PROTOTYPE + "\n");
+        // A CDI producer without a scope makes a @Dependent bean
+        insertBefore(sources.resolve("validation/BeanKindProducers.java"), "public BeanKindProduced produce()",
+                PROTOTYPE + " ");
+        // JAX-RS resources and providers without a scope: Spring beans, so that Jersey takes them from Spring
+        insertBefore(sources.resolve("SimResource.java"), "public class SimResource", COMPONENT + "\n");
+        insertBefore(sources.resolve("BusResource.java"), "public class BusResource", COMPONENT + "\n");
+        insertBefore(sources.resolve("RestExceptionMapper.java"), "public class RestExceptionMapper", COMPONENT + "\n");
+    }
+
+    /** Inserts the annotation before the text; fails if the file has no such text. */
+    static void insertBefore(Path file, String text, String annotation) throws IOException {
+        String source = Files.readString(file);
+        if (!source.contains(text)) {
+            throw new IllegalStateException("No '" + text + "' in " + file);
         }
+        Files.writeString(file, source.replace(text, annotation + text));
     }
 }

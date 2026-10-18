@@ -15,7 +15,14 @@ import java.util.List;
 import java.util.UUID;
 import javax.sql.DataSource;
 
-/** Simulations in the table sims; the task data of the Sim task. */
+/**
+ * Simulations in the table sims; the task data of the Sim task.
+ * <p>
+ * Unlike {@link BusRepository}, the class has no {@code @Transactional}, so that the tests check that Doer works with
+ * a loader and a saver of a user class without it. In an application, put {@code @Transactional} on such a class: in
+ * Open Liberty a connection taken outside a transaction stays with the request until it ends, so SimResource, which
+ * finds a simulation and then makes a coordinated update of it, holds two connections at once.
+ */
 @ApplicationScoped
 public class SimRepository {
     DataSource ds;

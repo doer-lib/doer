@@ -5,7 +5,6 @@ import java.util.List;
 
 /** Transit Sims in Quarkus: a Quarkus JVM application, run with {@code java -jar quarkus-run.jar} in a JRE image. */
 class QuarkusApp implements E2eApp {
-    static final String JRE_IMAGE = "eclipse-temurin:25-jre";
 
     @Override
     public String customSourcesFolder() {
@@ -14,12 +13,13 @@ class QuarkusApp implements E2eApp {
 
     @Override
     public void configure(Path workdir) throws Exception {
-        Path resources = workdir.resolve("src/main/resources");
-        copySources("e2e/transitsims", workdir.resolve("src/main/java/transitsims"));
-        copySources("e2e/db/migration", resources.resolve("db/migration"));
-        copyCustomSource("pom.xml", workdir.resolve("pom.xml"));
+        Path sources = workdir.resolve("src/main/java/transitsims");
+        Path migrations = workdir.resolve("src/main/resources/db/migration");
+        copySources("e2e/transitsims", sources);
+        copySources("e2e/db/migration", migrations);
+        copyCustomSource("pom.xml", workdir);
         // The data source and Flyway at start
-        copyCustomSource("application.properties", resources.resolve("application.properties"));
+        copyCustomSource("application.properties", workdir.resolve("src/main/resources"));
     }
 
     @Override
