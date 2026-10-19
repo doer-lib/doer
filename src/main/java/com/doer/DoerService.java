@@ -1,6 +1,5 @@
 package com.doer;
 
-import com.doer.ConcurrencyDomainImpl.SubQueue;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Array;
@@ -15,21 +14,17 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Scanner;
+import java.util.ServiceConfigurationError;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -61,12 +56,10 @@ public abstract class DoerService {
     private boolean loadingInProgress;
 
     protected AtomicInteger dbTimeDiffMs = new AtomicInteger(0);
-    protected ConcurrentLinkedQueue<Task> inProgressTasks = new ConcurrentLinkedQueue<>();
-    protected ConcurrentLinkedQueue<Task> reCheckTasks = new ConcurrentLinkedQueue<>();
-    protected Instant lastReCheck;
+    private final ConcurrentLinkedQueue<Task> reCheckTasks = new ConcurrentLinkedQueue<>();
+    private Instant lastReCheck;
 
-    private ConcurrentLinkedQueue<ConcurrencyDomainImpl> domains = new ConcurrentLinkedQueue<>();
-    private Set<String> statusesCache;
+    private final TaskQueues taskQueues = new TaskQueues();
 
     Duration queueReloadInterval = Duration.ofMinutes(10);
     Instant lastSelectTime;
@@ -144,6 +137,7 @@ public abstract class DoerService {
     }
 
     public void setQueueReloadInterval(Duration value) {
+        // todo ban negative or 0 values
         queueReloadInterval = value;
     }
 
@@ -310,28 +304,14 @@ public abstract class DoerService {
     }
 
     protected void setupConcurrencyDomain(String name, int limit, Map<String, Duration> delays, Map<String, Duration> retryDelays) {
-        HashSet<String> keys = new HashSet<>(delays.keySet());
-        keys.addAll(retryDelays.keySet());
-        List<String> statuses = new CopyOnWriteArrayList<>(keys);
-        Collections.sort(statuses);
-
-        ConcurrencyDomainImpl domain = new ConcurrencyDomainImpl();
-        domain.domainName = name;
-        domain.numberOfTasksToRunSimultaneously = limit;
-        domain.statuses = statuses;
-        domain.delays = new HashMap<>(delays);
-        domain.retryDelays = new HashMap<>(retryDelays);
-        domain.numberOfTasksInProgress = 0;
-        domain.initSubQueues(minSingleQueueSize);
-        domains.add(domain);
-        synchronized(this) {
-            this.statusesCache = null;
+        synchronized (this) {
+            taskQueues.addDomain(name, limit, delays, retryDelays, minSingleQueueSize);
         }
     }
 
     private void monitorIdleState() {
         synchronized (this) {
-            if (!monitorEnabled || loadingInProgress || !inProgressTasks.isEmpty() || monitorThread != null) {
+            if (!monitorEnabled || loadingInProgress || taskQueues.hasTasksInProgress() || monitorThread != null) {
                 return;
             }
             monitorThread = Thread.currentThread();
@@ -353,38 +333,34 @@ public abstract class DoerService {
     }
 
     private long getNextCheckTime() {
-        TreeSet<Instant> plannedTimes = new TreeSet<>();
         synchronized (this) {
             Instant now = getDbNow();
             if (lastSelectTime == null) {
                 return 0;
             }
-            Instant nextDbLoadTime = lastSelectTime.plus(queueReloadInterval);
-            if (nextDbLoadTime.isBefore(now)) {
+            Instant nextCheckTime = lastSelectTime.plus(queueReloadInterval);
+            if (nextCheckTime.isBefore(now)) {
                 return 0;
             }
-            plannedTimes.add(nextDbLoadTime);
-            for (ConcurrencyDomainImpl domain : domains) {
-                for (SubQueue queue : domain.queues) {
-                    if (!queue.buffer.isEmpty()) {
-                        Instant plannedTime = domain.getTaskReadyTime(queue.buffer.first());
-                        if (plannedTime.equals(Instant.MIN)) {
-                            return 0;
-                        }
-                        plannedTimes.add(plannedTime);
-                    }
+            Instant readyTime = taskQueues.earliestReadyTime();
+            if (readyTime != null) {
+                if (readyTime.equals(Instant.MIN)) {
+                    return 0;
+                }
+                if (readyTime.isBefore(nextCheckTime)) {
+                    nextCheckTime = readyTime;
                 }
             }
             if (stalledTaskCheckInterval != null) {
                 if (lastStalledTaskChecked == null) {
                     return 0;
                 }
-                plannedTimes.add(lastStalledTaskChecked.plus(stalledTaskCheckInterval));
+                Instant stalledTaskCheckTime = lastStalledTaskChecked.plus(stalledTaskCheckInterval);
+                if (stalledTaskCheckTime.isBefore(nextCheckTime)) {
+                    nextCheckTime = stalledTaskCheckTime;
+                }
             }
-            if (plannedTimes.isEmpty()) {
-                return MAX_MONITOR_TIMEOUT_MS;
-            }
-            long ms = Duration.between(now, plannedTimes.first()).toMillis();
+            long ms = Duration.between(now, nextCheckTime).toMillis();
             return Math.min(MAX_MONITOR_TIMEOUT_MS, Math.max(0, ms));
         }
     }
@@ -407,23 +383,16 @@ public abstract class DoerService {
             Task task = self().loadTask(taskId);
             if (task != null && !task.isInProgress()) {
                 synchronized (this) {
-                    for (Task t : inProgressTasks) {
-                        if (taskId == t.getId()) {
-                            return;
-                        }
+                    if (taskQueues.isInProgress(taskId)) {
+                        taskQueues.reloadWhenFinished(taskId);
+                        return;
                     }
-                    for (ConcurrencyDomainImpl domain : domains) {
-                        domain.dropTask(taskId);
-                    }
-                    for (ConcurrencyDomainImpl domain : domains) {
-                        if (domain.getStatuses().contains(task.getStatus())) {
-                            domain.putTaskToQueue(task);
-                            // The idle monitor waits for the checks planned before this task: wake it to plan again
-                            this.notify();
-                            if (domain.numberOfTasksInProgress < domain.getLimit()) {
-                                executor.execute(() -> processNextTask(domain));
-                            }
-                            return;
+                    ConcurrencyDomain domain = taskQueues.replaceTask(task);
+                    if (domain != null) {
+                        // The idle monitor waits for the checks planned before this task: wake it to plan again
+                        this.notify();
+                        if (domain.hasFreeSlot()) {
+                            executor.execute(() -> processNextTask(domain));
                         }
                     }
                 }
@@ -477,8 +446,8 @@ public abstract class DoerService {
             if (!isRunning) {
                 return;
             }
-            for (ConcurrencyDomainImpl domain : domains) {
-                if (domain.numberOfTasksInProgress < domain.getLimit()) {
+            for (ConcurrencyDomain domain : taskQueues.domains()) {
+                if (domain.hasFreeSlot()) {
                     executor.execute(() -> processNextTask(domain));
                 }
             }
@@ -494,7 +463,8 @@ public abstract class DoerService {
             }
             taskLoadRequired = false;
             loadingInProgress = true;
-            limits = calculateLimits();
+            limits = taskQueues.nextLimits(getDbNow(), lastSelectTime,
+                    new TaskQueues.LoadSettings(minSingleQueueSize, maxAllQueuesSize, queueReloadInterval));
             lastReCheck = null;
             reCheckTasks.clear();
             lastSelectTime = getDbNow();
@@ -504,9 +474,10 @@ public abstract class DoerService {
             String infoMessage;
             synchronized (this) {
                 if (isRunning) {
-                    updateQueues(limits, tasksFromDb);
-                    infoMessage = "Queues Loaded (limit/loaded): "
-                            + createLimitVolumeMessage(limits, getQueueVolumes());
+                    reCheckTasks.addAll(taskQueues.replaceFromDb(limits, tasksFromDb, minSingleQueueSize));
+                    LOG.info("Tasks to reload later: "
+                            + reCheckTasks.stream().map(Task::getId).collect(Collectors.toList()));
+                    infoMessage = "Queues Loaded (limit/loaded): " + taskQueues.describeLoad(limits);
                 } else {
                     infoMessage = "Queues Loaded but skipped. Because DoerService was stopped";
                 }
@@ -524,187 +495,6 @@ public abstract class DoerService {
                 }
             }
         }
-    }
-
-    private List<Integer> calculateLimits() {
-        List<SubQueue> queues = new ArrayList<>();
-        for (ConcurrencyDomainImpl domain : domains) {
-            for (SubQueue queue : domain.queues) {
-                queues.add(queue);
-            }
-        }
-
-        boolean hasDrainedQueue = false;
-        int drainedQueueSize = 0;
-        int drainedQueueSizeIndex = 0;
-        for (int i = 0; i < queues.size(); i++) {
-            SubQueue queue = queues.get(i);
-            if (queue.buffer.isEmpty() && queue.hasMoreInDb) {
-                hasDrainedQueue = true;
-                drainedQueueSize = queue.queueSize;
-                drainedQueueSizeIndex = i;
-                break;
-            }
-        }
-
-        List<Integer> sizes = new ArrayList<>();
-        int totalQueuesSize = 0;
-        Duration queueUsageTime = (lastSelectTime == null ? Duration.ZERO : Duration.between(lastSelectTime, getDbNow()));
-        boolean queueIsUsed80PercentOfReloadTime = (queueUsageTime
-                .compareTo(queueReloadInterval.dividedBy(10).multipliedBy(8)) >= 0);
-        for (int i = 0; i < queues.size(); i++) {
-            SubQueue queue = queues.get(i);
-            int size;
-            if ((queueIsUsed80PercentOfReloadTime || hasDrainedQueue) && queue.queueSize > minSingleQueueSize
-                    && queue.buffer.size() > queue.queueSize / 2) {
-                size = Math.max(queue.queueSize / 2, minSingleQueueSize);
-            } else {
-                size = queue.queueSize;
-            }
-            sizes.add(size);
-            totalQueuesSize += size;
-        }
-        if (!queueIsUsed80PercentOfReloadTime) {
-            if (hasDrainedQueue && totalQueuesSize + drainedQueueSize <= maxAllQueuesSize) {
-                sizes.set(drainedQueueSizeIndex, drainedQueueSize * 2);
-            }
-        }
-        return sizes;
-    }
-
-    private void updateQueues(List<Integer> limits, List<Task> tasks) {
-        // We select tasks from db limited by each subquery, and additionally all
-        // in_progress.
-        // Using loaded snapshot we calculate how much we actually loaded for every
-        // subquery - to know that DB has more rows for that subquery.
-        // Since we read DB, till now DoerService may have updated some task, and now it
-        // has newer version of Task - we put that task in re-chek list.
-        // When we read DB we may see in_progress task that is not in our memory any
-        // more (other node processed it?)
-        LinkedList<Integer> limitsCopy = new LinkedList<>(limits);
-        LinkedList<Integer> loadedCounts = calculateActualLoadedCounts(tasks);
-        LOG.info("Load tasks.size: " + tasks.size());
-        LOG.info("Loaded in_progress: " + tasks.stream().filter(Task::isInProgress).count());
-        LOG.info("Limits: " + limitsCopy);
-        LOG.info("Loads: " + loadedCounts);
-        HashSet<Long> inProgressIds = new HashSet<>();
-        for (Task task : inProgressTasks) {
-            inProgressIds.add(task.getId());
-        }
-        LinkedList<Task> copy = new LinkedList<>();
-        HashMap<Long, Task> inMemoryTasks = getInMemoryTasks();
-        for (Task task : tasks) {
-            Task memo = inMemoryTasks.get(task.getId());
-            if (memo != null && memo.getVersion() > task.getVersion()) {
-                LOG.info("Newer task " + task.getId() + " " + task.getModified());
-                reCheckTasks.add(task);
-            } else if (inProgressIds.contains(task.getId())) {
-                // We should not put task to the list, if it is in_progress
-                LOG.info("Skipped In progress " + task.getId() + " " + task.getModified());
-            } else if (task.isInProgress()) {
-                // If task in db was in progress, and we don't have updated copy in memory, we
-                // need to check it a bit later.
-                LOG.info("Skipped DB In progress " + task.getId() + " " + task.getModified());
-                reCheckTasks.add(task);
-            } else {
-                copy.add(task);
-            }
-        }
-        for (ConcurrencyDomainImpl domain : domains) {
-            HashMap<Duration, HashSet<String>> delayedStatuses = groupStatusesByDelay(domain, false);
-            HashMap<Duration, HashSet<String>> retryStatuses = groupStatusesByDelay(domain, true);
-            for (SubQueue queue : domain.queues) {
-                List<Task> newBuffer = takeTasksForQueue(copy, queue, delayedStatuses, retryStatuses);
-                queue.buffer.clear();
-                queue.buffer.addAll(newBuffer);
-                int limit = limitsCopy.pollFirst();
-                int loaded = loadedCounts.pollFirst();
-                queue.queueSize = (loaded < limit / 2 ? Math.max(limit / 2, minSingleQueueSize) : limit);
-                queue.hasMoreInDb = (limit <= loaded);
-            }
-        }
-        LOG.info("Tasks to reload later: " + reCheckTasks.stream().map(Task::getId).collect(Collectors.toList()));
-    }
-
-    private LinkedList<Integer> calculateActualLoadedCounts(List<Task> tasks) {
-        LinkedList<Integer> counts = new LinkedList<>();
-        LinkedList<Task> copy = new LinkedList<>(tasks);
-        for (ConcurrencyDomainImpl domain : domains) {
-            HashMap<Duration, HashSet<String>> delayedStatuses = groupStatusesByDelay(domain, false);
-            HashMap<Duration, HashSet<String>> retryStatuses = groupStatusesByDelay(domain, true);
-            for (SubQueue queue : domain.queues) {
-                counts.add(takeTasksForQueue(copy, queue, delayedStatuses, retryStatuses).size());
-            }
-        }
-        return counts;
-    }
-
-    /** Groups the domain's statuses by their delay, or by their retry delay when {@code retry} is true. */
-    private static HashMap<Duration, HashSet<String>> groupStatusesByDelay(ConcurrencyDomainImpl domain,
-            boolean retry) {
-        HashMap<Duration, HashSet<String>> result = new HashMap<>();
-        for (String status : domain.getStatuses()) {
-            Duration delay = retry ? domain.getRetryDelay(status) : domain.getDelay(status);
-            result.computeIfAbsent(delay, key -> new HashSet<>()).add(status);
-        }
-        return result;
-    }
-
-    /** Removes the tasks that belong to {@code queue} from {@code tasks} and returns them in their original order. */
-    private static List<Task> takeTasksForQueue(LinkedList<Task> tasks, SubQueue queue,
-            HashMap<Duration, HashSet<String>> delayedStatuses, HashMap<Duration, HashSet<String>> retryStatuses) {
-        HashSet<String> statuses;
-        if (queue.failingTaskQueue) {
-            statuses = retryStatuses.get(queue.delay);
-        } else {
-            statuses = delayedStatuses.get(queue.delay);
-        }
-        List<Task> taken = new ArrayList<>();
-        Iterator<Task> iterator = tasks.iterator();
-        while (iterator.hasNext()) {
-            Task task = iterator.next();
-            boolean isFailing = task.getFailingSince() != null;
-            if (isFailing == queue.failingTaskQueue && statuses.contains(task.getStatus())) {
-                iterator.remove();
-                taken.add(task);
-            }
-        }
-        return taken;
-    }
-
-    private HashMap<Long, Task> getInMemoryTasks() {
-        HashMap<Long, Task> inMemoryTasks = new HashMap<>();
-        for (ConcurrencyDomainImpl domain : domains) {
-            for (SubQueue queue : domain.queues) {
-                for (Task task : queue.buffer) {
-                    inMemoryTasks.put(task.getId(), task);
-                }
-            }
-        }
-        return inMemoryTasks;
-    }
-
-    private List<Integer> getQueueVolumes() {
-        List<Integer> result = new ArrayList<>();
-        for (ConcurrencyDomainImpl domain : domains) {
-            for (SubQueue queue : domain.queues) {
-                result.add(queue.buffer.size());
-            }
-        }
-        return result;
-    }
-
-    private String createLimitVolumeMessage(List<Integer> limits, List<Integer> volumes) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < limits.size(); i++) {
-            if (sb.length() > 0) {
-                sb.append(", ");
-            }
-            sb.append(limits.get(i))
-                    .append("/")
-                    .append(volumes.get(i));
-        }
-        return sb.toString();
     }
 
     private OffsetDateTime toOffsetDateTime(Instant instant) {
@@ -731,63 +521,103 @@ public abstract class DoerService {
 
     public abstract void runInTransaction(Callable<Object> code) throws Exception;
 
+    /**
+     * Runs a doer method on the task: its loaders and the in_progress mark in one transaction, the method itself, then
+     * its savers and the new status in another one. A failure of the user's code in any of them is recorded as a
+     * failure of the doer method: the task keeps its status (or gets {@code onErrorStatus} after
+     * {@code errorTimeout}), gets failing_since and a task_logs row with the exception. The transaction that failed
+     * is rolled back, so a failed loader leaves no in_progress mark, and a failed saver saves neither the data nor
+     * the new status.
+     * <p>
+     * A failure of the user's code is an exception, or an error after which the thread can go on: of class loading or
+     * linkage (also of a proxy), of memory or stack, or of an {@code assert}. Other errors ({@link InternalError},
+     * {@link ThreadDeath}, ...) are not caught. The generated {@code createExtraJson} catches the same for the
+     * exception describers.
+     */
     public void callDoerMethod(Task task, Callable<Object> loader, Callable<Object> caller, Callable<Object> saver,
             String className, String methodName, Duration errorTimeout, String onErrorStatus) throws Exception {
         String initialStatus = task.getStatus();
         long t0 = System.currentTimeMillis();
-        self().runInTransaction(() -> {
-            task.setInProgress(true);
-            updateAndBumpVersionOrThrow(task);
-            loader.call();
-            return null;
-        });
-        Exception exception;
+        Throwable failure = null;
+        Task initialTask = new Task();
+        initialTask.assignFieldsFrom(task);
         try {
-            caller.call();
-            exception = null;
-        } catch (Exception e) {
-            exception = e;
-            LOG.log(Level.WARNING, "Doer method error", e);
+            self().runInTransaction(() -> {
+                task.setInProgress(true);
+                updateAndBumpVersionOrThrow(task);
+                loader.call();
+                return null;
+            });
+        } catch (TaskVersionConflictException e) {
+            throw e;
+        } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
+                | AssertionError e) {
+            failure = e;
+            // The transaction is rolled back: the task is as it was before
+            task.assignFieldsFrom(initialTask);
+            LOG.log(Level.SEVERE, "Task data loader error. TaskId: " + task.getId(), e);
         }
-        if (exception == null) {
+        if (failure == null) {
+            Task startedTask = new Task();
+            startedTask.assignFieldsFrom(task);
             try {
-                self().runInTransaction(() -> {
-                    task.setFailingSince(null);
-                    task.setInProgress(false);
-                    updateAndBumpVersionOrThrow(task);
-                    saver.call();
-                    int t = (int) (System.currentTimeMillis() - t0);
-                    writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, null, null, t);
-                    return null;
-                });
-                return;
-            } catch (TaskVersionConflictException e) {
-                throw e;
-            } catch (Exception e) {
-                exception = e;
-                LOG.log(Level.WARNING, "Task data saver error", e);
+                caller.call();
+            } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
+                    | AssertionError e) {
+                failure = e;
+                LOG.log(Level.WARNING, "Doer method error. TaskId: " + task.getId(), e);
+            }
+            if (failure == null) {
+                try {
+                    self().runInTransaction(() -> {
+                        task.setFailingSince(null);
+                        task.setInProgress(false);
+                        updateAndBumpVersionOrThrow(task);
+                        saver.call();
+                        int t = (int) (System.currentTimeMillis() - t0);
+                        writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, null, null,
+                                t);
+                        return null;
+                    });
+                    return;
+                } catch (TaskVersionConflictException e) {
+                    throw e;
+                } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
+                        | AssertionError e) {
+                    failure = e;
+                    // The transaction is rolled back: the task is in progress, as after the start
+                    task.assignFieldsFrom(startedTask);
+                    LOG.log(Level.SEVERE, "Task data saver error. TaskId: " + task.getId(), e);
+                }
             }
         }
-        Exception finalException = exception;
-        self().runInTransaction(() -> {
-            if (task.getFailingSince() == null) {
-                task.setFailingSince(getDbNow());
-                task.setStatus(initialStatus);
-            } else if (errorTimeout != null && task.getFailingSince().plus(errorTimeout).isBefore(getDbNow())) {
-                task.setFailingSince(null);
-                task.setStatus(onErrorStatus);
-            } else {
-                task.setStatus(initialStatus);
+        Throwable finalFailure = failure;
+        try {
+            self().runInTransaction(() -> {
+                if (task.getFailingSince() == null) {
+                    task.setFailingSince(getDbNow());
+                    task.setStatus(initialStatus);
+                } else if (errorTimeout != null && task.getFailingSince().plus(errorTimeout).isBefore(getDbNow())) {
+                    task.setFailingSince(null);
+                    task.setStatus(onErrorStatus);
+                } else {
+                    task.setStatus(initialStatus);
+                }
+                task.setInProgress(false);
+                updateAndBumpVersionOrThrow(task);
+                String exceptionType = finalFailure.getClass().getName();
+                String extraJson = createExtraJson(task, finalFailure);
+                int t = (int) (System.currentTimeMillis() - t0);
+                writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, exceptionType,
+                        extraJson, t);
+                return null;
+            });
+        } finally {
+            if (failure instanceof InterruptedException) {
+                // Caught from the user's code, which cleared the flag: the thread is still to be interrupted
+                Thread.currentThread().interrupt();
             }
-            task.setInProgress(false);
-            updateAndBumpVersionOrThrow(task);
-            String exceptionType = finalException.getClass().getName();
-            String extraJson = createExtraJson(task, finalException);
-            int t = (int) (System.currentTimeMillis() - t0);
-            writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, exceptionType, extraJson,
-                    t);
-            return null;
-        });
+        }
     }
 
     /**
@@ -961,7 +791,11 @@ public abstract class DoerService {
         }
     }
 
-    public abstract String createExtraJson(Task task, Exception exception);
+    /**
+     * extra_json of the task_logs row of a failure, from the exception describers; null for none. A failure of a
+     * describer is logged, so that the failure of the doer method is still recorded.
+     */
+    public abstract String createExtraJson(Task task, Throwable exception);
 
     public long writeTaskLog(Long taskId, String initialStatus, String finalStatus, String className, String methodName,
             String exceptionType, String extraJson, Integer durationMs) throws SQLException {
@@ -988,26 +822,13 @@ public abstract class DoerService {
         }
     }
 
-    private ConcurrencyDomainImpl selectConcurrencyDomain(String status) {
-        for (ConcurrencyDomainImpl domain : domains) {
-            if (domain.getStatuses().contains(status)) {
-                return domain;
-            }
-        }
-        return null;
-    }
-
-    private void processNextTask(ConcurrencyDomainImpl domain) {
+    private void processNextTask(ConcurrencyDomain domain) {
         Task task;
         synchronized (this) {
             if (!isRunning) {
                 return;
             }
-            if (domain.numberOfTasksToRunSimultaneously - domain.numberOfTasksInProgress < 1) {
-                executor.execute(this::monitorIdleState);
-                return;
-            }
-            task = domain.pullNextReadyTask(getDbNow());
+            task = taskQueues.startNext(domain, getDbNow());
             if (task == null) {
                 executor.execute(this::monitorIdleState);
                 return;
@@ -1015,49 +836,42 @@ public abstract class DoerService {
             if (domain.hasDrainedQueue()) {
                 triggerQueuesReloadFromDb();
             }
-            inProgressTasks.add(task);
-            domain.numberOfTasksInProgress++;
             this.notify();
         }
         boolean processedSuccessfully = false;
-        boolean taskChangedConcurrently = false;
         String threadName = Thread.currentThread().getName();
         Thread.currentThread().setName("doer-task-" + task.getId());
         try {
             runTask(task);
             processedSuccessfully = true;
         } catch (TaskVersionConflictException e) {
-            // Other node or facilitateCoordinatedUpdate changed this task. Reload it from db
-            taskChangedConcurrently = true;
+            // Another node or facilitateCoordinatedUpdate changed the task: the task is dropped here, the one that
+            // changed it queues it. A reload this node was asked for meanwhile is done below.
+            LOG.fine("Task changed concurrently, dropped. TaskId: " + task.getId());
         } catch (Exception e) {
             LOG.log(Level.WARNING, "Failed to run task TaskId: " + task.getId(), e);
         } finally {
             Thread.currentThread().setName(threadName);
             synchronized (this) {
-                domain.numberOfTasksInProgress--;
-                inProgressTasks.remove(task);
-                if (taskChangedConcurrently) {
-                    triggerTaskReloadFromDb(task.getId());
-                }
+                boolean reloadRequested = taskQueues.finish(task, domain);
                 if (processedSuccessfully) {
                     boolean nextProcessingStarted = false;
-                    ConcurrencyDomainImpl newDomain = selectConcurrencyDomain(task.getStatus());
+                    ConcurrencyDomain newDomain = taskQueues.requeue(task);
                     if (newDomain != null) {
-                        newDomain.putTaskToQueue(task);
-                        int nNew = newDomain.getLimit() - domain.numberOfTasksInProgress;
+                        int nNew = newDomain.freeSlots();
                         for (int i = 0; i < nNew; i++) {
                             executor.execute(() -> processNextTask(newDomain));
                             nextProcessingStarted = true;
                         }
                     }
                     if (newDomain != domain) {
-                        int nOld = domain.getLimit() - domain.numberOfTasksInProgress;
+                        int nOld = domain.freeSlots();
                         for (int i = 0; i < nOld; i++) {
                             executor.execute(() -> processNextTask(domain));
                             nextProcessingStarted = true;
                         }
                     }
-                    if (!nextProcessingStarted && inProgressTasks.isEmpty()) {
+                    if (!nextProcessingStarted && !taskQueues.hasTasksInProgress()) {
                         executor.execute(this::monitorIdleState);
                     }
                 } else {
@@ -1065,20 +879,23 @@ public abstract class DoerService {
                     // parralel executions, only one
                     executor.execute(() -> processNextTask(domain));
                 }
+                if (reloadRequested) {
+                    triggerTaskReloadFromDb(task.getId());
+                }
             }
         }
     }
 
     public Set<String> getActiveStatuses() {
         synchronized (this) {
-            if (statusesCache == null) {
-                HashSet<String> statuses = new HashSet<>();
-                for (ConcurrencyDomain domain : domains) {
-                    statuses.addAll(domain.getStatuses());
-                }
-                statusesCache = Collections.unmodifiableSet(statuses);
-            }
-            return statusesCache;
+            return taskQueues.activeStatuses();
+        }
+    }
+
+    /** Sub-queues of all domains, in the order of the LIMIT parameters of SelectTasks.sql (checked by tests). */
+    List<SubQueue> queues() {
+        synchronized (this) {
+            return taskQueues.queues();
         }
     }
 

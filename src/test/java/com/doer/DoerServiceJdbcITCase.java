@@ -408,7 +408,7 @@ public class DoerServiceJdbcITCase {
         }
 
         @Override
-        public String createExtraJson(Task task, Exception exception) {
+        public String createExtraJson(Task task, Throwable exception) {
             throw new UnsupportedOperationException();
         }
     }

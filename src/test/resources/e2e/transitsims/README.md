@@ -139,6 +139,9 @@ What `runTask` of the generated service does. The variety of annotations is the 
 | 3 parameters; 2 loaders in different beans | `GeneratedCodeMethods.threeParams` ← `GeneratedCodeTaskData.loadFirst`, `GeneratedCodeMethods.loadSecond` |
 | savers get the objects of the loaders; no saver after an exception | `GeneratedCodeTaskData.saveFirst`, `GeneratedCodeMethods.saveSecond` |
 | a checked or runtime exception: `failingSince` set, the status back to the initial one | `GeneratedCodeFailures` |
+| an exception of the loader: the method is not called, `failingSince` set, the status back to the initial one | `GeneratedCodeFailures.loaderException` ← `loadFailing` |
+| an exception of the saver: the new status is rolled back, `failingSince` set (or the status `null` 1 day after it) | `GeneratedCodeFailures.saverException` → `saveFailing` |
+| an error of the exception describer: caught and logged by the generated `createExtraJson`, `failingSince` still set | `GeneratedCodeFailures.describerError`, `describeUndescribable` |
 | still failing 1 day after `failingSince`, no `@RetryPolicy`: status `null` | `GeneratedCodeFailures.runtimeException` |
 | still failing after `@RetryPolicy(duration)`: `fallbackStatus` | `GeneratedCodeFailures.retryPolicy` |
 

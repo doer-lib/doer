@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -132,6 +133,60 @@ public class DoerServiceTest {
     }
 
     @Test
+    void processNextTask__should_start_task_moved_to_other_domain_while_its_old_domain_is_busy() throws Exception {
+        ExecutorService executor = Executors.newCachedThreadPool();
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch othersStarted = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            service.setExecutor(executor);
+            service.setupConcurrencyDomain("D1", 3, Map.of("A", Duration.ZERO), Map.of());
+            service.setupConcurrencyDomain("D2", 2, Map.of("B", Duration.ZERO), Map.of());
+            Task first = createNewTask("A");
+            Task second = createNewTask("A");
+            Task third = createNewTask("A");
+            // first runs to the end only when second and third are in progress in D1, and they stay there
+            service.tst_on_run = task -> {
+                if (task == first) {
+                    firstStarted.countDown();
+                    assertTrue(othersStarted.await(10, TimeUnit.SECONDS));
+                } else if ("A".equals(task.getStatus())) {
+                    othersStarted.countDown();
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                }
+            };
+            service.tst_task_from_db.addAll(List.of(first, second, third));
+            service.tst_tasks_by_id.put(second.getId(), second);
+            service.tst_tasks_by_id.put(third.getId(), third);
+            service.start(false);
+            assertTrue(firstStarted.await(10, TimeUnit.SECONDS));
+            // The load starts one task per domain; each reload of a task starts one more in D1, none in D2
+            service.triggerTaskReloadFromDb(second.getId());
+            service.triggerTaskReloadFromDb(third.getId());
+
+            // first is now in D2 with the status B: D2 has free slots, though D1 has none
+            assertTrue(waitForRun("B", Duration.ofSeconds(5)), "the task in D2 did not run while D1 was busy");
+        } finally {
+            release.countDown();
+            service.stop();
+            executor.shutdown();
+            executor.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    /** Waits until runTask is called with a task of the status. */
+    private boolean waitForRun(String status, Duration timeout) throws InterruptedException {
+        Instant deadline = Instant.now().plus(timeout);
+        while (Instant.now().isBefore(deadline)) {
+            String run = service.tst_run_statuses.poll(20, TimeUnit.MILLISECONDS);
+            if (status.equals(run)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Test
     void bean__should_look_up_bean_on_first_use_once_and_drop_provider() {
         List<String> lookups = new ArrayList<>();
         service.beanProviders.put(StringBuilder.class, () -> {
@@ -217,6 +272,15 @@ public class DoerServiceTest {
         Map<Long, Task> tst_tasks_by_id = new ConcurrentHashMap<>();
         /** When {@link #runTask} was called, one entry per call. */
         BlockingQueue<Instant> tst_runs = new LinkedBlockingQueue<>();
+        /** Status of the task {@link #runTask} was called with, one entry per call. */
+        BlockingQueue<String> tst_run_statuses = new LinkedBlockingQueue<>();
+        /** Called by {@link #runTask} before it changes the status: may block to keep the task in progress. */
+        volatile RunHook tst_on_run = task -> {
+        };
+
+        interface RunHook {
+            void run(Task task) throws Exception;
+        }
 
         @Override
         public void runInTransaction(Callable<Object> code) {
@@ -224,7 +288,7 @@ public class DoerServiceTest {
         }
 
         @Override
-        public String createExtraJson(Task task, Exception exception) {
+        public String createExtraJson(Task task, Throwable exception) {
             return null;
         }
 
@@ -242,6 +306,8 @@ public class DoerServiceTest {
         public void runTask(Task task) throws Exception {
             tst_runs.add(Instant.now());
             String status = task.getStatus();
+            tst_run_statuses.add(String.valueOf(status));
+            tst_on_run.run(task);
             if ("A".equals(status)) {
                 task.setStatus("B");
             } else if ("B".equals(status)) {

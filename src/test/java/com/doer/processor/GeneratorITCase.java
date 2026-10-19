@@ -171,6 +171,29 @@ public class GeneratorITCase implements InWorkspace {
     }
 
     @Test
+    void RetryPolicy__should_give_retry_interval_of_every_status_to_its_domain() throws Exception {
+        writeSource("Orders.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Orders {
+                    @AcceptStatus("A")
+                    public void accept(Task task) {}
+
+                    @AcceptStatus("B")
+                    @RetryPolicy(interval = "20s")
+                    public void pay(Task task) {}
+                }
+                """);
+
+        javac("Orders.java").assertStatus(0);
+
+        // Without @RetryPolicy the interval is 5 minutes: generated, not left to the default of DoerService
+        assertThat(generatedService(), allOf(
+                containsString("retryDelays.put(\"A\", Duration.ofMinutes(5));"),
+                containsString("retryDelays.put(\"B\", Duration.ofSeconds(20));")));
+    }
+
+    @Test
     void RetryPolicy__should_set_null_status_when_duration_elapsed_without_fallbackStatus() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
