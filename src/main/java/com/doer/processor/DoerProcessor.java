@@ -812,12 +812,15 @@ public class DoerProcessor extends AbstractProcessor {
     private void generateExtraJson(PrintWriter out, Map<String, String> shortcuts) {
         out.print("""
                     @Override
-                    public String createExtraJson(Task task, Exception exception) {
+                    public String createExtraJson(Task task, Throwable exception) {
                         JsonObjectBuilder builder = Json.createObjectBuilder();
                         try {
                             fillExtraJson(task, exception, builder);
-                        } catch (Exception e) {
-                            LOG.log(java.util.logging.Level.WARNING, "ExtraJson creation error", e);
+                        } catch (Exception | LinkageError | java.util.ServiceConfigurationError | OutOfMemoryError
+                                | StackOverflowError | AssertionError e) {
+                            // As in DoerService.callDoerMethod: the failure of the method is still recorded
+                            LOG.log(java.util.logging.Level.SEVERE,
+                                    "ExtraJson creation error. TaskId: " + task.getId(), e);
                         }
                         JsonObject jsonObject = builder.build();
                         if (jsonObject.isEmpty()) {
@@ -981,8 +984,8 @@ public class DoerProcessor extends AbstractProcessor {
         groupMethodsByDomain(doerMethods).forEach((domainName, methods) -> {
             Map<Duration, List<String>> delays = groupStatuses(methods,
                     (m, a) -> a.delay() != null ? a.delay() : Duration.ZERO);
+            // Every status, also with the default interval: DoerService does not need to know the default
             Map<Duration, List<String>> retryDelays = groupStatuses(methods, (m, a) -> m.retryInterval);
-            retryDelays.remove(DEFAULT_RETRY_INTERVAL);
 
             out.println("        {");
             out.println("            HashMap<String, Duration> delays = new HashMap<>();");
@@ -1035,6 +1038,9 @@ public class DoerProcessor extends AbstractProcessor {
      * Per domain: ready statuses (by created), then delayed statuses (by modified, one select per delay), then
      * failing statuses (one select per retry interval); finally all in-progress tasks. Each select except the
      * last has a LIMIT parameter, in this order.
+     * <p>
+     * DoerService matches the selects with the sub-queues of its domains by position, so the constructor of
+     * {@code com.doer.ConcurrencyDomain} builds them in the same order (checked by {@code SelectTasksOrderITCase}).
      */
     private void generateSelectTaskSql() throws IOException {
         List<String> chunks = new ArrayList<>();

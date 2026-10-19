@@ -178,4 +178,72 @@ public interface GeneratedCodeTest {
                     ]
                 }""", result);
     }
+
+    @Test
+    default void loader_exception_should_set_failing_and_restore_status_without_calling_method() throws Exception {
+        String result = runTask("""
+                {"status": "Generated code loader exception"}
+                """);
+
+        assertEquals("""
+                {
+                    "status": "Generated code loader exception",
+                    "failing": true,
+                    "trace": [
+                        "GeneratedCodeFailures.loadFailing"
+                    ]
+                }""", result);
+    }
+
+    @Test
+    default void saver_exception_should_set_failing_and_restore_status() throws Exception {
+        String result = runTask("""
+                {"status": "Generated code saver exception"}
+                """);
+
+        assertEquals("""
+                {
+                    "status": "Generated code saver exception",
+                    "failing": true,
+                    "trace": [
+                        "GeneratedCodeFailures.loadFailing",
+                        "GeneratedCodeFailures.saverException(Failing)",
+                        "GeneratedCodeFailures.saveFailing(Failing)"
+                    ]
+                }""", result);
+    }
+
+    @Test
+    default void saver_exception_failing_more_than_1_day_should_set_status_to_null() throws Exception {
+        String result = runTask("""
+                {"status": "Generated code saver exception", "failingFor": "PT25H"}
+                """);
+
+        assertEquals("""
+                {
+                    "status": null,
+                    "failing": false,
+                    "trace": [
+                        "GeneratedCodeFailures.loadFailing",
+                        "GeneratedCodeFailures.saverException(Failing)",
+                        "GeneratedCodeFailures.saveFailing(Failing)"
+                    ]
+                }""", result);
+    }
+
+    @Test
+    default void exception_describer_error_should_still_set_failing() throws Exception {
+        String result = runTask("""
+                {"status": "Generated code describer error"}
+                """);
+
+        assertEquals("""
+                {
+                    "status": "Generated code describer error",
+                    "failing": true,
+                    "trace": [
+                        "GeneratedCodeFailures.describerError"
+                    ]
+                }""", result);
+    }
 }
