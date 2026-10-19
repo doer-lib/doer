@@ -2,14 +2,15 @@ package com.doer;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
-import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Concurrency group of doer methods: at most {@code limit} of its tasks run at the same time on one node. Keeps the
@@ -40,24 +41,31 @@ final class ConcurrencyDomain {
             int minQueueSize) {
         this.name = name;
         this.limit = limit;
-        TreeSet<String> allStatuses = new TreeSet<>(delays.keySet());
-        allStatuses.addAll(retryDelays.keySet());
-        this.statuses = Collections.unmodifiableSortedSet(allStatuses);
-        List<SubQueue> result = new ArrayList<>();
-        groupStatuses(status -> delays.getOrDefault(status, Duration.ZERO))
-                .forEach((delay, group) -> result.add(new SubQueue(false, delay, group, minQueueSize)));
-        groupStatuses(status -> retryDelays.getOrDefault(status, DEFAULT_RETRY_DELAY))
-                .forEach((delay, group) -> result.add(new SubQueue(true, delay, group, minQueueSize)));
-        this.queues = List.copyOf(result);
+
+        TreeSet<String> statuses = new TreeSet<>(delays.keySet());
+        statuses.addAll(retryDelays.keySet());
+        this.statuses = Collections.unmodifiableSortedSet(statuses);
+
+        this.queues = Stream.concat(
+                groupStatuses(statuses, delays, Duration.ZERO).stream()
+                        .map(group -> new SubQueue(false, group.delay(), group.statuses(), minQueueSize)),
+                groupStatuses(statuses, retryDelays, DEFAULT_RETRY_DELAY).stream()
+                        .map(group -> new SubQueue(true, group.delay(), group.statuses(), minQueueSize)))
+                .toList();
     }
 
-    /** Statuses of the domain by their delay, the shortest delay first. */
-    private TreeMap<Duration, List<String>> groupStatuses(Function<String, Duration> delayOf) {
-        TreeMap<Duration, List<String>> result = new TreeMap<>();
-        for (String status : statuses) {
-            result.computeIfAbsent(delayOf.apply(status), key -> new ArrayList<>()).add(status);
-        }
-        return result;
+    private record DelayGroup(Duration delay, List<String> statuses) {
+    }
+
+    /** Statuses by their delay, the shortest delay first. */
+    private static List<DelayGroup> groupStatuses(Set<String> statuses, Map<String, Duration> delays,
+            Duration defaultDelay) {
+        return statuses.stream()
+                .collect(Collectors.groupingBy(status -> delays.getOrDefault(status, defaultDelay), TreeMap::new,
+                        Collectors.toList()))
+                .entrySet().stream()
+                .map(entry -> new DelayGroup(entry.getKey(), entry.getValue()))
+                .toList();
     }
 
     String name() {

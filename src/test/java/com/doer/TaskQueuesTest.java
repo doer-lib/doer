@@ -14,7 +14,9 @@ import org.junit.jupiter.api.Test;
 public class TaskQueuesTest {
 
     static final Instant T0 = Instant.parse("2026-01-01T00:00:00Z");
-    static final TaskQueues.LoadSettings SETTINGS = new TaskQueues.LoadSettings(2, 100, Duration.ofMinutes(10));
+    static final Duration RELOAD_INTERVAL = Duration.ofMinutes(10);
+    static final int MIN_QUEUE_SIZE = 2;
+    static final int MAX_ALL_QUEUES_SIZE = 100;
 
     TaskQueues taskQueues = new TaskQueues();
     long nextTaskId = 1000;
@@ -110,8 +112,8 @@ public class TaskQueuesTest {
         addDomain("D1", "A");
         addDomain("D2", "C");
 
-        assertEquals(List.of(2, 2, 2, 2), taskQueues.nextLimits(T0, T0, SETTINGS));
-        assertEquals(List.of(2, 2, 2, 2), taskQueues.nextLimits(T0, null, SETTINGS));
+        assertEquals(List.of(2, 2, 2, 2), nextLimits(T0));
+        assertEquals(List.of(2, 2, 2, 2), nextLimits(null));
     }
 
     @Test
@@ -121,7 +123,7 @@ public class TaskQueuesTest {
         drain(d1.queues().get(0));
         drain(d2.queues().get(0));
 
-        assertEquals(List.of(4, 2, 2, 2), taskQueues.nextLimits(T0, T0, SETTINGS));
+        assertEquals(List.of(4, 2, 2, 2), nextLimits(T0));
     }
 
     @Test
@@ -130,10 +132,8 @@ public class TaskQueuesTest {
         addDomain("D2", "C");
         drain(d1.queues().get(0));
 
-        assertEquals(List.of(4, 2, 2, 2), taskQueues.nextLimits(T0, T0, new TaskQueues.LoadSettings(2, 10,
-                Duration.ofMinutes(10))));
-        assertEquals(List.of(2, 2, 2, 2), taskQueues.nextLimits(T0, T0, new TaskQueues.LoadSettings(2, 9,
-                Duration.ofMinutes(10))));
+        assertEquals(List.of(4, 2, 2, 2), taskQueues.nextLimits(T0, T0, RELOAD_INTERVAL, MIN_QUEUE_SIZE, 10));
+        assertEquals(List.of(2, 2, 2, 2), taskQueues.nextLimits(T0, T0, RELOAD_INTERVAL, MIN_QUEUE_SIZE, 9));
     }
 
     @Test
@@ -143,7 +143,7 @@ public class TaskQueuesTest {
         drain(d1.queues().get(0));
         fill(d1.queues().get(1), 10, 6);
 
-        assertEquals(List.of(4, 5, 2, 2), taskQueues.nextLimits(T0, T0, SETTINGS));
+        assertEquals(List.of(4, 5, 2, 2), nextLimits(T0));
     }
 
     @Test
@@ -152,8 +152,8 @@ public class TaskQueuesTest {
         addDomain("D2", "C");
         fill(d1.queues().get(1), 10, 6);
 
-        assertEquals(List.of(2, 10, 2, 2), taskQueues.nextLimits(T0, T0.minusSeconds(8 * 60 - 1), SETTINGS));
-        assertEquals(List.of(2, 5, 2, 2), taskQueues.nextLimits(T0, T0.minusSeconds(8 * 60), SETTINGS));
+        assertEquals(List.of(2, 10, 2, 2), nextLimits(T0.minusSeconds(8 * 60 - 1)));
+        assertEquals(List.of(2, 5, 2, 2), nextLimits(T0.minusSeconds(8 * 60)));
     }
 
     @Test
@@ -162,7 +162,7 @@ public class TaskQueuesTest {
         addDomain("D2", "C");
         drain(d1.queues().get(0));
 
-        assertEquals(List.of(2, 2, 2, 2), taskQueues.nextLimits(T0, T0.minusSeconds(8 * 60), SETTINGS));
+        assertEquals(List.of(2, 2, 2, 2), nextLimits(T0.minusSeconds(8 * 60)));
     }
 
     @Test
@@ -180,7 +180,7 @@ public class TaskQueuesTest {
         assertEquals(List.of(failing), List.copyOf(domain.queues().get(1).tasks()));
         assertEquals("4/2, 10/1", taskQueues.describeLoad(List.of(4, 10)));
         // asap: 2 of 4 loaded, the db may have more; failing: 1 of 10 loaded, the capacity is halved
-        assertEquals(List.of(4, 5), taskQueues.nextLimits(T0, T0, SETTINGS));
+        assertEquals(List.of(4, 5), nextLimits(T0));
         assertFalse(domain.queues().get(0).isDrained());
     }
 
@@ -284,6 +284,10 @@ public class TaskQueuesTest {
         assertEquals(Instant.MIN, taskQueues.earliestReadyTime());
     }
 
+    private List<Integer> nextLimits(Instant lastSelectTime) {
+        return taskQueues.nextLimits(T0, lastSelectTime, RELOAD_INTERVAL, MIN_QUEUE_SIZE, MAX_ALL_QUEUES_SIZE);
+    }
+
     /** Domain with limit 2 whose statuses are processed as soon as possible. */
     private ConcurrencyDomain addDomain(String name, String... statuses) {
         Map<String, Duration> delays = new HashMap<>();
@@ -294,7 +298,7 @@ public class TaskQueuesTest {
     }
 
     private ConcurrencyDomain addDomain(String name, Map<String, Duration> delays) {
-        return taskQueues.addDomain(name, 2, delays, Map.of(), SETTINGS.minSingleQueueSize());
+        return taskQueues.addDomain(name, 2, delays, Map.of(), MIN_QUEUE_SIZE);
     }
 
     /** Makes the queue drained: its capacity is 2, the buffer is empty and the db has more. */

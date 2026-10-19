@@ -463,8 +463,8 @@ public abstract class DoerService {
             }
             taskLoadRequired = false;
             loadingInProgress = true;
-            limits = taskQueues.nextLimits(getDbNow(), lastSelectTime,
-                    new TaskQueues.LoadSettings(minSingleQueueSize, maxAllQueuesSize, queueReloadInterval));
+            limits = taskQueues.nextLimits(getDbNow(), lastSelectTime, queueReloadInterval, minSingleQueueSize,
+                    maxAllQueuesSize);
             lastReCheck = null;
             reCheckTasks.clear();
             lastSelectTime = getDbNow();

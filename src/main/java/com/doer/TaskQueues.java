@@ -22,10 +22,6 @@ import java.util.stream.Collectors;
  */
 final class TaskQueues {
 
-    /** Settings of DoerService that decide the LIMIT of each sub-queue for the next load. */
-    record LoadSettings(int minSingleQueueSize, int maxAllQueuesSize, Duration queueReloadInterval) {
-    }
-
     private final List<ConcurrencyDomain> domains = new ArrayList<>();
     /** Sub-queues of all domains, in the order of the LIMIT parameters of SelectTasks.sql. */
     private final List<SubQueue> queues = new ArrayList<>();
@@ -139,12 +135,13 @@ final class TaskQueues {
     }
 
     /**
-     * LIMIT of each sub-queue for the next load. When a sub-queue is drained, or most of the reload interval has
-     * passed since the last load ({@code lastSelectTime}), the sub-queues used less than half are halved. When a
-     * sub-queue is drained before that, the first drained one is doubled, unless all sub-queues would get more than
-     * {@code maxAllQueuesSize}.
+     * LIMIT of each sub-queue for the next load. When a sub-queue is drained, or 80% of {@code queueReloadInterval}
+     * has passed since the last load ({@code lastSelectTime}), the sub-queues used less than half are halved, but not
+     * below {@code minSingleQueueSize}. When a sub-queue is drained before that, the first drained one is doubled,
+     * unless all sub-queues would get more than {@code maxAllQueuesSize}.
      */
-    List<Integer> nextLimits(Instant now, Instant lastSelectTime, LoadSettings settings) {
+    List<Integer> nextLimits(Instant now, Instant lastSelectTime, Duration queueReloadInterval, int minSingleQueueSize,
+            int maxAllQueuesSize) {
         int drainedIndex = -1;
         for (int i = 0; i < queues.size(); i++) {
             if (queues.get(i).isDrained()) {
@@ -155,19 +152,18 @@ final class TaskQueues {
         boolean hasDrainedQueue = drainedIndex >= 0;
         Duration queueUsageTime = (lastSelectTime == null ? Duration.ZERO : Duration.between(lastSelectTime, now));
         boolean queueIsUsed80PercentOfReloadTime = (queueUsageTime
-                .compareTo(settings.queueReloadInterval().dividedBy(10).multipliedBy(8)) >= 0);
+                .compareTo(queueReloadInterval.dividedBy(10).multipliedBy(8)) >= 0);
 
         List<Integer> limits = new ArrayList<>();
         int totalQueuesSize = 0;
         for (SubQueue queue : queues) {
-            int limit = queue.nextLimit(queueIsUsed80PercentOfReloadTime || hasDrainedQueue,
-                    settings.minSingleQueueSize());
+            int limit = queue.nextLimit(queueIsUsed80PercentOfReloadTime || hasDrainedQueue, minSingleQueueSize);
             limits.add(limit);
             totalQueuesSize += limit;
         }
         if (!queueIsUsed80PercentOfReloadTime && hasDrainedQueue) {
             int drainedQueueSize = queues.get(drainedIndex).capacity();
-            if (totalQueuesSize + drainedQueueSize <= settings.maxAllQueuesSize()) {
+            if (totalQueuesSize + drainedQueueSize <= maxAllQueuesSize) {
                 limits.set(drainedIndex, drainedQueueSize * 2);
             }
         }

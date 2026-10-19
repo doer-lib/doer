@@ -147,13 +147,14 @@ void finish(Task task, ConcurrencyDomain d);               // счётчик--, 
 ConcurrencyDomain requeue(Task task);                      // putTaskToQueue в домен по статусу; null = финальный статус
 ConcurrencyDomain replaceTask(Task fromDb);                // для reloadQueuedTask: убрать из всех буферов и положить заново
 boolean isInProgress(long id);  boolean hasTasksInProgress();
-List<Integer> nextLimits(Instant now, Instant lastSelect, LoadSettings s);           // бывший calculateLimits
+List<Integer> nextLimits(Instant now, Instant lastSelect, Duration queueReloadInterval,
+        int minSingleQueueSize, int maxAllQueuesSize);                                  // бывший calculateLimits
 List<Task> replaceFromDb(List<Integer> limits, List<Task> rows, int minQueueSize);   // бывший updateQueues; возвращает задачи для re-check
 Instant earliestReadyTime();                               // для getNextCheckTime: null = пусто, Instant.MIN = есть готовая asap-задача
 List<Integer> volumes();
 ```
 
-`LoadSettings(int minSingleQueueSize, int maxAllQueuesSize, Duration queueReloadInterval)` — небольшой record. Поля и сеттеры остаются в `DoerService` и передаются при каждом вызове. Поэтому `setMinSingleQueueSize` после `setupConcurrencyDomain` по-прежнему не меняет начальный размер уже созданных подочередей.
+Параметры чтения `queueReloadInterval`, `minSingleQueueSize`, `maxAllQueuesSize` передаются в `nextLimits` по отдельности (record `LoadSettings`, который их объединял, убран: ясности он не добавлял). Поля и сеттеры остаются в `DoerService` и передаются при каждом вызове. Поэтому `setMinSingleQueueSize` после `setupConcurrencyDomain` по-прежнему не меняет начальный размер уже созданных подочередей.
 
 ## 4. Шаги
 
