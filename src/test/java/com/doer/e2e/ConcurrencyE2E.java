@@ -150,13 +150,26 @@ class ConcurrencyE2E extends E2eTestBase {
                 "Expected only few ASAP task updated ahead of time " + aheadOfTime + " <= " + maxAheadOfTime);
 
         List<Integer> firstRow = limitsTable.get(0);
-        List<Integer> middleRow = limitsTable.get(limitsTable.size() / 2);
         List<Integer> lastRow = limitsTable.get(limitsTable.size() - 1);
         for (int i = 0; i < firstRow.size(); i++) {
             assertEquals(10, firstRow.get(i), "Test should start with minimal limits for all queues");
         }
-        int retryQueueIndex = maxValueIndex(middleRow);
         int asapQueueIndex = maxValueIndex(lastRow);
+        // The other queue with the largest limit; the number of loads varies, so the peak, not the middle of the table
+        int retryQueueIndex = -1;
+        int retryPeak = 0;
+        int peakRowIndex = -1;
+        for (int r = 0; r < limitsTable.size(); r++) {
+            List<Integer> row = limitsTable.get(r);
+            for (int i = 0; i < row.size(); i++) {
+                if (i != asapQueueIndex && row.get(i) > retryPeak) {
+                    retryQueueIndex = i;
+                    retryPeak = row.get(i);
+                    peakRowIndex = r;
+                }
+            }
+        }
+        List<Integer> peakRow = limitsTable.get(peakRowIndex);
         for (List<Integer> row : limitsTable) {
             for (int i = 0; i < row.size(); i++) {
                 int value = row.get(i);
@@ -167,14 +180,16 @@ class ConcurrencyE2E extends E2eTestBase {
                 }
             }
         }
-        assertTrue(firstRow.get(retryQueueIndex) < middleRow.get(retryQueueIndex),
-                "ReadyToRetry queue limits should grow till middleRow");
-        assertTrue(middleRow.get(retryQueueIndex) > lastRow.get(retryQueueIndex),
-                "ReadyToRetry queue limits should shrink from middleRow till lastRow");
-        assertEquals(firstRow.get(asapQueueIndex), middleRow.get(asapQueueIndex),
-                "Asap queue should remain minimal till middleRow");
-        assertTrue(middleRow.get(asapQueueIndex) < lastRow.get(asapQueueIndex),
-                "Asap queue should grow from middleRow till lastRow");
+        assertTrue(firstRow.get(retryQueueIndex) < retryPeak,
+                "ReadyToRetry queue limits should grow till their peak");
+        assertTrue(retryPeak > lastRow.get(retryQueueIndex),
+                "ReadyToRetry queue limits should shrink from their peak till lastRow");
+        for (int r = 0; r <= peakRowIndex; r++) {
+            assertEquals(10, limitsTable.get(r).get(asapQueueIndex),
+                    "Asap queue should remain minimal till the peak of ReadyToRetry, row " + r);
+        }
+        assertTrue(peakRow.get(asapQueueIndex) < lastRow.get(asapQueueIndex),
+                "Asap queue should grow from the peak of ReadyToRetry till lastRow");
     }
 
     private static int maxValueIndex(List<Integer> row) {

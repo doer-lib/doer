@@ -16,6 +16,7 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -98,6 +99,11 @@ public abstract class DoerService {
     QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
     /** Set before the select of each load, also of a load that fails. */
     Instant lastSelectTime;
+    /**
+     * Tasks queued while a load runs: the load may have selected before they changed, and drop them with the buffers it
+     * replaces, so they are reloaded when it ends.
+     */
+    private final Set<Long> reloadAfterLoad = new HashSet<>();
 
     // Scheduler
 
@@ -267,7 +273,26 @@ public abstract class DoerService {
             if (!isRunning || queuesReloadPending()) {
                 return;
             }
+            if (queuesReloadState == QueuesReloadState.RUNNING) {
+                reloadAfterLoad.add(taskId);
+            }
             executor.execute(() -> reloadQueuedTask(taskId));
+        }
+    }
+
+    /**
+     * Puts the copy of the row this node has just committed to the queues, in place of the queued copy, with no load of
+     * its own. While a load runs, the task is also reloaded when the load ends (see {@link #reloadAfterLoad}).
+     */
+    private void requeueCommittedTask(Task row) {
+        synchronized (this) {
+            if (!isRunning) {
+                return;
+            }
+            if (queuesReloadState == QueuesReloadState.RUNNING) {
+                reloadAfterLoad.add(row.getId());
+            }
+            replaceQueuedTask(row);
         }
     }
 
@@ -609,6 +634,12 @@ public abstract class DoerService {
             LOG.log(Level.WARNING, "Failed to load tasks from db. Limits: " + limits, e);
         } finally {
             synchronized (this) {
+                if (isRunning) {
+                    for (long taskId : reloadAfterLoad) {
+                        executor.execute(() -> reloadQueuedTask(taskId));
+                    }
+                }
+                reloadAfterLoad.clear();
                 if (!isRunning) {
                     queuesReloadState = QueuesReloadState.IDLE;
                 } else if (queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN) {
@@ -793,7 +824,10 @@ public abstract class DoerService {
             Task task = attemptCoordinatedUpdate(taskId, isLastAttempt, allowHijacking, dataType, updater,
                     caller.className(), caller.methodName());
             if (task != null) {
-                triggerTaskReloadFromDb(taskId);
+                // The caller gets the task itself: the queues get their own copy
+                Task row = new Task();
+                row.assignFieldsFrom(task);
+                requeueCommittedTask(row);
                 return task;
             }
             long timeoutMs = Math.max(1, Math.min(sleepMs, remainingMs));
@@ -965,7 +999,8 @@ public abstract class DoerService {
             if (task == null) {
                 return;
             }
-            if (domain.hasDrainedQueue()) {
+            // A load that is scheduled or running refills the drained sub-queue
+            if (domain.hasDrainedQueue() && queuesReloadState == QueuesReloadState.IDLE) {
                 triggerQueuesReload();
             }
         }
