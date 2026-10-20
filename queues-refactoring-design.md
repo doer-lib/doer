@@ -39,6 +39,10 @@ One query loads all sub-queues (each select with its LIMIT) and all in_progress 
 
 The in_progress rows are not counted as rows of a sub-queue: they come from a select without a LIMIT.
 
+A task queued while a load runs (`triggerTaskReloadFromDb`, `facilitateCoordinatedUpdate`) may have changed after the select of the load, and the load would drop it with the buffers it replaces. So it is queued at once and also reloaded when the load ends (`reloadAfterLoad`). A load that is only scheduled, or the next one of `RUNNING_THEN_AGAIN`, has not selected yet and sees the task.
+
+A drained sub-queue asks for a load only when no load is scheduled or running: that load refills it. Otherwise each start of a task during a load would ask for one more load with the same LIMITs.
+
 LIMITs adapt to how fast a sub-queue is used (`TaskQueues.nextLimits`, `SubQueue.replace`):
 - fewer rows than half of the LIMIT → the capacity is halved;
 - a drained sub-queue, or 80% of `queueReloadInterval` since the last load → the sub-queues used less than half are halved;
@@ -61,6 +65,7 @@ No capacity goes below `minSingleQueueSize`.
 Every node loads all tasks that no node runs, so two nodes may start the same task; the second one gets `TaskVersionConflictException`. Rule: **the node that changed a task queues it** — the node that ran the step, or the node of `facilitateCoordinatedUpdate`.
 
 - On a version conflict, at the start or at the end of a run, the node drops the task; it does not reload it.
+- `facilitateCoordinatedUpdate` queues a copy of the task it has committed (its fields come from `UPDATE … RETURNING *`), with no query of its own; the caller gets the task itself. A saver must not change the task.
 - When a node is asked to reload a task it runs itself (`facilitateCoordinatedUpdate`, or a full load that skips it), it reloads the task when the run ends (`TaskQueues.reloadWhenFinished`). Otherwise a task changed right after the node took it from its queue would be dropped until the next full load.
 - Re-check is unchanged: after a full load a node still queues the tasks whose step another node has finished meanwhile.
 

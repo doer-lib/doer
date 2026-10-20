@@ -368,6 +368,79 @@ public class DoerServiceTest {
     }
 
     @Test
+    void triggerTaskReloadFromDb__should_reload_task_again_after_load_that_selected_before_it() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        Task task = createNewTask("S");
+        // The task is inserted after the select of the load, and its reload ends before the load replaces the buffers
+        service.tst_on_select = () -> {
+            service.tst_tasks_by_id.put(task.getId(), task);
+            service.triggerTaskReloadFromDb(task.getId());
+            executorJobs.pollLast().run();
+        };
+        service.start();
+
+        runAllExecutorJobs();
+
+        assertEquals(List.of("S"), List.copyOf(service.tst_run_statuses), "the load dropped the task");
+    }
+
+    @Test
+    void facilitateCoordinatedUpdate__should_queue_copy_of_committed_row_without_loading_it() throws Exception {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        service.start();
+        runAllExecutorJobs();
+        Task task = createNewTask("New");
+        service.tst_tasks_by_id.put(task.getId(), task);
+
+        Task updated = service.facilitateCoordinatedUpdate(task.getId(), Duration.ZERO, false, t -> t.setStatus("S"));
+        // The caller may change the task it gets: the queues have their own copy
+        updated.setStatus("Changed by the caller");
+        runAllExecutorJobs();
+
+        assertEquals(List.of("S"), List.copyOf(service.tst_run_statuses));
+        assertFalse(service.tst_loaded_ids.contains(task.getId()), "the committed task was loaded again");
+    }
+
+    @Test
+    void facilitateCoordinatedUpdate__should_reload_task_after_load_that_selected_before_it() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        Task task = createNewTask("New");
+        service.tst_tasks_by_id.put(task.getId(), task);
+        // The update commits after the select of the load, and queues the task before the load replaces the buffers
+        service.tst_on_select = () -> service.facilitateCoordinatedUpdate(task.getId(), Duration.ZERO, false,
+                t -> t.setStatus("S"));
+        service.start();
+
+        runAllExecutorJobs();
+
+        assertEquals(List.of("S"), List.copyOf(service.tst_run_statuses), "the load dropped the task");
+    }
+
+    @Test
+    void processNextTask__should_not_ask_for_load_of_drained_queue_while_load_runs() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        // As many as the LIMIT of the sub-queue: the database may have more, and the last start drains the sub-queue
+        for (int i = 0; i < 10; i++) {
+            service.tst_task_from_db.add(createNewTask("S"));
+        }
+        service.tst_on_run = task -> {
+            if (service.tst_run_statuses.size() == 9) {
+                synchronized (service) {
+                    // As if a load were running when the last task starts
+                    service.queuesReloadState = DoerService.QueuesReloadState.RUNNING;
+                }
+            }
+        };
+        service.start();
+
+        runAllExecutorJobs();
+
+        assertEquals(10, service.tst_run_statuses.size());
+        assertEquals(DoerService.QueuesReloadState.RUNNING, service.queuesReloadState,
+                "the running load refills the drained sub-queue, no other load is needed");
+    }
+
+    @Test
     void processNextTask__should_start_task_moved_to_other_domain_while_its_old_domain_is_busy() throws Exception {
         ExecutorService executor = Executors.newCachedThreadPool();
         CountDownLatch firstStarted = new CountDownLatch(1);
@@ -564,11 +637,17 @@ public class DoerServiceTest {
         /** Called by {@link #loadTasks} before it loads: may block to keep the query running. */
         volatile IdsHook tst_on_load_tasks = ids -> {
         };
+        /** Called once by {@link #loadTasksFromDatabase} after the select, before the load replaces the buffers. */
+        volatile Hook tst_on_select;
         /** Number of the calls of the database methods made under the lock of DoerService. */
         AtomicInteger tst_db_calls_under_lock = new AtomicInteger();
 
         interface IdsHook {
             void run(Collection<Long> ids) throws Exception;
+        }
+
+        interface Hook {
+            void run() throws Exception;
         }
 
         private void checkNoLock() {
@@ -582,8 +661,35 @@ public class DoerServiceTest {
         }
 
         @Override
-        public void runInTransaction(Callable<Object> code) {
-            throw new UnsupportedOperationException();
+        public void runInTransaction(Callable<Object> code) throws Exception {
+            code.call();
+        }
+
+        /** The row of {@link #tst_tasks_by_id}, as the database would lock it. */
+        @Override
+        protected Task selectTaskForUpdate(long taskId, boolean allowInProgress) {
+            Task row = tst_tasks_by_id.get(taskId);
+            return row == null ? null : copyOf(row);
+        }
+
+        @Override
+        public boolean updateAndBumpVersion(Task task) {
+            Task row = tst_tasks_by_id.get(task.getId());
+            if (row == null || row.getVersion() != task.getVersion()) {
+                return false;
+            }
+            Task updated = copyOf(task);
+            updated.setVersion(task.getVersion() + 1);
+            updated.setModified(clock.instant());
+            tst_tasks_by_id.put(task.getId(), updated);
+            task.assignFieldsFrom(updated);
+            return true;
+        }
+
+        @Override
+        public long writeTaskLog(Long taskId, String initialStatus, String finalStatus, String className,
+                String methodName, String exceptionType, String extraJson, Integer durationMs) {
+            return 1;
         }
 
         @Override
@@ -657,6 +763,15 @@ public class DoerServiceTest {
             tst_limits = limits;
             ArrayList<Task> returnValue = new ArrayList<>(tst_task_from_db);
             tst_task_from_db.clear();
+            Hook onSelect = tst_on_select;
+            if (onSelect != null) {
+                tst_on_select = null;
+                try {
+                    onSelect.run();
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
             return returnValue;
         }
     }
