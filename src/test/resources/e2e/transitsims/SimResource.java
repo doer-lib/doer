@@ -78,7 +78,7 @@ public class SimResource {
             task.setStatus(SimStatus.RUNNING);
             setBusStatuses(id, BusStatus.RESUME);
         });
-        doerService.triggerQueuesReloadFromDb();
+        doerService.triggerQueuesReload();
         return view;
     }
 
@@ -92,7 +92,7 @@ public class SimResource {
             task.setStatus(SimStatus.PAUSED);
             setBusStatuses(id, null);
         });
-        doerService.triggerQueuesReloadFromDb();
+        doerService.triggerQueuesReload();
         return view;
     }
 
@@ -107,7 +107,7 @@ public class SimResource {
             task.setStatus(SimStatus.RUNNING);
             setBusStatuses(id, BusStatus.RESUME);
         });
-        doerService.triggerQueuesReloadFromDb();
+        doerService.triggerQueuesReload();
         return view;
     }
 

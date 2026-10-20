@@ -768,8 +768,8 @@ public class DoerProcessor extends AbstractProcessor {
 
                         @Override
                         @Transactional(Transactional.TxType.NOT_SUPPORTED)
-                        public void reloadTasksFromDb() {
-                            super.reloadTasksFromDb();
+                        public void reloadQueues() {
+                            super.reloadQueues();
                         }
 
                         @Override

@@ -52,8 +52,7 @@ public abstract class DoerService {
     private DataSource dataSource;
 
     private boolean isRunning;
-    private boolean taskLoadRequired;
-    private boolean loadingInProgress;
+    private QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
 
     protected AtomicInteger dbTimeDiffMs = new AtomicInteger(0);
     private final ConcurrentLinkedQueue<Task> reCheckTasks = new ConcurrentLinkedQueue<>();
@@ -149,7 +148,7 @@ public abstract class DoerService {
         synchronized (this) {
             isRunning = true;
             monitorEnabled = enableMonitor;
-            triggerQueuesReloadFromDb();
+            triggerQueuesReload();
             if (!enableMonitor) {
                 this.notify();
             }
@@ -163,22 +162,34 @@ public abstract class DoerService {
         }
     }
 
-    public void triggerQueuesReloadFromDb() {
+    public void triggerQueuesReload() {
         synchronized (this) {
-            if (!isRunning || taskLoadRequired) {
+            if (!isRunning) {
                 return;
             }
-            taskLoadRequired = true;
-            if (!loadingInProgress) {
-                loadingInProgress = true;
-                executor.execute(self()::reloadTasksFromDb);
+            switch (queuesReloadState) {
+                case IDLE -> scheduleQueuesReload();
+                case RUNNING -> queuesReloadState = QueuesReloadState.RUNNING_THEN_AGAIN;
+                case SCHEDULED, RUNNING_THEN_AGAIN -> { }
             }
         }
     }
 
+    /** Called under the lock. */
+    private void scheduleQueuesReload() {
+        queuesReloadState = QueuesReloadState.SCHEDULED;
+        executor.execute(self()::reloadQueues);
+    }
+
+    /** A reload that hasn't selected yet will see the task, so the task needs no reload of its own. */
+    private boolean queuesReloadPending() {
+        return queuesReloadState == QueuesReloadState.SCHEDULED
+                || queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN;
+    }
+
     public void triggerTaskReloadFromDb(long taskId) {
         synchronized (this) {
-            if (!isRunning || taskLoadRequired) {
+            if (!isRunning || queuesReloadPending()) {
                 return;
             }
             executor.execute(() -> reloadQueuedTask(taskId));
@@ -311,7 +322,7 @@ public abstract class DoerService {
 
     private void monitorIdleState() {
         synchronized (this) {
-            if (!monitorEnabled || loadingInProgress || taskQueues.hasTasksInProgress() || monitorThread != null) {
+            if (!monitorEnabled || queuesReloadState != QueuesReloadState.IDLE || taskQueues.hasTasksInProgress() || monitorThread != null) {
                 return;
             }
             monitorThread = Thread.currentThread();
@@ -372,7 +383,7 @@ public abstract class DoerService {
                     lastStalledTaskChecked.plus(stalledTaskCheckInterval).isBefore(now)) {
                 triggerStalledTaskReset();
             } else if (lastSelectTime == null || lastSelectTime.plus(queueReloadInterval).isBefore(now)) {
-                triggerQueuesReloadFromDb();
+                triggerQueuesReload();
             }
             checkTasksBecomeReady();
         }
@@ -398,7 +409,7 @@ public abstract class DoerService {
                 }
             }
         } catch (SQLException e) {
-            triggerQueuesReloadFromDb();
+            triggerQueuesReload();
             LOG.log(Level.WARNING, "Failed to load single task. Queue reloade initiated.", e);
         }
     }
@@ -454,22 +465,21 @@ public abstract class DoerService {
         }
     }
 
-    // todo consider to make private
-    public void reloadTasksFromDb() {
-        List<Integer> limits;
-        synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            taskLoadRequired = false;
-            loadingInProgress = true;
-            limits = taskQueues.nextLimits(getDbNow(), lastSelectTime, queueReloadInterval, minSingleQueueSize,
-                    maxAllQueuesSize);
-            lastReCheck = null;
-            reCheckTasks.clear();
-            lastSelectTime = getDbNow();
-        }
+    /** Public only for the @Transactional override in the generated service: use {@link #triggerQueuesReload}. */
+    public void reloadQueues() {
+        List<Integer> limits = null;
         try {
+            synchronized (this) {
+                if (!isRunning) {
+                    return;
+                }
+                queuesReloadState = QueuesReloadState.RUNNING;
+                limits = taskQueues.nextLimits(getDbNow(), lastSelectTime, queueReloadInterval, minSingleQueueSize,
+                        maxAllQueuesSize);
+                lastReCheck = null;
+                reCheckTasks.clear();
+                lastSelectTime = getDbNow();
+            }
             List<Task> tasksFromDb = self().loadTasksFromDatabase(limits);
             String infoMessage;
             synchronized (this) {
@@ -487,10 +497,12 @@ public abstract class DoerService {
             LOG.log(Level.WARNING, "Failed to load tasks from db. Limits: " + limits, e);
         } finally {
             synchronized (this) {
-                if (taskLoadRequired) {
-                    executor.execute(self()::reloadTasksFromDb);
+                if (!isRunning) {
+                    queuesReloadState = QueuesReloadState.IDLE;
+                } else if (queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN) {
+                    scheduleQueuesReload();
                 } else {
-                    loadingInProgress = false;
+                    queuesReloadState = QueuesReloadState.IDLE;
                     executor.execute(self()::checkTasksBecomeReady);
                 }
             }
@@ -834,7 +846,7 @@ public abstract class DoerService {
                 return;
             }
             if (domain.hasDrainedQueue()) {
-                triggerQueuesReloadFromDb();
+                triggerQueuesReload();
             }
             this.notify();
         }
@@ -940,4 +952,14 @@ public abstract class DoerService {
         }
     }
 
+    private enum QueuesReloadState {
+        IDLE,
+        SCHEDULED,
+        RUNNING,
+        /**
+         * A reload is in progress, and another reload is needed. A request arrived
+         * during the SELECT, so the current run may not see the corresponding changes.
+         */
+        RUNNING_THEN_AGAIN
+    }
 }

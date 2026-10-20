@@ -43,7 +43,7 @@ public class DoerServiceTest {
     }
 
     @Test
-    void reloadTasksFromDb__should_calculate_limits() {
+    void reloadQueues__should_calculate_limits() {
         {
             HashMap<String, Duration> delays = new HashMap<>();
             delays.put("S1", Duration.ZERO);
@@ -51,13 +51,13 @@ public class DoerServiceTest {
         }
         service.start(false);
 
-        service.reloadTasksFromDb();
+        runAllExecutorJobs();
 
         assertEquals(Arrays.asList(10, 10), service.tst_limits);
     }
 
     @Test
-    void start__should_reloadTasksFromDb_and_start_processing_loaded_tasks() throws Exception {
+    void start__should_reloadQueues_and_start_processing_loaded_tasks() throws Exception {
         service.setMinSingleQueueSize(5);
         {
             // 3 queues (asap, delayed 2 min, retry 5 min)
@@ -87,7 +87,7 @@ public class DoerServiceTest {
     }
 
     @Test
-    void reloadTasksFromDb__should_increase_limit() throws Exception {
+    void reloadQueues__should_increase_limit() throws Exception {
         service.setMinSingleQueueSize(2);
         {
             HashMap<String, Duration> delays = new HashMap<>();
@@ -103,7 +103,25 @@ public class DoerServiceTest {
         service.start(false);
         runAllExecutorJobs();
 
-        assertEquals(Arrays.asList(4, 2, 2, 2), service.tst_limits); // actually it is second reloadTasksFromDb call
+        assertEquals(Arrays.asList(4, 2, 2, 2), service.tst_limits); // actually it is second reloadQueues call
+    }
+
+    @Test
+    void start__should_reloadQueues_after_stop_skipped_scheduled_reload() {
+        {
+            HashMap<String, Duration> delays = new HashMap<>();
+            delays.put("S1", Duration.ZERO);
+            service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
+        }
+        service.start(false);
+        service.stop();
+        runAllExecutorJobs();
+        assertNull(service.tst_limits);
+
+        service.start(false);
+        runAllExecutorJobs();
+
+        assertEquals(Arrays.asList(10, 10), service.tst_limits);
     }
 
     @Test
