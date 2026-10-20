@@ -7,7 +7,7 @@ The in-memory queues of a node: which tasks a node keeps, in what order it takes
 ## Classes
 
 ```
-DoerService            threads, idle monitor, loads from the database, re-check
+DoerService            threads, scheduler, loads from the database, re-check
  └─ TaskQueues         all queue state of the node: domains, tasks in progress, LIMITs of the next load
      └─ ConcurrencyDomain    limit, statuses, sub-queues
          └─ SubQueue         the head of one select of SelectTasks.sql

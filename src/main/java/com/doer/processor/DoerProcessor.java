@@ -82,6 +82,7 @@ public class DoerProcessor extends AbstractProcessor {
             "java.lang.Object", "java.lang.Class", "java.lang.Integer", "java.lang.IllegalArgumentException",
             "jakarta.transaction.Transactional", "jakarta.inject.Inject", "jakarta.inject.Provider",
             "jakarta.enterprise.context.ApplicationScoped", "jakarta.annotation.Generated",
+            "jakarta.annotation.PreDestroy",
             "jakarta.json.JsonObjectBuilder", "jakarta.json.JsonObject", "jakarta.json.JsonArrayBuilder",
             "jakarta.json.JsonArray", "jakarta.json.Json", "jakarta.json.JsonWriterFactory",
             "jakarta.json.JsonWriter", "jakarta.json.stream.JsonGenerator",
@@ -741,6 +742,12 @@ public class DoerProcessor extends AbstractProcessor {
                         @Inject
                         public void setExecutor(Executor executor) {
                             super.setExecutor(executor);
+                        }
+
+                        /** Stops the service when the container destroys the bean, if the application has not. */
+                        @PreDestroy
+                        public void _destroy() {
+                            stop();
                         }
 
                     """);

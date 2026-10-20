@@ -2,14 +2,17 @@ package com.doer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,6 +21,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +32,8 @@ public class DoerServiceTest {
 
     TstDoerService service;
     LinkedList<Runnable> executorJobs;
+    /** Executor of the tests with real threads (see {@link #useThreadPool}); stopped after the test. */
+    ExecutorService threadPool;
     long nextTaskId = 1000;
 
     @BeforeEach
@@ -34,6 +42,21 @@ public class DoerServiceTest {
         service = new TstDoerService();
         service.setExecutor(executorJobs::add);
         service.setSelfReference(service);
+    }
+
+    @AfterEach
+    void stopThreadPool() throws InterruptedException {
+        if (threadPool != null) {
+            service.stop();
+            // Interrupts the tasks held by tst_on_run
+            threadPool.shutdownNow();
+            assertTrue(threadPool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    void useThreadPool() {
+        threadPool = Executors.newCachedThreadPool();
+        service.setExecutor(threadPool);
     }
 
     void runAllExecutorJobs() {
@@ -125,7 +148,7 @@ public class DoerServiceTest {
     }
 
     @Test
-    void monitor__should_run_task_queued_while_idle_after_its_delay() throws Exception {
+    void scheduler__should_run_task_queued_while_idle_after_its_delay() throws Exception {
         ExecutorService executor = Executors.newCachedThreadPool();
         try {
             service.setExecutor(executor);
@@ -133,8 +156,8 @@ public class DoerServiceTest {
             delays.put("Delayed", Duration.ofSeconds(1));
             service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
             service.start(true);
-            // Nothing to run: the monitor waits for its next planned check, up to a minute
-            waitUntilIdleMonitorWaits();
+            // Nothing to run: the scheduler waits for its next planned work, up to a minute
+            waitUntilSchedulerWaits();
 
             Task task = createNewTask("Delayed");
             service.tst_tasks_by_id.put(task.getId(), task);
@@ -148,6 +171,161 @@ public class DoerServiceTest {
             executor.shutdown();
             executor.awaitTermination(5, TimeUnit.SECONDS);
         }
+    }
+
+    @Test
+    void scheduler__should_start_delayed_task_of_free_domain_while_other_domain_is_busy() throws Exception {
+        useThreadPool();
+        service.setupConcurrencyDomain("D1", 1, Map.of("Long", Duration.ZERO), Map.of());
+        service.setupConcurrencyDomain("D2", 1, Map.of("Delayed", Duration.ofSeconds(1)), Map.of());
+        CountDownLatch longStarted = holdTasksOf("Long");
+        service.tst_task_from_db.add(createNewTask("Long"));
+        service.start(true);
+        assertTrue(longStarted.await(10, TimeUnit.SECONDS));
+
+        Task delayed = createNewTask("Delayed");
+        service.tst_tasks_by_id.put(delayed.getId(), delayed);
+        service.triggerTaskReloadFromDb(delayed.getId());
+
+        assertTrue(waitForRun("Delayed", Duration.ofSeconds(5)),
+                "the task of D2 did not run 5 s after it was queued, while D1 was busy; its delay is 1 s");
+    }
+
+    @Test
+    void scheduler__should_reset_stalled_tasks_while_task_is_in_progress() throws Exception {
+        useThreadPool();
+        service.stalledTaskCheckInterval = Duration.ofMillis(500);
+        service.setupConcurrencyDomain("D1", 1, Map.of("Long", Duration.ZERO), Map.of());
+        CountDownLatch longStarted = holdTasksOf("Long");
+        service.tst_task_from_db.add(createNewTask("Long"));
+        service.start(true);
+        assertTrue(longStarted.await(10, TimeUnit.SECONDS));
+
+        assertNotNull(service.tst_stalled_resets.poll(5, TimeUnit.SECONDS),
+                "no reset of stalled tasks 5 s after start while a task was in progress; the interval is 0.5 s");
+    }
+
+    @Test
+    void scheduler__should_reload_queues_periodically_while_task_is_in_progress() throws Exception {
+        useThreadPool();
+        service.setQueueReloadInterval(Duration.ofMillis(500));
+        service.setupConcurrencyDomain("D1", 1, Map.of("Long", Duration.ZERO), Map.of());
+        CountDownLatch longStarted = holdTasksOf("Long");
+        service.tst_task_from_db.add(createNewTask("Long"));
+        service.start(true);
+        assertTrue(longStarted.await(10, TimeUnit.SECONDS));
+        int loads = service.tst_loads.get();
+
+        assertTrue(waitUntil(() -> service.tst_loads.get() > loads, Duration.ofSeconds(5)),
+                "no load 5 s after start while a task was in progress; the reload interval is 0.5 s");
+    }
+
+    @Test
+    void scheduler__should_reload_queues_after_stalled_tasks_reset() throws Exception {
+        useThreadPool();
+        service.stalledTaskCheckInterval = Duration.ofMillis(500);
+        service.tst_stalled_reset_result = 1;
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        service.start(true);
+        assertTrue(waitUntil(() -> service.tst_loads.get() == 1, Duration.ofSeconds(5)));
+
+        assertNotNull(service.tst_stalled_resets.poll(5, TimeUnit.SECONDS));
+
+        assertTrue(waitUntil(() -> service.tst_loads.get() > 1, Duration.ofSeconds(3)),
+                "no load after a reset of stalled tasks that reset a task");
+    }
+
+    @Test
+    void scheduler__should_queue_task_finished_on_other_node_soon_after_load() throws Exception {
+        useThreadPool();
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        Task elsewhere = createNewTask("S");
+        elsewhere.setInProgress(true);
+        service.tst_task_from_db.add(elsewhere);
+        service.tst_tasks_by_id.put(elsewhere.getId(), copyOf(elsewhere));
+        service.start(true);
+        // The load skips the task in progress on the other node, and the first re-check finds it unchanged
+        assertTrue(waitUntil(() -> service.tst_loaded_ids.contains(elsewhere.getId()), Duration.ofSeconds(5)));
+
+        // The other node finishes its step
+        Task finished = copyOf(elsewhere);
+        finished.setInProgress(false);
+        finished.setVersion(elsewhere.getVersion() + 1);
+        finished.setModified(Instant.now());
+        service.tst_tasks_by_id.put(finished.getId(), finished);
+
+        assertTrue(waitForRun("S", Duration.ofSeconds(5)),
+                "the task finished on the other node did not run 5 s later, with no other event");
+    }
+
+    @Test
+    void scheduler__should_re_check_skipped_tasks_with_one_query_outside_lock() throws Exception {
+        useThreadPool();
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        Task first = inProgressElsewhere("S");
+        Task second = inProgressElsewhere("S");
+
+        service.start(true);
+
+        Set<Long> loaded = service.tst_load_tasks_calls.poll(5, TimeUnit.SECONDS);
+        assertEquals(Set.of(first.getId(), second.getId()), loaded);
+        assertEquals(0, service.tst_db_calls_under_lock.get(), "a query ran under the lock of DoerService");
+    }
+
+    @Test
+    void scheduler__should_drop_re_check_of_older_load() throws Exception {
+        useThreadPool();
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        inProgressElsewhere("S");
+        CountDownLatch reCheckStarted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        service.tst_on_load_tasks = ids -> {
+            if (reCheckStarted.getCount() > 0) {
+                reCheckStarted.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+            }
+        };
+        service.start(true);
+        assertTrue(reCheckStarted.await(5, TimeUnit.SECONDS));
+
+        // While the re-check of the first load waits for its query, the second load skips another task
+        Task next = inProgressElsewhere("S");
+        service.triggerQueuesReload();
+        assertTrue(waitUntil(() -> {
+            synchronized (service) {
+                return service.reCheckTasks.stream().anyMatch(t -> t.getId() == next.getId());
+            }
+        }, Duration.ofSeconds(5)));
+        // The other node finishes it
+        Task finished = copyOf(next);
+        finished.setInProgress(false);
+        finished.setVersion(next.getVersion() + 1);
+        service.tst_tasks_by_id.put(finished.getId(), finished);
+        // The query of the first re-check returns without the task of the second load
+        release.countDown();
+
+        assertTrue(waitForRun("S", Duration.ofSeconds(5)),
+                "the task skipped by the second load was dropped by the re-check of the first load");
+    }
+
+    @Test
+    void stop__should_stop_planned_work() throws Exception {
+        useThreadPool();
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        service.start(true);
+        waitUntilSchedulerWaits();
+        int loads = service.tst_loads.get();
+        // The reset is due, but nothing is told about it; no tick runs before stop
+        synchronized (service) {
+            service.lastStalledTaskChecked = Instant.now().minus(Duration.ofHours(1));
+            service.stop();
+        }
+
+        assertNull(service.tst_stalled_resets.poll(2, TimeUnit.SECONDS), "stalled tasks were reset after stop");
+        assertEquals(loads, service.tst_loads.get(), "the queues were loaded after stop");
+        assertTrue(waitUntil(() -> Thread.getAllStackTraces().keySet().stream()
+                .noneMatch(t -> t.getName().equals("doer-scheduler")), Duration.ofSeconds(5)),
+                "the thread of the scheduler is alive after stop");
     }
 
     @Test
@@ -174,13 +352,9 @@ public class DoerServiceTest {
                 }
             };
             service.tst_task_from_db.addAll(List.of(first, second, third));
-            service.tst_tasks_by_id.put(second.getId(), second);
-            service.tst_tasks_by_id.put(third.getId(), third);
+            // The load starts the three tasks in D1
             service.start(false);
             assertTrue(firstStarted.await(10, TimeUnit.SECONDS));
-            // The load starts one task per domain; each reload of a task starts one more in D1, none in D2
-            service.triggerTaskReloadFromDb(second.getId());
-            service.triggerTaskReloadFromDb(third.getId());
 
             // first is now in D2 with the status B: D2 has free slots, though D1 has none
             assertTrue(waitForRun("B", Duration.ofSeconds(5)), "the task in D2 did not run while D1 was busy");
@@ -190,6 +364,48 @@ public class DoerServiceTest {
             executor.shutdown();
             executor.awaitTermination(5, TimeUnit.SECONDS);
         }
+    }
+
+    /**
+     * Keeps the tasks of the status in progress until the end of the test (see {@link #stopThreadPool}). The latch is
+     * released when the first of them starts.
+     */
+    private CountDownLatch holdTasksOf(String status) {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch never = new CountDownLatch(1);
+        service.tst_on_run = task -> {
+            if (status.equals(task.getStatus())) {
+                started.countDown();
+                never.await();
+            }
+        };
+        return started;
+    }
+
+    private static boolean waitUntil(BooleanSupplier condition, Duration timeout) throws InterruptedException {
+        Instant deadline = Instant.now().plus(timeout);
+        while (Instant.now().isBefore(deadline)) {
+            if (condition.getAsBoolean()) {
+                return true;
+            }
+            Thread.sleep(20);
+        }
+        return condition.getAsBoolean();
+    }
+
+    /** A task in progress on another node: the next load returns it, and the load skips it. */
+    private Task inProgressElsewhere(String status) {
+        Task task = createNewTask(status);
+        task.setInProgress(true);
+        service.tst_task_from_db.add(task);
+        service.tst_tasks_by_id.put(task.getId(), copyOf(task));
+        return task;
+    }
+
+    private static Task copyOf(Task task) {
+        Task copy = new Task();
+        copy.assignFieldsFrom(task);
+        return copy;
     }
 
     /** Waits until runTask is called with a task of the status. */
@@ -256,19 +472,20 @@ public class DoerServiceTest {
         assertFalse(other.beanProviders.containsKey(DoerService.class));
     }
 
-    /** Waits until the thread of the idle monitor waits for its next check. */
-    private static void waitUntilIdleMonitorWaits() throws InterruptedException {
-        Instant deadline = Instant.now().plusSeconds(5);
-        while (Instant.now().isBefore(deadline)) {
-            boolean waiting = Thread.getAllStackTraces().keySet().stream()
-                    .anyMatch(t -> t.getName().equals("doer-idle-monitor")
-                            && t.getState() == Thread.State.TIMED_WAITING);
-            if (waiting) {
-                return;
+    /**
+     * Waits until the first load is done and nothing is due for a while: the timer of the scheduler waits for more than
+     * a second.
+     */
+    private void waitUntilSchedulerWaits() throws InterruptedException {
+        BooleanSupplier waits = () -> {
+            synchronized (service) {
+                Duration delay = service.wakeUpTimer == null ? null : service.wakeUpTimer.plannedDelay();
+                return service.lastSelectTime != null
+                        && service.queuesReloadState == DoerService.QueuesReloadState.IDLE
+                        && delay != null && delay.compareTo(Duration.ofSeconds(1)) > 0;
             }
-            Thread.sleep(20);
-        }
-        fail("the idle monitor does not wait");
+        };
+        assertTrue(waitUntil(waits, Duration.ofSeconds(5)), "the scheduler does not wait");
     }
 
     /** Task as inserted to db: queues order tasks by created and modified. */
@@ -295,6 +512,31 @@ public class DoerServiceTest {
         /** Called by {@link #runTask} before it changes the status: may block to keep the task in progress. */
         volatile RunHook tst_on_run = task -> {
         };
+        /** Number of calls of {@link #loadTasksFromDatabase}. */
+        AtomicInteger tst_loads = new AtomicInteger();
+        /** Ids of the tasks loaded one by one or by ids, one entry per load. */
+        BlockingQueue<Long> tst_loaded_ids = new LinkedBlockingQueue<>();
+        /** When {@link #resetStalledInProgressTasks} was called, one entry per call. */
+        BlockingQueue<Instant> tst_stalled_resets = new LinkedBlockingQueue<>();
+        /** Number of tasks {@link #resetStalledInProgressTasks} reports as reset. */
+        volatile int tst_stalled_reset_result;
+        /** Ids of each call of {@link #loadTasks}. */
+        BlockingQueue<Set<Long>> tst_load_tasks_calls = new LinkedBlockingQueue<>();
+        /** Called by {@link #loadTasks} before it loads: may block to keep the query running. */
+        volatile IdsHook tst_on_load_tasks = ids -> {
+        };
+        /** Number of the calls of the database methods made under the lock of DoerService. */
+        AtomicInteger tst_db_calls_under_lock = new AtomicInteger();
+
+        interface IdsHook {
+            void run(Collection<Long> ids) throws Exception;
+        }
+
+        private void checkNoLock() {
+            if (Thread.holdsLock(this)) {
+                tst_db_calls_under_lock.incrementAndGet();
+            }
+        }
 
         interface RunHook {
             void run(Task task) throws Exception;
@@ -337,11 +579,42 @@ public class DoerServiceTest {
 
         @Override
         public Task loadTask(long id) {
+            checkNoLock();
+            tst_loaded_ids.add(id);
             return tst_tasks_by_id.get(id);
         }
 
         @Override
+        public Map<Long, Task> loadTasks(Collection<Long> ids) throws SQLException {
+            checkNoLock();
+            tst_load_tasks_calls.add(Set.copyOf(ids));
+            try {
+                tst_on_load_tasks.run(ids);
+            } catch (Exception e) {
+                throw new SQLException(e);
+            }
+            Map<Long, Task> result = new HashMap<>();
+            for (long id : ids) {
+                tst_loaded_ids.add(id);
+                Task task = tst_tasks_by_id.get(id);
+                if (task != null) {
+                    result.put(id, task);
+                }
+            }
+            return result;
+        }
+
+        @Override
+        public int resetStalledInProgressTasks(Duration timeout) {
+            checkNoLock();
+            tst_stalled_resets.add(Instant.now());
+            return tst_stalled_reset_result;
+        }
+
+        @Override
         public List<Task> loadTasksFromDatabase(List<Integer> limits) {
+            checkNoLock();
+            tst_loads.incrementAndGet();
             tst_limits = limits;
             ArrayList<Task> returnValue = new ArrayList<>(tst_task_from_db);
             tst_task_from_db.clear();
