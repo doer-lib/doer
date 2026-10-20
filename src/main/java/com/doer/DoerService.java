@@ -36,12 +36,33 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
 
+/**
+ * Runs the doer methods on the tasks of the database. The annotation processor generates its subclass
+ * {@code com.doer.generated._GeneratedDoerService}, which the application injects, starts and stops.
+ * <p>
+ * A node keeps the first tasks of each sub-queue in memory ({@link TaskQueues}), loads them from the database, and runs
+ * them in the threads of the executor of the container, at most the limit of their concurrency domain at a time. The
+ * scheduler does the work no event starts: it runs a task when its delay or retry interval has passed, reloads the
+ * queues every {@link #queueReloadInterval}, checks again the tasks a load skipped, and resets stalled tasks. Its timer
+ * ({@link WakeUpTimer}) only hands the tick to the executor. See scheduler-refactoring-design.md.
+ * <p>
+ * The state of the queues, the scheduler, the re-check and the stalled tasks is guarded by the lock of this object;
+ * the queries run outside it. All times are times of the database ({@link #getDbNow}).
+ * <p>
+ * The package-private fields are settings with their defaults, and hooks for the tests of {@code com.doer} (the
+ * clock, the timer): the tests set them before {@link #start}.
+ */
 public abstract class DoerService {
+
+    // Constants
+
+    protected static final Logger LOG = Logger.getLogger(DoerService.class.getName());
     /** Safety net: the scheduler wakes up at least this often, even when nothing is planned. */
     private static final Duration MAX_WAKE_UP_DELAY = Duration.ofMinutes(1);
     /** Work that is due but cannot be done now (a load is running) does not wake the scheduler more often. */
     private static final Duration MIN_WAKE_UP_DELAY = Duration.ofMillis(100);
-    protected static final Logger LOG = Logger.getLogger(DoerService.class.getName());
+
+    // Dependencies: from the container
 
     /**
      * Providers of the beans not looked up yet. The generated service puts a provider here in each @Inject method
@@ -56,35 +77,56 @@ public abstract class DoerService {
     private Executor executor;
     private DataSource dataSource;
 
-    private boolean isRunning;
-    QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
+    // Lifecycle
 
+    private boolean isRunning;
+
+    // Database time: getDbNow()
+
+    Clock clock = Clock.systemUTC();
     protected AtomicInteger dbTimeDiffMs = new AtomicInteger(0);
-    /** Tasks skipped by the last load, to check again (see {@link TaskQueues#replaceFromDb}). Guarded by the lock. */
+
+    // Queue loading: configuration
+
+    Duration queueReloadInterval = Duration.ofMinutes(10);
+    int maxAllQueuesSize = 10000;
+    int minSingleQueueSize = 10;
+
+    // Queue loading: state
+
+    private final TaskQueues taskQueues = new TaskQueues();
+    QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
+    /** Set before the select of each load, also of a load that fails. */
+    Instant lastSelectTime;
+
+    // Scheduler
+
+    Function<Runnable, WakeUpTimer> wakeUpTimerFactory = ScheduledWakeUpTimer::new;
+    /** Exists between {@link #start} and {@link #stop}. */
+    WakeUpTimer wakeUpTimer;
+
+    // Re-check: configuration
+
+    Duration reCheckInterval = Duration.ofSeconds(2);
+    /** A skipped task unchanged for this time after its modified is not checked again: the next load sees it. */
+    Duration reCheckWindow = Duration.ofSeconds(10);
+
+    // Re-check: state
+
+    /** Tasks skipped by the last load, to check again (see {@link TaskQueues#replaceFromDb}). */
     final List<Task> reCheckTasks = new ArrayList<>();
     /** Number of the load that filled {@link #reCheckTasks}: the result of a re-check of an older load is dropped. */
     private long loadGeneration;
     private boolean reCheckRunning;
     private Instant lastReCheck;
 
-    private final TaskQueues taskQueues = new TaskQueues();
+    // Stalled tasks: configuration
 
-    Duration queueReloadInterval = Duration.ofMinutes(10);
-    Instant lastSelectTime;
-    int maxAllQueuesSize = 10000;
-    int minSingleQueueSize = 10;
-    /** Timer of the scheduler: exists between {@code start()} and {@code stop()}. */
-    WakeUpTimer wakeUpTimer;
-    /** Creates the timer of the scheduler with its wake-up action; the tests install a manual timer. */
-    Function<Runnable, WakeUpTimer> wakeUpTimerFactory = ScheduledWakeUpTimer::new;
-    /** Clock of {@link #getDbNow}; the tests move the time with their own. */
-    Clock clock = Clock.systemUTC();
-    /** How often the tasks skipped by the load are checked again. */
-    Duration reCheckInterval = Duration.ofSeconds(2);
-    /** A skipped task unchanged for this time after its modified is not checked again: the next load sees it. */
-    Duration reCheckWindow = Duration.ofSeconds(10);
     Duration stalledTaskCheckInterval = Duration.ofMinutes(30);
     Duration stalledTaskTimeout = Duration.ofHours(2);
+
+    // Stalled tasks: state
+
     /** Set by the first start: the first reset is due {@link #stalledTaskCheckInterval} after it. */
     Instant lastStalledTaskChecked;
 
