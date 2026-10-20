@@ -81,7 +81,7 @@ public class ValidationResource {
     @Path("load")
     @GET
     public Map<String, Object> reload() {
-        doerService.triggerQueuesReloadFromDb();
+        doerService.triggerQueuesReload();
         return Map.of("status", "Doer Reloaded");
     }
 
