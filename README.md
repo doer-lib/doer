@@ -68,7 +68,7 @@ public class DoerLifecycle {
     DoerService doerService;
 
     void onStart(@Observes Startup event) {
-        doerService.start(true);
+        doerService.start();
     }
 
     void onStop(@Observes Shutdown event) {

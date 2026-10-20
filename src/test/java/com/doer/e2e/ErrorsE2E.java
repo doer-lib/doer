@@ -35,15 +35,12 @@ class ErrorsE2E extends E2eTestBase {
     @Test
     void no_onException_method_should_be_retried_in_5_min() throws Exception {
         resetServer();
-        pushTask("Error checked exception");
-        Thread.sleep(200);
-        assertEquals(1, selectLongValue("SELECT count(*) FROM task_logs"));
+        long taskId = pushTask("Error checked exception");
+        waitTaskLogs(taskId, 1);
 
-        // Pretending task was updated long ago
-        sqlUpdate("UPDATE tasks SET modified = modified - '5min'::INTERVAL");
-        reloadQueues();
+        shiftTaskTimes(Duration.ofMinutes(5), taskId);
 
-        Thread.sleep(200);
+        waitTaskLogs(taskId, 2);
         assertEquals(2, selectLongValue("SELECT count(*) FROM task_logs"));
     }
 
@@ -51,12 +48,14 @@ class ErrorsE2E extends E2eTestBase {
     void retryPolicy_should_set_fallbackStatus_when_duration_elapsed() throws Exception {
         resetServer();
         long taskId = pushTask("Error retry policy");
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(11));
-        while (deadline.isAfter(Instant.now())) {
-            Thread.sleep(200);
-            checkReadyTasks();
+        // Retried every 2 s for 10 s: the attempts at 0, 2, 4, 6 and 8 s fail, the one at 10 s sets the fallback status.
+        // Each shift is 2 s, so the real time of the five rounds must stay under 2 s.
+        for (int attempts = 1; attempts <= 5; attempts++) {
+            waitTaskLogs(taskId, attempts);
+            shiftTaskTimes(Duration.ofSeconds(2), taskId);
         }
-        assertEquals("Error retry policy fallback", waitTaskStatus(taskId, "Error retry policy fallback"));
+        waitTaskLogs(taskId, 6);
+        assertEquals("Error retry policy fallback", restGetTask(taskId).status());
         assertEquals(6, selectLongValue("SELECT count(*) FROM task_logs"));
     }
 
@@ -67,9 +66,7 @@ class ErrorsE2E extends E2eTestBase {
         waitTaskLogs(taskId, 1);
 
         // Failing for 2 days: without @RetryPolicy the task would get the status null after 1 day
-        sqlUpdate("UPDATE tasks SET failing_since = now() - '2 days'::INTERVAL, modified = now() - '1 min'::INTERVAL "
-                + "WHERE id = " + taskId);
-        reloadQueues();
+        shiftTaskTimes(Duration.ofDays(2), taskId);
         waitTaskLogs(taskId, 2);
 
         RestTask task = restGetTask(taskId);
@@ -104,7 +101,8 @@ class ErrorsE2E extends E2eTestBase {
             if (Instant.now().isAfter(deadline)) {
                 throw new AssertionError("Task " + taskId + " has no " + count + " task logs in 10 s");
             }
-            Thread.sleep(100);
+            // Short: the rounds of retryPolicy_should_set_fallbackStatus_when_duration_elapsed must stay under 2 s
+            Thread.sleep(20);
         }
     }
 }

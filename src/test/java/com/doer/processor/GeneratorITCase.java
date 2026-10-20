@@ -133,7 +133,7 @@ public class GeneratorITCase implements InWorkspace {
                                 .isAnnotationPresent(PreDestroy.class));
                         var doer = new TestDoerService();
                         doer.setExecutor(job -> {});
-                        doer.start(true);
+                        doer.start();
                         System.out.println("started: " + schedulerThreads());
                         doer._destroy();
                         long deadline = System.currentTimeMillis() + 5000;

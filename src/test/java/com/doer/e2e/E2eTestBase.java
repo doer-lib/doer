@@ -14,6 +14,8 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.stream.Collectors;
+import java.util.stream.LongStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 
@@ -47,38 +49,23 @@ abstract class E2eTestBase {
                 .body("status", equalTo("Doer Stopped"));
     }
 
-    static void resumeServer(boolean enableMonitor) {
+    static void resumeServer() {
         given()
                 .when()
-                .queryParam("m", enableMonitor)
                 .get("/api/validation/start")
                 .then()
                 .statusCode(200)
                 .body("status", equalTo("Doer Started"));
     }
 
+    /** Deletes all tasks and data, and restarts Doer. */
     static void resetServer() {
-        resetServer(false);
-    }
-
-    /** Deletes all tasks and data, and restarts Doer, with the monitor of delayed tasks when {@code monitor}. */
-    static void resetServer(boolean monitor) {
         given()
                 .when()
-                .queryParam("m", monitor)
                 .get("/api/validation/reset")
                 .then()
                 .statusCode(200)
                 .body("status", equalTo("Doer Reset"));
-    }
-
-    static void checkReadyTasks() {
-        given()
-                .when()
-                .get("/api/validation/check")
-                .then()
-                .statusCode(200)
-                .body("status", equalTo("check"));
     }
 
     static void reloadQueues() {
@@ -88,6 +75,22 @@ abstract class E2eTestBase {
                 .then()
                 .statusCode(200)
                 .body("status", equalTo("Doer Reloaded"));
+    }
+
+    /**
+     * Moves the tasks back in time, as if they were created, modified and failing {@code shift} earlier, and reloads the
+     * queues. The new version makes the copies in the queues older than the rows, as if another node had changed the
+     * tasks: a copy the node takes before the load ends with a version conflict and is dropped, so the node never runs
+     * it with the old times or writes them back; the load queues the rows. The tasks must not be in progress.
+     * <p>
+     * {@link #waitTaskStatus} takes a task modified more than 2 s ago for idle: after a shift, wait for its task logs.
+     */
+    static void shiftTaskTimes(Duration shift, long... ids) {
+        String interval = "'" + shift.toMillis() + " milliseconds'::INTERVAL";
+        sqlUpdate("UPDATE tasks SET created = created - " + interval + ", modified = modified - " + interval
+                + ", failing_since = failing_since - " + interval + ", version = version + 1 WHERE id IN ("
+                + LongStream.of(ids).mapToObj(Long::toString).collect(Collectors.joining(", ")) + ")");
+        reloadQueues();
     }
 
     static long pushTask(String status) {

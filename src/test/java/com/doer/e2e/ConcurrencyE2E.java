@@ -106,15 +106,12 @@ class ConcurrencyE2E extends E2eTestBase {
                 "created = now() - '10 min'::INTERVAL " +
                 "WHERE id >= " + idList3.peekFirst());
         long linesToSkip = E2eEnvironment.appLog(1).lines().count();
-        resumeServer(false);
+        resumeServer();
         for (Long id : idList2) {
             waitTaskStatus(id, "Concurrency queues slow done");
         }
-        Thread.sleep(250);
-        checkReadyTasks();
-        Thread.sleep(250);
-        checkReadyTasks();
-        Thread.sleep(250);
+        // Time for the scheduler to run a task that must not run, and for the loads after the last tasks
+        Thread.sleep(750);
         List<List<Integer>> limitsTable = E2eEnvironment.appLog(1).lines()
                 .skip(linesToSkip)
                 .filter(line -> line.contains(" Limits: "))

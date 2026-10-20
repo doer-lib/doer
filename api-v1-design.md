@@ -316,6 +316,58 @@ There is no common base exception. `DoerService` methods also throw `SQLExceptio
 
 `TaskVersionConflictException` is thrown when a task update finds a different `version` in the database, for example when a hijacked doer method tries to write its result.
 
+## `DoerService.start()`
+
+Status: implemented
+
+```java
+public void start();   // was start(boolean enableMonitor)
+public void stop();    // unchanged
+```
+
+`start(boolean enableMonitor)` chooses whether the scheduler has its timer (see scheduler-refactoring-design.md):
+
+- `true` — the scheduler wakes up by itself: a delayed or failing task runs when it is ready, the queues are reloaded every `queueReloadInterval`, stalled tasks are reset, the tasks skipped by a load are checked again.
+- `false` — no timer. Tasks start on events only (a load, the end of a run, a coordinated update), or when the application calls `checkTasksBecomeReady()`. A delayed task that is not ready at that moment does not run; there is no periodic load and no reset of stalled tasks.
+
+Every application calls `start(true)`: the README, the `DoerLifecycle` of every e2e runtime. `start(false)` exists for tests: `DoerServiceTest` and `ClusterTest` run the jobs of the executor by hand, and most e2e tests start Doer with `?m=false` and call `/check`. It is a test mode in the public API, and a trap: an application started with `false` looks working until its first delayed task. The name is out of date too: there is no monitor any more. With the scheduler on, the e2e suite on Quarkus passes as it is (63 of 63, `resetServer()` and `ConcurrencyE2E` switched to `m=true`).
+
+In v1:
+
+| 0.x | v1 |
+|---|---|
+| `start(true)` | `start()` |
+| `start(false)` | — (the tests below replace it) |
+| `checkTasksBecomeReady()`, public | removed: the tick of the scheduler (`onTick`, private) runs when the timer wakes up and after each load |
+| `stop()` | `stop()`, idempotent, also called by the generated `@PreDestroy` |
+
+### Tests without the manual mode
+
+**Unit tests** (`com.doer`) replace the timer and the clock instead of switching the timer off:
+
+- `WakeUpTimer` becomes a package-private interface: the thread `doer-scheduler` in production, `ManualWakeUpTimer` in tests. The manual timer only records the planned delay; the test fires it. A package-private setter installs it before `start()`, as `setExecutor` installs the executor.
+- `getDbNow()` reads a package-private `Clock` (plus `dbTimeDiffMs`, as today), so that a test moves the time instead of sleeping.
+
+`DoerServiceTest` and `ClusterTest` stay deterministic: with the executor run by hand and the manual timer, nothing happens until the test runs the jobs or fires the timer. The plan of the scheduler becomes testable too: after a load with `queueReloadInterval` of 30 s and nothing else due, the manual timer holds a delay of 30 s; with nothing due within a minute, it holds the safety net of 1 min.
+
+**E2e tests** run with the scheduler, as the applications do. A test that depends on time does not wait for it; it moves the task back in time in the database:
+
+```sql
+UPDATE tasks
+SET created = created - :shift, modified = modified - :shift, failing_since = failing_since - :shift,
+    version = version + 1
+WHERE id = ANY(:ids)
+```
+
+and then reloads the queues (`GET /api/validation/load`, `triggerQueuesReload()`). The new `version` matters now that the scheduler runs by itself: the copy of the task in the queues of the node is older than the row, as if another node had changed the task. If the node takes it before the load, its run ends with `TaskVersionConflictException` and the task is dropped, so the node never runs it with the old times or writes them back. The load then queues the row with the new times. The test moves only tasks that are not in progress: it waits for the step first (`waitTaskLogs`, `waitTaskStatus`).
+
+`E2eTestBase` gets one helper for it, `shiftTaskTimes(Duration shift, long... ids)`. Changes in the suite:
+
+- `ErrorsE2E.retryPolicy_should_set_fallbackStatus_when_duration_elapsed` stops waiting 11 s with `/check` every 200 ms: it shifts the task by the retry interval (2 s) after each failure.
+- The tests that shifted times with SQL while Doer ran (`ErrorsE2E.no_onException_method_should_be_retried_in_5_min`, `ErrorsE2E.retryPolicy_without_duration_should_retry_forever`) use the helper, so they also bump the version. `ConcurrencyE2E` keeps its SQL: it sets the times while Doer is stopped, and the start loads the queues anew.
+- `DoerMethodsE2E.delayed_method_should_be_called_after_delay` keeps waiting the real delay of 2 s: it checks the timing of the scheduler itself. It no longer calls `/check`, nor does `ConcurrencyE2E`.
+- `ValidationResource` loses `/check` and the `m` parameter of `start` and `reset`; `E2eTestBase` loses `resumeServer(boolean)`, `resetServer(boolean)` and `checkReadyTasks()`.
+
 ## Migration
 
 - All renames are source-incompatible, which v1 allows. Annotations have `CLASS` retention and the generated service is regenerated on recompilation, so for them there is nothing to keep at runtime. The interfaces are runtime types: a library compiled against 0.x that calls `facilitateCoordinatedUpdate` with `DoerTaskConsumer` or `DoerUpdater` fails at runtime with v1 until it is recompiled.
@@ -327,6 +379,7 @@ There is no common base exception. `DoerService` methods also throw `SQLExceptio
   - entries in `doer_methods` get `domain` instead of `concurrency`;
   - `retry` and `error_status` of doer methods become `interval`, `duration` and `fallback_status`;
   - the sections `unloaders` and `extra_json_appenders` become `savers` and `exception_describers`.
+- `start(true)` becomes `start()`, and `start(false)` has no replacement in the public API (see "`DoerService.start()`"); no application is known to use it. `checkTasksBecomeReady()` is removed.
 - README, the tutorial repository and `sync-with-doerservice-design.md` use the old names and need updating with the release.
 
 ## Ideas for later

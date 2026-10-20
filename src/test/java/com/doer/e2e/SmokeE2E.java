@@ -65,8 +65,8 @@ public class SmokeE2E extends E2eTestBase {
         int newStart = log.indexOf(separators.get(1));
         assertFalse(log.subList(newStart + 1, log.size()).isEmpty(), "log of the new start");
 
-        // The restarted node runs Doer as the application starts it, with the monitor: a delayed task is processed
-        // without /api/validation/check
+        // The restarted node runs Doer as the application starts it: the scheduler runs a delayed task after its
+        // delay
         long taskId = pushTask("Doer method delayed");
         Instant deadline = Instant.now().plus(Duration.ofSeconds(10));
         while (!"Doer method delayed done".equals(restGetTask(taskId).status()) && Instant.now().isBefore(deadline)) {

@@ -28,7 +28,7 @@ class TransitSimsE2E extends E2eTestBase {
 
     @BeforeEach
     void reset() {
-        resetServer(true);
+        resetServer();
     }
 
     @Test

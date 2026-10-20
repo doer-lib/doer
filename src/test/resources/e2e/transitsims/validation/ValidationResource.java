@@ -66,9 +66,9 @@ public class ValidationResource {
 
     @Path("start")
     @GET
-    public Map<String, Object> startDoer(@QueryParam("m") @DefaultValue("false") boolean monitor) {
-        doerService.start(monitor);
-        return Map.of("status", "Doer Started", "monitor", monitor);
+    public Map<String, Object> startDoer() {
+        doerService.start();
+        return Map.of("status", "Doer Started");
     }
 
     @Path("stop")
@@ -85,13 +85,6 @@ public class ValidationResource {
         return Map.of("status", "Doer Reloaded");
     }
 
-    @Path("check")
-    @GET
-    public Map<String, Object> checkTasksBecomeReady() {
-        doerService.checkTasksBecomeReady();
-        return Map.of("status", "check");
-    }
-
     @Path("fix")
     @GET
     public Map<String, Object> fixStalled() throws Exception {
@@ -99,10 +92,10 @@ public class ValidationResource {
         return Map.of("status", "fixed");
     }
 
-    /** Stops Doer, deletes all tasks and logs, and starts Doer again, with the monitor when {@code m} is true. */
+    /** Stops Doer, deletes all tasks and logs, and starts Doer again. */
     @Path("reset")
     @GET
-    public Map<String, Object> resetDoer(@QueryParam("m") @DefaultValue("false") boolean monitor) throws Exception {
+    public Map<String, Object> resetDoer() throws Exception {
         doerService.stop();
         String sql = "DELETE FROM task_logs; DELETE FROM tasks; DELETE FROM demo_log_tasks; DELETE FROM buses; "
                 + "DELETE FROM sims";
@@ -117,7 +110,7 @@ public class ValidationResource {
             pst.getMoreResults();
             updatedDemoLog = pst.getUpdateCount();
         } finally {
-            doerService.start(monitor);
+            doerService.start();
         }
         return Map.of("status", "Doer Reset",
                 "cleared", Map.of("tasks", updatedTasks, "logs", updatedLogs, "demo_logs", updatedDemoLog));

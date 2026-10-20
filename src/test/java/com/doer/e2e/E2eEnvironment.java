@@ -178,8 +178,8 @@ public class E2eEnvironment implements BeforeAllCallback {
     }
 
     /**
-     * Stops Doer in the node: the application starts it with the monitor, and the tests control it through the
-     * validation endpoints.
+     * Stops Doer in the node: the application starts it, and each test starts it again through the validation endpoints
+     * ({@code reset}, {@code start}).
      */
     private static void stopDoer(AppNode node) throws Exception {
         HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();

@@ -6,9 +6,9 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 /**
- * The Spring version of DoerLifecycle (Spring does not fire the CDI events Startup and Shutdown). Doer starts, with the
- * monitor of delayed tasks, before Tomcat accepts requests and stops after Tomcat has stopped accepting them, before the
- * DataSource and the Executor are destroyed: the phase is below the ones of the web server. Copied by the e2e suite
+ * The Spring version of DoerLifecycle (Spring does not fire the CDI events Startup and Shutdown). Doer starts before Tomcat
+ * accepts requests and stops after Tomcat has stopped accepting them, before the DataSource and the Executor are
+ * destroyed: the phase is below the ones of the web server. Copied by the e2e suite
  * (SpringBootApp).
  */
 @Component
@@ -20,7 +20,7 @@ public class DoerLifecycle implements SmartLifecycle {
 
     @Override
     public void start() {
-        doerService.start(true);
+        doerService.start();
         running = true;
     }
 

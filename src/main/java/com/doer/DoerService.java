@@ -8,6 +8,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -28,6 +29,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -71,15 +73,20 @@ public abstract class DoerService {
     Instant lastSelectTime;
     int maxAllQueuesSize = 10000;
     int minSingleQueueSize = 10;
-    /** Timer of the scheduler: exists between {@code start(true)} and {@code stop()}. */
+    /** Timer of the scheduler: exists between {@code start()} and {@code stop()}. */
     WakeUpTimer wakeUpTimer;
+    /** Creates the timer of the scheduler with its wake-up action; the tests install a manual timer. */
+    Function<Runnable, WakeUpTimer> wakeUpTimerFactory = ScheduledWakeUpTimer::new;
+    /** Clock of {@link #getDbNow}; the tests move the time with their own. */
+    Clock clock = Clock.systemUTC();
     /** How often the tasks skipped by the load are checked again. */
     Duration reCheckInterval = Duration.ofSeconds(2);
     /** A skipped task unchanged for this time after its modified is not checked again: the next load sees it. */
     Duration reCheckWindow = Duration.ofSeconds(10);
     Duration stalledTaskCheckInterval = Duration.ofMinutes(30);
     Duration stalledTaskTimeout = Duration.ofHours(2);
-    Instant lastStalledTaskChecked = Instant.now();
+    /** Set by the first start: the first reset is due {@link #stalledTaskCheckInterval} after it. */
+    Instant lastStalledTaskChecked;
 
     public DoerService getSelfReference() {
         return self();
@@ -155,13 +162,18 @@ public abstract class DoerService {
         return queueReloadInterval;
     }
 
-    public void start(boolean enableMonitor) {
+    /**
+     * Starts the service: loads the queues and starts the scheduler, which runs the tasks when they are ready, reloads
+     * the queues and resets stalled tasks. A stopped service can be started again.
+     */
+    public void start() {
         synchronized (this) {
             isRunning = true;
-            if (!enableMonitor) {
-                stopWakeUpTimer();
-            } else if (wakeUpTimer == null) {
-                wakeUpTimer = new WakeUpTimer(this::wakeUp);
+            if (wakeUpTimer == null) {
+                wakeUpTimer = wakeUpTimerFactory.apply(this::wakeUp);
+            }
+            if (lastStalledTaskChecked == null) {
+                lastStalledTaskChecked = getDbNow();
             }
             triggerQueuesReload();
             reschedule();
@@ -222,7 +234,7 @@ public abstract class DoerService {
     }
 
     public Instant getDbNow() {
-        return Instant.now().plusMillis(dbTimeDiffMs.get());
+        return clock.instant().plusMillis(dbTimeDiffMs.get());
     }
 
     public long generateId() throws SQLException {
@@ -358,7 +370,7 @@ public abstract class DoerService {
 
     /**
      * Does the work of the scheduler that is due (see {@link #nextWakeUp}) and plans the next wake-up. Runs in a thread
-     * of the executor: when the timer wakes up, after a load, or by hand ({@link #checkTasksBecomeReady}).
+     * of the executor: when the timer wakes up, and after each load.
      */
     private void onTick() {
         List<Long> reCheckIds = null;
@@ -522,15 +534,6 @@ public abstract class DoerService {
         }
     }
 
-    /**
-     * Does the work of the scheduler that is due now: starts the ready tasks, loads the queues, resets stalled tasks,
-     * re-checks the tasks skipped by the load. Called after each load, and by hand when the service runs without the
-     * timer ({@code start(false)}).
-     */
-    public void checkTasksBecomeReady() {
-        onTick();
-    }
-
     /** Public only for the @Transactional override in the generated service: use {@link #triggerQueuesReload}. */
     public void reloadQueues() {
         List<Integer> limits = null;
@@ -570,7 +573,7 @@ public abstract class DoerService {
                     scheduleQueuesReload();
                 } else {
                     queuesReloadState = QueuesReloadState.IDLE;
-                    executor.execute(self()::checkTasksBecomeReady);
+                    executor.execute(this::onTick);
                 }
             }
         }

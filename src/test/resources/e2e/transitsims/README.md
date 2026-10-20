@@ -75,7 +75,7 @@ A bus is simulated in steps of one second (Doer's delays are whole seconds); bet
 | Class | Kind |
 |---|---|
 | `TransitSimsApplication`, `RestExceptionMapper` | `@ApplicationPath("/api")`, errors as JSON |
-| `DoerLifecycle` | starts Doer with the monitor on `Startup`, stops it on `Shutdown` |
+| `DoerLifecycle` | starts Doer on `Startup`, stops it on `Shutdown` |
 | `SimResource`, `BusResource` | JAX-RS resources of the API, without a scope |
 | `SimSupervisor` | `@Dependent`, the doer method of the Sim task |
 | `BusDriver` | `@ApplicationScoped`, the doer methods of the Bus task |
@@ -103,9 +103,9 @@ A bus is simulated in steps of one second (Doer's delays are whole seconds); bet
 | Endpoint | Does |
 |---|---|
 | `GET info` | `{"runtime": "<E2E_RUNTIME>"}`: the application is up, migrated, and runs Doer |
-| `GET start?m=`, `stop` | starts Doer (with the monitor of delayed tasks when `m=true`), stops it |
-| `GET reset?m=` | stops Doer, deletes all tasks, logs and data, starts Doer again |
-| `GET load`, `check`, `fix` | reloads the queues, checks the tasks that became ready, resets stalled tasks |
+| `GET start`, `stop` | starts Doer, stops it |
+| `GET reset` | stops Doer, deletes all tasks, logs and data, starts Doer again |
+| `GET load`, `fix` | reloads the queues, resets stalled tasks |
 | `GET add_task?s=`, `task?id=` | inserts a task with a status, reads a task |
 | `POST run-task` | runs one task through `TaskRunner` (below) |
 | `GET coordinated_update…` | `facilitateCoordinatedUpdate` with and without task data, with a type without a loader, and inside a transaction (both must fail) |
@@ -224,5 +224,5 @@ What the code of Transit Sims follows, and why. A Doer user meets the same quest
 - **Reads that precede a coordinated update run in a transaction** (`BusRepository` is `@Transactional`). In Open Liberty a connection taken outside a transaction stays with the request until it ends, so reading a bus and then updating it needed two connections at once, and concurrent boardings exhausted the pool.
 - **No qualifiers, decorators or alternatives** on beans with doer methods: the generated service injects by type.
 - **Beans with doer methods may inject `DoerService`**, also through the constructor (`DoerMethodCalls`). The generated service injects `Provider`s of the beans and of itself and looks the beans up on first use, so Spring Boot needs no `spring.main.allow-circular-references`.
-- **Doer runs with the monitor** (`DoerLifecycle` starts it with `start(true)`), so a delayed task runs after its delay. `E2eEnvironment` stops Doer right after the first start of a node, so that the tests of aspects control Doer through the validation endpoints; a node restarted by a test keeps Doer running.
+- **Doer runs with its scheduler**, as in any application, so a delayed task runs after its delay. `E2eEnvironment` stops Doer right after the first start of a node, so that each test of aspects starts it again through the validation endpoints (`reset`); a node restarted by a test keeps Doer running. A test that depends on time moves the tasks back in time (`E2eTestBase.shiftTaskTimes`) instead of waiting.
 - **Open: a doer method in progress when the node stops** stays `in_progress` until the reset of stalled tasks (2 hours): `DoerService.stop()` does not wait for it, and the runtime may stop its transactions before the method ends.
