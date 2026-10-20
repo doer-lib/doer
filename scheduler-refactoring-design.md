@@ -15,7 +15,7 @@ The scheduler decides when a node does the work that is not started by an event:
 
 ## Required behavior
 
-While the service runs with the scheduler enabled (`start(true)`):
+While the service runs (between `start()` and `stop()`):
 
 - **R1. Ready tasks.** A queued task is started no later than about 100 ms after it becomes ready (`modified + delay` or `modified + retry interval`), when its domain has a free slot — no matter what other domains do.
 - **R2. Periodic load.** The queues are reloaded `queueReloadInterval` after the last load (`lastSelectTime`), and at the start. A load that failed is retried after `queueReloadInterval`, as today: `lastSelectTime` is set before the select.
@@ -29,7 +29,7 @@ While the service runs with the scheduler enabled (`start(true)`):
 - **R6. No work after stop.** After `stop()` the scheduler starts nothing: no task, no load, no stalled-task reset, no re-check.
 - **R7. The lock.** The plan is computed under the lock of DoerService; every query runs outside it.
 
-With `start(false)` there is no timer: tasks start on events only (load, finish, `triggerTaskReloadFromDb`), and the tests or the application call `checkTasksBecomeReady()` to do the due work by hand.
+The service always runs with the timer (`start(boolean)` with a mode without it was removed, see api-v1-design.md). The unit tests install a manual timer and clock instead (`ManualWakeUpTimer`, `TestClock`).
 
 ## Architecture
 
@@ -48,7 +48,7 @@ A package-private class around a `ScheduledThreadPoolExecutor` with one daemon t
 - `wakeUpNoLaterThan(Duration delay)` — keeps the planned wake-up if it comes earlier, otherwise cancels it and plans a new one;
 - `shutdown()` — cancels the wake-up and stops the thread.
 
-Its thread does no work of Doer: it only hands `onTick` to the executor of the container. So the database, the transactions and the context of the container are used only in the threads of the container, as today. The thread is created in `start(true)` and stopped in `stop()`; a service started again gets a new one.
+Its thread does no work of Doer: it only hands `onTick` to the executor of the container. So the database, the transactions and the context of the container are used only in the threads of the container, as today. The thread is created in `start()` and stopped in `stop()`; a service started again gets a new one.
 
 So that an application that forgets `stop()` does not leak the thread on redeploy, the generated service stops the service when the container destroys the bean:
 
@@ -93,13 +93,13 @@ The delay of the timer is `nextWakeUp - now`, at least 100 ms, so that work that
 3. Outside the lock: the re-check.
 4. Under the lock: `reschedule()`.
 
-`checkTasksBecomeReady()` becomes a call of `onTick()`. It stays public: the e2e `ValidationResource` uses it.
+Each load hands `onTick` to the executor when it ends. The public `checkTasksBecomeReady()`, which did the same by hand, was removed with `start(false)`.
 
 ### reschedule
 
 Called under the lock at the end of every change that can make something due earlier:
 
-- `start(true)`, the end of a tick — also of the tick that follows each load (`checkTasksBecomeReady`);
+- `start()`, the end of a tick — also of the tick that follows each load;
 - a task replaced with a row of the database (`replaceQueuedTask`: `reloadQueuedTask` and the re-check);
 - the end of a run in `processNextTask`: the task may be queued again with a delay, and a slot is free — the domain may have a delayed head.
 
@@ -121,7 +121,7 @@ A failed query is logged; the list stays and is checked on the next interval.
 
 ### What is removed
 
-`monitorIdleState`, `getNextCheckTime`, `onCheckTime`, `reCheckTask`, `monitorThread`, the renaming of the thread to `doer-idle-monitor`, `wait`/`notify` on DoerService, the `executor.execute(this::monitorIdleState)` calls in `processNextTask`. `monitorEnabled` too: the timer exists only between `start(true)` and `stop()`, and `wakeUpTimer == null` means there is no timer.
+`monitorIdleState`, `getNextCheckTime`, `onCheckTime`, `reCheckTask`, `monitorThread`, the renaming of the thread to `doer-idle-monitor`, `wait`/`notify` on DoerService, the `executor.execute(this::monitorIdleState)` calls in `processNextTask`. `monitorEnabled` too: the timer exists only between `start()` and `stop()`, and `wakeUpTimer == null` means there is no timer.
 
 ## Tests
 

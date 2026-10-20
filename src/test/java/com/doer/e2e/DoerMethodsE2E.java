@@ -35,7 +35,6 @@ class DoerMethodsE2E extends E2eTestBase {
         long taskId = pushTask("Doer method delayed");
         Instant deadLine = Instant.now().plus(Duration.ofSeconds(5));
         while (Instant.now().isBefore(deadLine)) {
-            checkReadyTasks();
             Thread.sleep(200);
             RestTask task = restGetTask(taskId);
             if ("Doer method delayed done".equals(task.status())) {
@@ -48,8 +47,7 @@ class DoerMethodsE2E extends E2eTestBase {
                 selectLongValue("SELECT (extract(EPOCH FROM min(created)) * 1000)::BIGINT FROM task_logs"));
         long actualDelay = Duration.between(task.created(), processed).toMillis();
         assertTrue(actualDelay >= 2000);
-        // 200ms latency of calling checkReadyTasks(),
-        // and more 200ms transaction toll
+        // The scheduler wakes up at the ready time; up to 400 ms for the run and its transactions
         assertTrue(actualDelay < 2400);
     }
 

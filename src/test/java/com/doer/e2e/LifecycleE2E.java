@@ -26,7 +26,7 @@ class LifecycleE2E extends E2eTestBase {
     @BeforeEach
     void reset() {
         assumeFalse(E2eEnvironment.isExternal(), "no restarts and no second node of an external application");
-        resetServer(true);
+        resetServer();
     }
 
     @Test
@@ -53,7 +53,7 @@ class LifecycleE2E extends E2eTestBase {
         E2eEnvironment.startNode(2);
         try {
             // A new node starts without Doer, see E2eEnvironment
-            node(2).queryParam("m", true).get("/api/validation/start").then().statusCode(200);
+            node(2).get("/api/validation/start").then().statusCode(200);
             String sim = createSim(30, 2);
             String bus = (String) buses(sim).get(0).get("id");
             int first = post(1, "/api/sims/" + sim + "/passengers", null).getInt("passenger");

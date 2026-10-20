@@ -3,6 +3,7 @@ package com.doer;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.sql.SQLException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -32,6 +33,10 @@ public class DoerServiceTest {
 
     TstDoerService service;
     LinkedList<Runnable> executorJobs;
+    /** Time of the service, moved by the test; the system clock with {@link #useThreadPool}. */
+    TestClock clock = new TestClock(Instant.parse("2026-01-01T00:00:00Z"));
+    /** Timer of the scheduler, fired by the test; the real one with {@link #useThreadPool}. */
+    ManualWakeUpTimer timer;
     /** Executor of the tests with real threads (see {@link #useThreadPool}); stopped after the test. */
     ExecutorService threadPool;
     long nextTaskId = 1000;
@@ -42,6 +47,8 @@ public class DoerServiceTest {
         service = new TstDoerService();
         service.setExecutor(executorJobs::add);
         service.setSelfReference(service);
+        service.clock = clock;
+        service.wakeUpTimerFactory = onWakeUp -> timer = new ManualWakeUpTimer(onWakeUp, clock);
     }
 
     @AfterEach
@@ -54,15 +61,27 @@ public class DoerServiceTest {
         }
     }
 
+    /** Real threads, real timer and real time. */
     void useThreadPool() {
         threadPool = Executors.newCachedThreadPool();
         service.setExecutor(threadPool);
+        service.clock = Clock.systemUTC();
+        service.wakeUpTimerFactory = ScheduledWakeUpTimer::new;
     }
 
     void runAllExecutorJobs() {
         while (!executorJobs.isEmpty()) {
             executorJobs.pollFirst().run();
         }
+    }
+
+    /** Moves the clock to the planned wake-up of the scheduler, fires it and runs the jobs it hands out. */
+    void advanceToWakeUp() {
+        Instant plannedAt = timer.plannedAt();
+        assertNotNull(plannedAt, "no wake-up is planned");
+        clock.set(plannedAt);
+        assertTrue(timer.fireIfDue());
+        runAllExecutorJobs();
     }
 
     @Test
@@ -72,7 +91,7 @@ public class DoerServiceTest {
             delays.put("S1", Duration.ZERO);
             service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
         }
-        service.start(false);
+        service.start();
 
         runAllExecutorJobs();
 
@@ -102,7 +121,7 @@ public class DoerServiceTest {
         Task task = createNewTask("A");
         service.tst_task_from_db.add(task);
 
-        service.start(false);
+        service.start();
         runAllExecutorJobs();
 
         assertEquals(Arrays.asList(5, 5, 5, 5, 5, 5, 5), service.tst_limits);
@@ -123,7 +142,7 @@ public class DoerServiceTest {
             service.setupConcurrencyDomain("D2", 2, delays, new HashMap<>());
         }
         service.tst_task_from_db.addAll(Arrays.asList(createNewTask("A"), createNewTask("A")));
-        service.start(false);
+        service.start();
         runAllExecutorJobs();
 
         assertEquals(Arrays.asList(4, 2, 2, 2), service.tst_limits); // actually it is second reloadQueues call
@@ -136,41 +155,61 @@ public class DoerServiceTest {
             delays.put("S1", Duration.ZERO);
             service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
         }
-        service.start(false);
+        service.start();
         service.stop();
         runAllExecutorJobs();
         assertNull(service.tst_limits);
 
-        service.start(false);
+        service.start();
         runAllExecutorJobs();
 
         assertEquals(Arrays.asList(10, 10), service.tst_limits);
     }
 
     @Test
-    void scheduler__should_run_task_queued_while_idle_after_its_delay() throws Exception {
-        ExecutorService executor = Executors.newCachedThreadPool();
-        try {
-            service.setExecutor(executor);
-            HashMap<String, Duration> delays = new HashMap<>();
-            delays.put("Delayed", Duration.ofSeconds(1));
-            service.setupConcurrencyDomain("D1", 2, delays, new HashMap<>());
-            service.start(true);
-            // Nothing to run: the scheduler waits for its next planned work, up to a minute
-            waitUntilSchedulerWaits();
+    void scheduler__should_run_task_queued_while_idle_after_its_delay() {
+        service.setupConcurrencyDomain("D1", 2, Map.of("Delayed", Duration.ofSeconds(1)), Map.of());
+        service.start();
+        runAllExecutorJobs();
 
-            Task task = createNewTask("Delayed");
-            service.tst_tasks_by_id.put(task.getId(), task);
-            service.triggerTaskReloadFromDb(task.getId());
+        Task task = createNewTask("Delayed");
+        service.tst_tasks_by_id.put(task.getId(), task);
+        service.triggerTaskReloadFromDb(task.getId());
+        runAllExecutorJobs();
 
-            Instant ran = service.tst_runs.poll(10, TimeUnit.SECONDS);
-            assertNotNull(ran, "the task did not run 10 s after it was queued; its delay is 1 s");
-            assertFalse(ran.isBefore(task.getModified().plusSeconds(1)), "the task ran before its delay");
-        } finally {
-            service.stop();
-            executor.shutdown();
-            executor.awaitTermination(5, TimeUnit.SECONDS);
-        }
+        assertTrue(service.tst_run_statuses.isEmpty(), "the task ran before its delay");
+        assertEquals(Duration.ofSeconds(1), timer.plannedDelay());
+
+        advanceToWakeUp();
+
+        assertEquals(List.of("Delayed"), List.copyOf(service.tst_run_statuses));
+    }
+
+    @Test
+    void scheduler__should_plan_periodic_load_after_reload_interval() {
+        service.setQueueReloadInterval(Duration.ofSeconds(30));
+        service.setupConcurrencyDomain("D1", 2, Map.of("S", Duration.ZERO), Map.of());
+        service.start();
+        runAllExecutorJobs();
+        assertEquals(1, service.tst_loads.get());
+
+        assertEquals(Duration.ofSeconds(30), timer.plannedDelay());
+        advanceToWakeUp();
+
+        assertEquals(2, service.tst_loads.get());
+    }
+
+    @Test
+    void scheduler__should_wake_up_at_least_once_a_minute() {
+        service.setupConcurrencyDomain("D1", 2, Map.of("S", Duration.ZERO), Map.of());
+        service.start();
+        runAllExecutorJobs();
+
+        // The next load is due in 10 min, the reset of stalled tasks in 30 min
+        assertEquals(Duration.ofMinutes(1), timer.plannedDelay());
+        advanceToWakeUp();
+
+        assertEquals(Duration.ofMinutes(1), timer.plannedDelay());
     }
 
     @Test
@@ -180,7 +219,7 @@ public class DoerServiceTest {
         service.setupConcurrencyDomain("D2", 1, Map.of("Delayed", Duration.ofSeconds(1)), Map.of());
         CountDownLatch longStarted = holdTasksOf("Long");
         service.tst_task_from_db.add(createNewTask("Long"));
-        service.start(true);
+        service.start();
         assertTrue(longStarted.await(10, TimeUnit.SECONDS));
 
         Task delayed = createNewTask("Delayed");
@@ -198,7 +237,7 @@ public class DoerServiceTest {
         service.setupConcurrencyDomain("D1", 1, Map.of("Long", Duration.ZERO), Map.of());
         CountDownLatch longStarted = holdTasksOf("Long");
         service.tst_task_from_db.add(createNewTask("Long"));
-        service.start(true);
+        service.start();
         assertTrue(longStarted.await(10, TimeUnit.SECONDS));
 
         assertNotNull(service.tst_stalled_resets.poll(5, TimeUnit.SECONDS),
@@ -212,7 +251,7 @@ public class DoerServiceTest {
         service.setupConcurrencyDomain("D1", 1, Map.of("Long", Duration.ZERO), Map.of());
         CountDownLatch longStarted = holdTasksOf("Long");
         service.tst_task_from_db.add(createNewTask("Long"));
-        service.start(true);
+        service.start();
         assertTrue(longStarted.await(10, TimeUnit.SECONDS));
         int loads = service.tst_loads.get();
 
@@ -226,7 +265,7 @@ public class DoerServiceTest {
         service.stalledTaskCheckInterval = Duration.ofMillis(500);
         service.tst_stalled_reset_result = 1;
         service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
-        service.start(true);
+        service.start();
         assertTrue(waitUntil(() -> service.tst_loads.get() == 1, Duration.ofSeconds(5)));
 
         assertNotNull(service.tst_stalled_resets.poll(5, TimeUnit.SECONDS));
@@ -243,7 +282,7 @@ public class DoerServiceTest {
         elsewhere.setInProgress(true);
         service.tst_task_from_db.add(elsewhere);
         service.tst_tasks_by_id.put(elsewhere.getId(), copyOf(elsewhere));
-        service.start(true);
+        service.start();
         // The load skips the task in progress on the other node, and the first re-check finds it unchanged
         assertTrue(waitUntil(() -> service.tst_loaded_ids.contains(elsewhere.getId()), Duration.ofSeconds(5)));
 
@@ -265,7 +304,7 @@ public class DoerServiceTest {
         Task first = inProgressElsewhere("S");
         Task second = inProgressElsewhere("S");
 
-        service.start(true);
+        service.start();
 
         Set<Long> loaded = service.tst_load_tasks_calls.poll(5, TimeUnit.SECONDS);
         assertEquals(Set.of(first.getId(), second.getId()), loaded);
@@ -285,7 +324,7 @@ public class DoerServiceTest {
                 assertTrue(release.await(10, TimeUnit.SECONDS));
             }
         };
-        service.start(true);
+        service.start();
         assertTrue(reCheckStarted.await(5, TimeUnit.SECONDS));
 
         // While the re-check of the first load waits for its query, the second load skips another task
@@ -312,7 +351,7 @@ public class DoerServiceTest {
     void stop__should_stop_planned_work() throws Exception {
         useThreadPool();
         service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
-        service.start(true);
+        service.start();
         waitUntilSchedulerWaits();
         int loads = service.tst_loads.get();
         // The reset is due, but nothing is told about it; no tick runs before stop
@@ -353,7 +392,7 @@ public class DoerServiceTest {
             };
             service.tst_task_from_db.addAll(List.of(first, second, third));
             // The load starts the three tasks in D1
-            service.start(false);
+            service.start();
             assertTrue(firstStarted.await(10, TimeUnit.SECONDS));
 
             // first is now in D2 with the status B: D2 has free slots, though D1 has none
@@ -493,7 +532,7 @@ public class DoerServiceTest {
         Task task = new Task();
         task.setId(nextTaskId++);
         task.setStatus(status);
-        Instant now = Instant.now();
+        Instant now = service.clock.instant();
         task.setCreated(now);
         task.setModified(now);
         return task;

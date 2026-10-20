@@ -50,7 +50,7 @@ public class ClusterTest {
             while (node1.runJob()) {
             }
         };
-        node1.start(false);
+        node1.start();
 
         while (node1.runJob()) {
         }
@@ -69,8 +69,8 @@ public class ClusterTest {
         for (int i = 0; i < TASKS; i++) {
             db.insert("A");
         }
-        node1.start(false);
-        node2.start(false);
+        node1.start();
+        node2.start();
 
         runJobsInTurn();
 
@@ -167,6 +167,8 @@ public class ClusterTest {
             this.db = db;
             setExecutor(jobs::add);
             setSelfReference(this);
+            // The timer is never fired: the test runs the jobs in turn
+            wakeUpTimerFactory = onWakeUp -> new ManualWakeUpTimer(onWakeUp, clock);
             setupConcurrencyDomain("D1", 2, Map.of("A", Duration.ZERO, "B", Duration.ZERO, "C", Duration.ZERO),
                     Map.of());
         }
