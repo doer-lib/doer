@@ -130,10 +130,6 @@ final class TaskQueues {
         return inProgress.containsKey(taskId);
     }
 
-    boolean hasTasksInProgress() {
-        return !inProgress.isEmpty();
-    }
-
     /**
      * LIMIT of each sub-queue for the next load. When a sub-queue is drained, or 80% of {@code queueReloadInterval}
      * has passed since the last load ({@code lastSelectTime}), the sub-queues used less than half are halved, but not
@@ -253,15 +249,20 @@ final class TaskQueues {
     }
 
     /**
-     * Earliest ready time of the first tasks of the sub-queues: {@link Instant#MIN} when an asap task is queued, null
-     * when all sub-queues are empty.
+     * Earliest ready time of the first tasks of the sub-queues of the domains with a free slot: {@link Instant#MIN}
+     * when such a domain has an asap task queued, null when their sub-queues are empty.
      */
-    Instant earliestReadyTime() {
+    Instant earliestReadyTimeOfFreeDomains() {
         Instant earliest = null;
-        for (SubQueue queue : queues) {
-            Instant readyTime = queue.headReadyTime();
-            if (readyTime != null && (earliest == null || readyTime.isBefore(earliest))) {
-                earliest = readyTime;
+        for (ConcurrencyDomain domain : domains) {
+            if (!domain.hasFreeSlot()) {
+                continue;
+            }
+            for (SubQueue queue : domain.queues()) {
+                Instant readyTime = queue.headReadyTime();
+                if (readyTime != null && (earliest == null || readyTime.isBefore(earliest))) {
+                    earliest = readyTime;
+                }
             }
         }
         return earliest;

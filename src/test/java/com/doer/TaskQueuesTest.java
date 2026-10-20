@@ -49,12 +49,10 @@ public class TaskQueuesTest {
 
         assertSame(task, taskQueues.startNext(domain, T0));
         assertTrue(taskQueues.isInProgress(task.getId()));
-        assertTrue(taskQueues.hasTasksInProgress());
         assertEquals(1, domain.inProgressCount());
 
         taskQueues.finish(task, domain);
         assertFalse(taskQueues.isInProgress(task.getId()));
-        assertFalse(taskQueues.hasTasksInProgress());
         assertEquals(0, domain.inProgressCount());
     }
 
@@ -272,16 +270,33 @@ public class TaskQueuesTest {
     }
 
     @Test
-    void earliestReadyTime__should_be_min_ready_time_of_first_tasks() {
+    void earliestReadyTimeOfFreeDomains__should_be_min_ready_time_of_first_tasks() {
         addDomain("D1", Map.of("A", Duration.ZERO, "B", Duration.ofSeconds(30), "C", Duration.ofSeconds(10)));
-        assertNull(taskQueues.earliestReadyTime());
+        assertNull(taskQueues.earliestReadyTimeOfFreeDomains());
 
         taskQueues.requeue(task("B", 0));
         taskQueues.requeue(task("C", 25));
-        assertEquals(T0.plusSeconds(30), taskQueues.earliestReadyTime());
+        assertEquals(T0.plusSeconds(30), taskQueues.earliestReadyTimeOfFreeDomains());
 
         taskQueues.requeue(task("A", 100));
-        assertEquals(Instant.MIN, taskQueues.earliestReadyTime());
+        assertEquals(Instant.MIN, taskQueues.earliestReadyTimeOfFreeDomains());
+    }
+
+    @Test
+    void earliestReadyTimeOfFreeDomains__should_skip_domains_without_free_slot() {
+        ConcurrencyDomain busy = addDomain("D1", "A");
+        addDomain("D2", Map.of("B", Duration.ofSeconds(30)));
+        taskQueues.requeue(task("A", 0));
+        taskQueues.requeue(task("A", 1));
+        taskQueues.requeue(task("A", 2));
+        taskQueues.requeue(task("B", 0));
+        assertEquals(Instant.MIN, taskQueues.earliestReadyTimeOfFreeDomains());
+
+        // The limit of D1 is 2
+        taskQueues.startNext(busy, T0);
+        taskQueues.startNext(busy, T0);
+
+        assertEquals(T0.plusSeconds(30), taskQueues.earliestReadyTimeOfFreeDomains());
     }
 
     private List<Integer> nextLimits(Instant lastSelectTime) {

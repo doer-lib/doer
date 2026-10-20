@@ -93,6 +93,16 @@ final class ConcurrencyDomain {
         return inProgress < limit;
     }
 
+    /** The head of a sub-queue is ready to run. */
+    boolean hasReadyTask(Instant now) {
+        for (SubQueue queue : queues) {
+            if (queue.isHeadReady(now)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     int freeSlots() {
         return limit - inProgress;
     }

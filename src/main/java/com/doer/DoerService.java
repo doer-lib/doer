@@ -24,8 +24,8 @@ import java.util.ServiceConfigurationError;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -35,7 +35,10 @@ import java.util.stream.Collectors;
 import javax.sql.DataSource;
 
 public abstract class DoerService {
-    private static final long MAX_MONITOR_TIMEOUT_MS = 60 * 1000;
+    /** Safety net: the scheduler wakes up at least this often, even when nothing is planned. */
+    private static final Duration MAX_WAKE_UP_DELAY = Duration.ofMinutes(1);
+    /** Work that is due but cannot be done now (a load is running) does not wake the scheduler more often. */
+    private static final Duration MIN_WAKE_UP_DELAY = Duration.ofMillis(100);
     protected static final Logger LOG = Logger.getLogger(DoerService.class.getName());
 
     /**
@@ -52,10 +55,14 @@ public abstract class DoerService {
     private DataSource dataSource;
 
     private boolean isRunning;
-    private QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
+    QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
 
     protected AtomicInteger dbTimeDiffMs = new AtomicInteger(0);
-    private final ConcurrentLinkedQueue<Task> reCheckTasks = new ConcurrentLinkedQueue<>();
+    /** Tasks skipped by the last load, to check again (see {@link TaskQueues#replaceFromDb}). Guarded by the lock. */
+    final List<Task> reCheckTasks = new ArrayList<>();
+    /** Number of the load that filled {@link #reCheckTasks}: the result of a re-check of an older load is dropped. */
+    private long loadGeneration;
+    private boolean reCheckRunning;
     private Instant lastReCheck;
 
     private final TaskQueues taskQueues = new TaskQueues();
@@ -64,8 +71,12 @@ public abstract class DoerService {
     Instant lastSelectTime;
     int maxAllQueuesSize = 10000;
     int minSingleQueueSize = 10;
-    boolean monitorEnabled;
-    Thread monitorThread;
+    /** Timer of the scheduler: exists between {@code start(true)} and {@code stop()}. */
+    WakeUpTimer wakeUpTimer;
+    /** How often the tasks skipped by the load are checked again. */
+    Duration reCheckInterval = Duration.ofSeconds(2);
+    /** A skipped task unchanged for this time after its modified is not checked again: the next load sees it. */
+    Duration reCheckWindow = Duration.ofSeconds(10);
     Duration stalledTaskCheckInterval = Duration.ofMinutes(30);
     Duration stalledTaskTimeout = Duration.ofHours(2);
     Instant lastStalledTaskChecked = Instant.now();
@@ -147,18 +158,28 @@ public abstract class DoerService {
     public void start(boolean enableMonitor) {
         synchronized (this) {
             isRunning = true;
-            monitorEnabled = enableMonitor;
-            triggerQueuesReload();
             if (!enableMonitor) {
-                this.notify();
+                stopWakeUpTimer();
+            } else if (wakeUpTimer == null) {
+                wakeUpTimer = new WakeUpTimer(this::wakeUp);
             }
+            triggerQueuesReload();
+            reschedule();
         }
     }
 
     public void stop() {
         synchronized (this) {
             isRunning = false;
-            this.notify();
+            stopWakeUpTimer();
+        }
+    }
+
+    /** Called under the lock. */
+    private void stopWakeUpTimer() {
+        if (wakeUpTimer != null) {
+            wakeUpTimer.shutdown();
+            wakeUpTimer = null;
         }
     }
 
@@ -320,73 +341,118 @@ public abstract class DoerService {
         }
     }
 
-    private void monitorIdleState() {
+    /** Called by the timer of the scheduler, in its thread: hands the tick to the executor. */
+    private void wakeUp() {
+        try {
+            executor.execute(this::onTick);
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "The executor rejected the tick of the scheduler. Next try in " + MAX_WAKE_UP_DELAY,
+                    e);
+            synchronized (this) {
+                if (isRunning && wakeUpTimer != null) {
+                    wakeUpTimer.wakeUpNoLaterThan(MAX_WAKE_UP_DELAY);
+                }
+            }
+        }
+    }
+
+    /**
+     * Does the work of the scheduler that is due (see {@link #nextWakeUp}) and plans the next wake-up. Runs in a thread
+     * of the executor: when the timer wakes up, after a load, or by hand ({@link #checkTasksBecomeReady}).
+     */
+    private void onTick() {
+        List<Long> reCheckIds = null;
+        long reCheckGeneration = 0;
         synchronized (this) {
-            if (!monitorEnabled || queuesReloadState != QueuesReloadState.IDLE || taskQueues.hasTasksInProgress() || monitorThread != null) {
+            if (!isRunning) {
                 return;
             }
-            monitorThread = Thread.currentThread();
-            String threadName = Thread.currentThread().getName();
-            Thread.currentThread().setName("doer-idle-monitor");
-            try {
-                long timeout = getNextCheckTime();
-                long waitTime = timeout > 0 ? timeout : 1000;
-                LOG.info("Next check after " + waitTime);
-                this.wait(waitTime);
-                executor.execute(this::onCheckTime);
-            } catch (InterruptedException e) {
-                LOG.log(Level.WARNING, "Monitoring thread interrupted", e);
-            } finally {
-                Thread.currentThread().setName(threadName);
-                monitorThread = null;
-            }
-        }
-    }
-
-    private long getNextCheckTime() {
-        synchronized (this) {
             Instant now = getDbNow();
-            if (lastSelectTime == null) {
-                return 0;
-            }
-            Instant nextCheckTime = lastSelectTime.plus(queueReloadInterval);
-            if (nextCheckTime.isBefore(now)) {
-                return 0;
-            }
-            Instant readyTime = taskQueues.earliestReadyTime();
-            if (readyTime != null) {
-                if (readyTime.equals(Instant.MIN)) {
-                    return 0;
-                }
-                if (readyTime.isBefore(nextCheckTime)) {
-                    nextCheckTime = readyTime;
-                }
-            }
-            if (stalledTaskCheckInterval != null) {
-                if (lastStalledTaskChecked == null) {
-                    return 0;
-                }
-                Instant stalledTaskCheckTime = lastStalledTaskChecked.plus(stalledTaskCheckInterval);
-                if (stalledTaskCheckTime.isBefore(nextCheckTime)) {
-                    nextCheckTime = stalledTaskCheckTime;
-                }
-            }
-            long ms = Duration.between(now, nextCheckTime).toMillis();
-            return Math.min(MAX_MONITOR_TIMEOUT_MS, Math.max(0, ms));
-        }
-    }
-
-    private void onCheckTime() {
-        synchronized (this) {
-            Instant now = getDbNow();
-            if (stalledTaskCheckInterval != null && lastStalledTaskChecked != null &&
-                    lastStalledTaskChecked.plus(stalledTaskCheckInterval).isBefore(now)) {
-                triggerStalledTaskReset();
-            } else if (lastSelectTime == null || lastSelectTime.plus(queueReloadInterval).isBefore(now)) {
+            if (isDue(reloadTime(), now)) {
                 triggerQueuesReload();
             }
-            checkTasksBecomeReady();
+            if (isDue(stalledTaskResetTime(), now)) {
+                lastStalledTaskChecked = now;
+                triggerStalledTaskReset();
+            }
+            if (isDue(reCheckTime(), now)) {
+                lastReCheck = now;
+                reCheckRunning = true;
+                reCheckIds = reCheckTasks.stream().map(Task::getId).toList();
+                reCheckGeneration = loadGeneration;
+            }
+            for (ConcurrencyDomain domain : taskQueues.domains()) {
+                if (domain.hasReadyTask(now)) {
+                    for (int i = 0; i < domain.freeSlots(); i++) {
+                        executor.execute(() -> processNextTask(domain));
+                    }
+                }
+            }
         }
+        if (reCheckIds != null) {
+            reCheck(reCheckIds, reCheckGeneration);
+        }
+        synchronized (this) {
+            reschedule();
+        }
+    }
+
+    /**
+     * Called under the lock. The earliest time some work of {@link #onTick} is due, at most {@link #MAX_WAKE_UP_DELAY}
+     * from now; {@link Instant#MIN} when a task is ready.
+     */
+    private Instant nextWakeUp(Instant now) {
+        Instant next = now.plus(MAX_WAKE_UP_DELAY);
+        next = earlier(next, reloadTime());
+        next = earlier(next, stalledTaskResetTime());
+        next = earlier(next, reCheckTime());
+        next = earlier(next, taskQueues.earliestReadyTimeOfFreeDomains());
+        return next;
+    }
+
+    /** Called under the lock. Moves the wake-up of the scheduler earlier when some work is due earlier. */
+    private void reschedule() {
+        if (!isRunning || wakeUpTimer == null) {
+            return;
+        }
+        Instant now = getDbNow();
+        Duration delay = Duration.between(now, nextWakeUp(now));
+        wakeUpTimer.wakeUpNoLaterThan(delay.compareTo(MIN_WAKE_UP_DELAY) < 0 ? MIN_WAKE_UP_DELAY : delay);
+    }
+
+    /** Called under the lock. When the periodic load is due; null while a load is scheduled or running. */
+    private Instant reloadTime() {
+        if (queuesReloadState != QueuesReloadState.IDLE) {
+            return null;
+        }
+        return lastSelectTime == null ? Instant.MIN : lastSelectTime.plus(queueReloadInterval);
+    }
+
+    /** Called under the lock. When the reset of stalled tasks is due; null when it is turned off. */
+    private Instant stalledTaskResetTime() {
+        if (stalledTaskCheckInterval == null) {
+            return null;
+        }
+        return lastStalledTaskChecked == null ? Instant.MIN : lastStalledTaskChecked.plus(stalledTaskCheckInterval);
+    }
+
+    /**
+     * Called under the lock. When the re-check of the tasks skipped by the load is due; null when there are none, or a
+     * re-check is running.
+     */
+    private Instant reCheckTime() {
+        if (reCheckTasks.isEmpty() || reCheckRunning) {
+            return null;
+        }
+        return lastReCheck == null ? Instant.MIN : lastReCheck.plus(reCheckInterval);
+    }
+
+    private static boolean isDue(Instant time, Instant now) {
+        return time != null && !time.isAfter(now);
+    }
+
+    private static Instant earlier(Instant time, Instant other) {
+        return other != null && other.isBefore(time) ? other : time;
     }
 
     private void reloadQueuedTask(long taskId) {
@@ -394,18 +460,7 @@ public abstract class DoerService {
             Task task = self().loadTask(taskId);
             if (task != null && !task.isInProgress()) {
                 synchronized (this) {
-                    if (taskQueues.isInProgress(taskId)) {
-                        taskQueues.reloadWhenFinished(taskId);
-                        return;
-                    }
-                    ConcurrencyDomain domain = taskQueues.replaceTask(task);
-                    if (domain != null) {
-                        // The idle monitor waits for the checks planned before this task: wake it to plan again
-                        this.notify();
-                        if (domain.hasFreeSlot()) {
-                            executor.execute(() -> processNextTask(domain));
-                        }
-                    }
+                    replaceQueuedTask(task);
                 }
             }
         } catch (SQLException e) {
@@ -414,55 +469,66 @@ public abstract class DoerService {
         }
     }
 
-    private void reCheckTask() {
-        if (reCheckTasks.isEmpty()) {
+    /**
+     * Called under the lock. Puts the task loaded from the database to the queues in place of its queued copy, or
+     * reloads it when it finishes, if it runs here.
+     */
+    private void replaceQueuedTask(Task task) {
+        if (taskQueues.isInProgress(task.getId())) {
+            taskQueues.reloadWhenFinished(task.getId());
             return;
         }
+        ConcurrencyDomain domain = taskQueues.replaceTask(task);
+        if (domain != null) {
+            if (domain.hasFreeSlot()) {
+                executor.execute(() -> processNextTask(domain));
+            }
+            reschedule();
+        }
+    }
+
+    /**
+     * Re-checks the tasks skipped by the load (see {@link TaskQueues#replaceFromDb}) with one query, outside the lock.
+     * The result is dropped when a new load has replaced the tasks to re-check meanwhile.
+     */
+    private void reCheck(List<Long> ids, long generation) {
+        Map<Long, Task> dbTasks = null;
+        try {
+            dbTasks = self().loadTasks(ids);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to load tasks for re-check", e);
+        }
         synchronized (this) {
-            if (!isRunning) {
+            reCheckRunning = false;
+            if (dbTasks == null || generation != loadGeneration || !isRunning) {
                 return;
             }
-            if (lastReCheck != null) {
-                Duration breakBetweenChecks = Duration.ofSeconds(2);
-                Instant earliestNextCheckTime = lastReCheck.plus(breakBetweenChecks);
-                if (Instant.now().isBefore(earliestNextCheckTime)) {
-                    return;
-                }
-            }
-            lastReCheck = Instant.now();
-        }
-        try {
+            Instant now = getDbNow();
             Iterator<Task> iterator = reCheckTasks.iterator();
             while (iterator.hasNext()) {
                 Task task = iterator.next();
-                Task dbTask = self().loadTask(task.getId());
+                Task dbTask = dbTasks.get(task.getId());
                 if (dbTask == null) {
                     iterator.remove();
                 } else if (dbTask.getVersion() > task.getVersion()) {
                     iterator.remove();
-                    self().triggerTaskReloadFromDb(task.getId());
-                } else if (getDbNow().isAfter(dbTask.getModified().plusSeconds(10))) {
+                    if (!dbTask.isInProgress()) {
+                        replaceQueuedTask(dbTask);
+                    }
+                } else if (now.isAfter(dbTask.getModified().plus(reCheckWindow))) {
                     iterator.remove();
                 }
             }
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to load task for re-check", e);
         }
     }
 
-    // todo consider to make private
+    /**
+     * Does the work of the scheduler that is due now: starts the ready tasks, loads the queues, resets stalled tasks,
+     * re-checks the tasks skipped by the load. Called after each load, and by hand when the service runs without the
+     * timer ({@code start(false)}).
+     */
     public void checkTasksBecomeReady() {
-        reCheckTask();
-        synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            for (ConcurrencyDomain domain : taskQueues.domains()) {
-                if (domain.hasFreeSlot()) {
-                    executor.execute(() -> processNextTask(domain));
-                }
-            }
-        }
+        onTick();
     }
 
     /** Public only for the @Transactional override in the generated service: use {@link #triggerQueuesReload}. */
@@ -478,6 +544,7 @@ public abstract class DoerService {
                         maxAllQueuesSize);
                 lastReCheck = null;
                 reCheckTasks.clear();
+                loadGeneration++;
                 lastSelectTime = getDbNow();
             }
             List<Task> tasksFromDb = self().loadTasksFromDatabase(limits);
@@ -766,10 +833,19 @@ public abstract class DoerService {
         }
     }
 
+    /** Resets stalled tasks in a thread of the executor, and loads the queues when any task was reset. */
     public void triggerStalledTaskReset() {
         executor.execute(() -> {
+            synchronized (this) {
+                if (!isRunning) {
+                    return;
+                }
+            }
             try {
-                self().resetStalledInProgressTasks(stalledTaskTimeout);
+                if (self().resetStalledInProgressTasks(stalledTaskTimeout) > 0) {
+                    // The reset tasks are queued now, not by the next periodic load
+                    triggerQueuesReload();
+                }
             } catch (SQLException e) {
                 LOG.log(Level.WARNING, "Error resetting stalled tasks", e);
             }
@@ -842,13 +918,11 @@ public abstract class DoerService {
             }
             task = taskQueues.startNext(domain, getDbNow());
             if (task == null) {
-                executor.execute(this::monitorIdleState);
                 return;
             }
             if (domain.hasDrainedQueue()) {
                 triggerQueuesReload();
             }
-            this.notify();
         }
         boolean processedSuccessfully = false;
         String threadName = Thread.currentThread().getName();
@@ -867,24 +941,18 @@ public abstract class DoerService {
             synchronized (this) {
                 boolean reloadRequested = taskQueues.finish(task, domain);
                 if (processedSuccessfully) {
-                    boolean nextProcessingStarted = false;
                     ConcurrencyDomain newDomain = taskQueues.requeue(task);
                     if (newDomain != null) {
                         int nNew = newDomain.freeSlots();
                         for (int i = 0; i < nNew; i++) {
                             executor.execute(() -> processNextTask(newDomain));
-                            nextProcessingStarted = true;
                         }
                     }
                     if (newDomain != domain) {
                         int nOld = domain.freeSlots();
                         for (int i = 0; i < nOld; i++) {
                             executor.execute(() -> processNextTask(domain));
-                            nextProcessingStarted = true;
                         }
-                    }
-                    if (!nextProcessingStarted && !taskQueues.hasTasksInProgress()) {
-                        executor.execute(this::monitorIdleState);
                     }
                 } else {
                     // When any task failed in concurrencyDomain we don't start all possible
@@ -894,6 +962,8 @@ public abstract class DoerService {
                 if (reloadRequested) {
                     triggerTaskReloadFromDb(task.getId());
                 }
+                // The task may be queued with a delay, and the slot of a domain is free
+                reschedule();
             }
         }
     }
@@ -952,7 +1022,7 @@ public abstract class DoerService {
         }
     }
 
-    private enum QueuesReloadState {
+    enum QueuesReloadState {
         IDLE,
         SCHEDULED,
         RUNNING,

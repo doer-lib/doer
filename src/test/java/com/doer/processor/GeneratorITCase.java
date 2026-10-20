@@ -113,6 +113,56 @@ public class GeneratorITCase implements InWorkspace {
     }
 
     @Test
+    void generated_service__should_stop_scheduler_when_bean_is_destroyed() throws Exception {
+        writeSource("Doer1.java", """
+                package demo.test;
+                import com.doer.*;
+                public class Doer1 {
+                    @AcceptStatus("A")
+                    public void method1(Task task) {}
+                }
+                """);
+        writeSource("TestDoerService.java", TEST_DOER_SERVICE);
+        writeSource("Main.java", """
+                package demo.test;
+                import com.doer.generated._GeneratedDoerService;
+                import jakarta.annotation.PreDestroy;
+                public class Main {
+                    public static void main(String[] args) throws Exception {
+                        System.out.println("@PreDestroy: " + _GeneratedDoerService.class.getMethod("_destroy")
+                                .isAnnotationPresent(PreDestroy.class));
+                        var doer = new TestDoerService();
+                        doer.setExecutor(job -> {});
+                        doer.start(true);
+                        System.out.println("started: " + schedulerThreads());
+                        doer._destroy();
+                        long deadline = System.currentTimeMillis() + 5000;
+                        while (schedulerThreads() > 0 && System.currentTimeMillis() < deadline) {
+                            Thread.sleep(20);
+                        }
+                        System.out.println("destroyed: " + schedulerThreads());
+                        doer.stop();
+                        System.out.println("stopped again: " + schedulerThreads());
+                    }
+                    static long schedulerThreads() {
+                        return Thread.getAllStackTraces().keySet().stream()
+                                .filter(t -> t.getName().equals("doer-scheduler") && t.isAlive()).count();
+                    }
+                }
+                """);
+        javac("Doer1.java", "TestDoerService.java", "Main.java").assertStatus(0);
+
+        var result = java("demo.test.Main").assertStatus(0);
+
+        assertEquals("""
+                @PreDestroy: true
+                started: 1
+                destroyed: 0
+                stopped again: 0
+                """, result.stdOut());
+    }
+
+    @Test
     void AcceptStatus__should_call_one_doer_method_for_several_statuses() throws Exception {
         writeSource("Doer1.java", """
                 package demo.test;
