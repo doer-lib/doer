@@ -132,12 +132,12 @@ final class TaskQueues {
 
     /**
      * LIMIT of each sub-queue for the next load. When a sub-queue is drained, or 80% of {@code queueReloadInterval}
-     * has passed since the last load ({@code lastSelectTime}), the sub-queues used less than half are halved, but not
-     * below {@code minSingleQueueSize}. When a sub-queue is drained before that, the first drained one is doubled,
-     * unless all sub-queues would get more than {@code maxAllQueuesSize}.
+     * has passed since the last load ({@code lastQueueSelectTime}), the sub-queues used less than half are halved, but
+     * not below {@code minQueueSize}. When a sub-queue is drained before that, the first drained one is doubled, unless
+     * all sub-queues would get more than {@code maxTotalQueueSize}.
      */
-    List<Integer> nextLimits(Instant now, Instant lastSelectTime, Duration queueReloadInterval, int minSingleQueueSize,
-            int maxAllQueuesSize) {
+    List<Integer> nextLimits(Instant now, Instant lastQueueSelectTime, Duration queueReloadInterval, int minQueueSize,
+            int maxTotalQueueSize) {
         int drainedIndex = -1;
         for (int i = 0; i < queues.size(); i++) {
             if (queues.get(i).isDrained()) {
@@ -146,20 +146,21 @@ final class TaskQueues {
             }
         }
         boolean hasDrainedQueue = drainedIndex >= 0;
-        Duration queueUsageTime = (lastSelectTime == null ? Duration.ZERO : Duration.between(lastSelectTime, now));
+        Duration queueUsageTime = (lastQueueSelectTime == null ? Duration.ZERO
+                : Duration.between(lastQueueSelectTime, now));
         boolean queueIsUsed80PercentOfReloadTime = (queueUsageTime
                 .compareTo(queueReloadInterval.dividedBy(10).multipliedBy(8)) >= 0);
 
         List<Integer> limits = new ArrayList<>();
         int totalQueuesSize = 0;
         for (SubQueue queue : queues) {
-            int limit = queue.nextLimit(queueIsUsed80PercentOfReloadTime || hasDrainedQueue, minSingleQueueSize);
+            int limit = queue.nextLimit(queueIsUsed80PercentOfReloadTime || hasDrainedQueue, minQueueSize);
             limits.add(limit);
             totalQueuesSize += limit;
         }
         if (!queueIsUsed80PercentOfReloadTime && hasDrainedQueue) {
             int drainedQueueSize = queues.get(drainedIndex).capacity();
-            if (totalQueuesSize + drainedQueueSize <= maxAllQueuesSize) {
+            if (totalQueuesSize + drainedQueueSize <= maxTotalQueueSize) {
                 limits.set(drainedIndex, drainedQueueSize * 2);
             }
         }
@@ -182,14 +183,14 @@ final class TaskQueues {
         LOG.info("Limits: " + limits);
         LOG.info("Loads: " + rowsByQueue.stream().map(List::size).collect(Collectors.toList()));
 
-        List<Task> toReCheck = new ArrayList<>();
+        List<Task> tasksWithUncertainState = new ArrayList<>();
         Set<Task> notQueued = Collections.newSetFromMap(new IdentityHashMap<>());
         Map<Long, Task> queuedTasks = queuedTasks();
         for (Task row : rows) {
             Task queued = queuedTasks.get(row.getId());
             if (queued != null && queued.getVersion() > row.getVersion()) {
                 LOG.info("Newer task " + row.getId() + " " + row.getModified());
-                toReCheck.add(row);
+                tasksWithUncertainState.add(row);
                 notQueued.add(row);
             } else if (inProgress.containsKey(row.getId())) {
                 LOG.info("Skipped In progress " + row.getId() + " " + row.getModified());
@@ -197,7 +198,7 @@ final class TaskQueues {
                 reloadWhenFinished(row.getId());
             } else if (row.isInProgress()) {
                 LOG.info("Skipped DB In progress " + row.getId() + " " + row.getModified());
-                toReCheck.add(row);
+                tasksWithUncertainState.add(row);
                 notQueued.add(row);
             }
         }
@@ -212,7 +213,7 @@ final class TaskQueues {
             }
             queues.get(i).replace(buffer, limits.get(i), loaded.size(), minQueueSize);
         }
-        return toReCheck;
+        return tasksWithUncertainState;
     }
 
     /**
