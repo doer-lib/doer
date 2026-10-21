@@ -47,8 +47,8 @@ import javax.sql.DataSource;
  * queues every {@link #queueReloadInterval}, checks again the tasks a load skipped, and resets stalled tasks. Its timer
  * ({@link WakeUpTimer}) only hands the tick to the executor. See scheduler-refactoring-design.md.
  * <p>
- * The state of the queues, the scheduler, the re-check and the stalled tasks is guarded by the lock of this object;
- * the queries run outside it. All times are times of the database ({@link #getDbNow}).
+ * The state of the queues, the scheduler, the reconciliation and the stalled tasks is guarded by the lock of this
+ * object; the queries run outside it. All times are times of the database ({@link #getDbNow}).
  * <p>
  * The package-private fields are settings with their defaults, and hooks for the tests of {@code com.doer} (the
  * clock, the timer): the tests set them before {@link #start}.
@@ -90,15 +90,15 @@ public abstract class DoerService {
     // Queue loading: configuration
 
     Duration queueReloadInterval = Duration.ofMinutes(10);
-    int maxAllQueuesSize = 10000;
-    int minSingleQueueSize = 10;
+    int maxTotalQueueSize = 10000;
+    int minQueueSize = 10;
 
     // Queue loading: state
 
     private final TaskQueues taskQueues = new TaskQueues();
     QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
     /** Set before the select of each load, also of a load that fails. */
-    Instant lastSelectTime;
+    Instant lastQueueSelectTime;
     /**
      * Tasks queued while a load runs: the load may have selected before they changed, and drop them with the buffers it
      * replaces, so they are reloaded when it ends.
@@ -111,20 +111,23 @@ public abstract class DoerService {
     /** Exists between {@link #start} and {@link #stop}. */
     WakeUpTimer wakeUpTimer;
 
-    // Re-check: configuration
+    // Reconciliation: configuration
 
-    Duration reCheckInterval = Duration.ofSeconds(2);
+    Duration reconciliationInterval = Duration.ofSeconds(2);
     /** A skipped task unchanged for this time after its modified is not checked again: the next load sees it. */
-    Duration reCheckWindow = Duration.ofSeconds(10);
+    Duration reconciliationWindow = Duration.ofSeconds(10);
 
-    // Re-check: state
+    // Reconciliation: state
 
     /** Tasks skipped by the last load, to check again (see {@link TaskQueues#replaceFromDb}). */
-    final List<Task> reCheckTasks = new ArrayList<>();
-    /** Number of the load that filled {@link #reCheckTasks}: the result of a re-check of an older load is dropped. */
-    private long loadGeneration;
-    private boolean reCheckRunning;
-    private Instant lastReCheck;
+    final List<Task> tasksWithUncertainState = new ArrayList<>();
+    /**
+     * Number of the load that filled {@link #tasksWithUncertainState}: the result of a reconciliation of an older load
+     * is dropped.
+     */
+    private long queueLoadGeneration;
+    private boolean reconciliationInProgress;
+    private Instant lastReconciliationTime;
 
     // Stalled tasks: configuration
 
@@ -134,7 +137,7 @@ public abstract class DoerService {
     // Stalled tasks: state
 
     /** Set by the first start: the first reset is due {@link #stalledTaskCheckInterval} after it. */
-    Instant lastStalledTaskChecked;
+    Instant lastStalledTaskCheckTime;
 
     public DoerService getSelfReference() {
         return self();
@@ -185,20 +188,20 @@ public abstract class DoerService {
         this.dataSource = dataSource;
     }
 
-    public void setMaxAllQueuesSize(int value) {
-        maxAllQueuesSize = value;
+    public void setMaxTotalQueueSize(int value) {
+        maxTotalQueueSize = value;
     }
 
-    public int getMaxAllQueuesSize() {
-        return maxAllQueuesSize;
+    public int getMaxTotalQueueSize() {
+        return maxTotalQueueSize;
     }
 
-    public void setMinSingleQueueSize(int value) {
-        minSingleQueueSize = value;
+    public void setMinQueueSize(int value) {
+        minQueueSize = value;
     }
 
-    public int getMinSingleQueueSize() {
-        return minSingleQueueSize;
+    public int getMinQueueSize() {
+        return minQueueSize;
     }
 
     public void setQueueReloadInterval(Duration value) {
@@ -220,8 +223,8 @@ public abstract class DoerService {
             if (wakeUpTimer == null) {
                 wakeUpTimer = wakeUpTimerFactory.apply(this::wakeUp);
             }
-            if (lastStalledTaskChecked == null) {
-                lastStalledTaskChecked = getDbNow();
+            if (lastStalledTaskCheckTime == null) {
+                lastStalledTaskCheckTime = getDbNow();
             }
             triggerQueuesReload();
             reschedule();
@@ -416,7 +419,7 @@ public abstract class DoerService {
 
     protected void setupConcurrencyDomain(String name, int limit, Map<String, Duration> delays, Map<String, Duration> retryDelays) {
         synchronized (this) {
-            taskQueues.addDomain(name, limit, delays, retryDelays, minSingleQueueSize);
+            taskQueues.addDomain(name, limit, delays, retryDelays, minQueueSize);
         }
     }
 
@@ -440,8 +443,8 @@ public abstract class DoerService {
      * of the executor: when the timer wakes up, and after each load.
      */
     private void onTick() {
-        List<Long> reCheckIds = null;
-        long reCheckGeneration = 0;
+        List<Long> reconciliationIds = null;
+        long reconciliationGeneration = 0;
         synchronized (this) {
             if (!isRunning) {
                 return;
@@ -451,14 +454,14 @@ public abstract class DoerService {
                 triggerQueuesReload();
             }
             if (isDue(stalledTaskResetTime(), now)) {
-                lastStalledTaskChecked = now;
+                lastStalledTaskCheckTime = now;
                 triggerStalledTaskReset();
             }
-            if (isDue(reCheckTime(), now)) {
-                lastReCheck = now;
-                reCheckRunning = true;
-                reCheckIds = reCheckTasks.stream().map(Task::getId).toList();
-                reCheckGeneration = loadGeneration;
+            if (isDue(reconciliationTime(), now)) {
+                lastReconciliationTime = now;
+                reconciliationInProgress = true;
+                reconciliationIds = tasksWithUncertainState.stream().map(Task::getId).toList();
+                reconciliationGeneration = queueLoadGeneration;
             }
             for (ConcurrencyDomain domain : taskQueues.domains()) {
                 if (domain.hasReadyTask(now)) {
@@ -468,8 +471,8 @@ public abstract class DoerService {
                 }
             }
         }
-        if (reCheckIds != null) {
-            reCheck(reCheckIds, reCheckGeneration);
+        if (reconciliationIds != null) {
+            reconcile(reconciliationIds, reconciliationGeneration);
         }
         synchronized (this) {
             reschedule();
@@ -484,7 +487,7 @@ public abstract class DoerService {
         Instant next = now.plus(MAX_WAKE_UP_DELAY);
         next = earlier(next, reloadTime());
         next = earlier(next, stalledTaskResetTime());
-        next = earlier(next, reCheckTime());
+        next = earlier(next, reconciliationTime());
         next = earlier(next, taskQueues.earliestReadyTimeOfFreeDomains());
         return next;
     }
@@ -504,7 +507,7 @@ public abstract class DoerService {
         if (queuesReloadState != QueuesReloadState.IDLE) {
             return null;
         }
-        return lastSelectTime == null ? Instant.MIN : lastSelectTime.plus(queueReloadInterval);
+        return lastQueueSelectTime == null ? Instant.MIN : lastQueueSelectTime.plus(queueReloadInterval);
     }
 
     /** Called under the lock. When the reset of stalled tasks is due; null when it is turned off. */
@@ -512,18 +515,18 @@ public abstract class DoerService {
         if (stalledTaskCheckInterval == null) {
             return null;
         }
-        return lastStalledTaskChecked == null ? Instant.MIN : lastStalledTaskChecked.plus(stalledTaskCheckInterval);
+        return lastStalledTaskCheckTime == null ? Instant.MIN : lastStalledTaskCheckTime.plus(stalledTaskCheckInterval);
     }
 
     /**
-     * Called under the lock. When the re-check of the tasks skipped by the load is due; null when there are none, or a
-     * re-check is running.
+     * Called under the lock. When the reconciliation of the tasks skipped by the load is due; null when there are none,
+     * or a reconciliation is running.
      */
-    private Instant reCheckTime() {
-        if (reCheckTasks.isEmpty() || reCheckRunning) {
+    private Instant reconciliationTime() {
+        if (tasksWithUncertainState.isEmpty() || reconciliationInProgress) {
             return null;
         }
-        return lastReCheck == null ? Instant.MIN : lastReCheck.plus(reCheckInterval);
+        return lastReconciliationTime == null ? Instant.MIN : lastReconciliationTime.plus(reconciliationInterval);
     }
 
     private static boolean isDue(Instant time, Instant now) {
@@ -567,23 +570,23 @@ public abstract class DoerService {
     }
 
     /**
-     * Re-checks the tasks skipped by the load (see {@link TaskQueues#replaceFromDb}) with one query, outside the lock.
-     * The result is dropped when a new load has replaced the tasks to re-check meanwhile.
+     * Reconciles the tasks skipped by the load (see {@link TaskQueues#replaceFromDb}) with one query, outside the lock.
+     * The result is dropped when a new load has replaced the tasks to reconcile meanwhile.
      */
-    private void reCheck(List<Long> ids, long generation) {
+    private void reconcile(List<Long> ids, long generation) {
         Map<Long, Task> dbTasks = null;
         try {
             dbTasks = self().loadTasks(ids);
         } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to load tasks for re-check", e);
+            LOG.log(Level.WARNING, "Failed to load tasks for reconciliation", e);
         }
         synchronized (this) {
-            reCheckRunning = false;
-            if (dbTasks == null || generation != loadGeneration || !isRunning) {
+            reconciliationInProgress = false;
+            if (dbTasks == null || generation != queueLoadGeneration || !isRunning) {
                 return;
             }
             Instant now = getDbNow();
-            Iterator<Task> iterator = reCheckTasks.iterator();
+            Iterator<Task> iterator = tasksWithUncertainState.iterator();
             while (iterator.hasNext()) {
                 Task task = iterator.next();
                 Task dbTask = dbTasks.get(task.getId());
@@ -594,7 +597,7 @@ public abstract class DoerService {
                     if (!dbTask.isInProgress()) {
                         replaceQueuedTask(dbTask);
                     }
-                } else if (now.isAfter(dbTask.getModified().plus(reCheckWindow))) {
+                } else if (now.isAfter(dbTask.getModified().plus(reconciliationWindow))) {
                     iterator.remove();
                 }
             }
@@ -610,20 +613,20 @@ public abstract class DoerService {
                     return;
                 }
                 queuesReloadState = QueuesReloadState.RUNNING;
-                limits = taskQueues.nextLimits(getDbNow(), lastSelectTime, queueReloadInterval, minSingleQueueSize,
-                        maxAllQueuesSize);
-                lastReCheck = null;
-                reCheckTasks.clear();
-                loadGeneration++;
-                lastSelectTime = getDbNow();
+                limits = taskQueues.nextLimits(getDbNow(), lastQueueSelectTime, queueReloadInterval, minQueueSize,
+                        maxTotalQueueSize);
+                lastReconciliationTime = null;
+                tasksWithUncertainState.clear();
+                queueLoadGeneration++;
+                lastQueueSelectTime = getDbNow();
             }
             List<Task> tasksFromDb = self().loadTasksFromDatabase(limits);
             String infoMessage;
             synchronized (this) {
                 if (isRunning) {
-                    reCheckTasks.addAll(taskQueues.replaceFromDb(limits, tasksFromDb, minSingleQueueSize));
+                    tasksWithUncertainState.addAll(taskQueues.replaceFromDb(limits, tasksFromDb, minQueueSize));
                     LOG.info("Tasks to reload later: "
-                            + reCheckTasks.stream().map(Task::getId).collect(Collectors.toList()));
+                            + tasksWithUncertainState.stream().map(Task::getId).collect(Collectors.toList()));
                     infoMessage = "Queues Loaded (limit/loaded): " + taskQueues.describeLoad(limits);
                 } else {
                     infoMessage = "Queues Loaded but skipped. Because DoerService was stopped";
@@ -936,7 +939,7 @@ public abstract class DoerService {
             throw new IllegalArgumentException("Stalled tasks timeout should be a positive duration");
         }
         synchronized (this) {
-            lastStalledTaskChecked = getDbNow();
+            lastStalledTaskCheckTime = getDbNow();
         }
         try (Connection con = getConnection()) {
             Instant treshold = getDbNow().minus(timeout);

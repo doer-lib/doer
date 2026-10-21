@@ -16,7 +16,7 @@ public class TaskQueuesTest {
     static final Instant T0 = Instant.parse("2026-01-01T00:00:00Z");
     static final Duration RELOAD_INTERVAL = Duration.ofMinutes(10);
     static final int MIN_QUEUE_SIZE = 2;
-    static final int MAX_ALL_QUEUES_SIZE = 100;
+    static final int MAX_TOTAL_QUEUE_SIZE = 100;
 
     TaskQueues taskQueues = new TaskQueues();
     long nextTaskId = 1000;
@@ -171,9 +171,9 @@ public class TaskQueuesTest {
         Task failing = task("A", 5);
         failing.setFailingSince(T0);
 
-        List<Task> toReCheck = taskQueues.replaceFromDb(List.of(4, 10), List.of(a2, failing, a1), 2);
+        List<Task> tasksWithUncertainState = taskQueues.replaceFromDb(List.of(4, 10), List.of(a2, failing, a1), 2);
 
-        assertEquals(List.of(), toReCheck);
+        assertEquals(List.of(), tasksWithUncertainState);
         assertEquals(List.of(a1, a2), List.copyOf(domain.queues().get(0).tasks()));
         assertEquals(List.of(failing), List.copyOf(domain.queues().get(1).tasks()));
         assertEquals("4/2, 10/1", taskQueues.describeLoad(List.of(4, 10)));
@@ -194,15 +194,16 @@ public class TaskQueuesTest {
     }
 
     @Test
-    void replaceFromDb__should_return_rows_in_progress_in_db_to_recheck() {
+    void replaceFromDb__should_return_rows_in_progress_in_db_with_uncertain_state() {
         ConcurrencyDomain domain = addDomain("D1", "A");
         Task queued = task("A", 10);
         Task inProgressInDb = task("A", 5);
         inProgressInDb.setInProgress(true);
 
-        List<Task> toReCheck = taskQueues.replaceFromDb(List.of(2, 2), List.of(inProgressInDb, queued), 2);
+        List<Task> tasksWithUncertainState = taskQueues.replaceFromDb(List.of(2, 2), List.of(inProgressInDb, queued),
+                2);
 
-        assertEquals(List.of(inProgressInDb), toReCheck);
+        assertEquals(List.of(inProgressInDb), tasksWithUncertainState);
         assertEquals(List.of(queued), List.copyOf(domain.queues().get(0).tasks()));
     }
 
@@ -235,9 +236,10 @@ public class TaskQueuesTest {
         Task olderRow = copy(queued, 1);
         Task newRow = task("A", 20);
 
-        List<Task> toReCheck = taskQueues.replaceFromDb(List.of(10, 10), List.of(runningRow, olderRow, newRow), 2);
+        List<Task> tasksWithUncertainState = taskQueues.replaceFromDb(List.of(10, 10),
+                List.of(runningRow, olderRow, newRow), 2);
 
-        assertEquals(List.of(olderRow), toReCheck);
+        assertEquals(List.of(olderRow), tasksWithUncertainState);
         assertEquals(List.of(newRow), List.copyOf(domain.queues().get(0).tasks()));
     }
 
@@ -299,8 +301,8 @@ public class TaskQueuesTest {
         assertEquals(T0.plusSeconds(30), taskQueues.earliestReadyTimeOfFreeDomains());
     }
 
-    private List<Integer> nextLimits(Instant lastSelectTime) {
-        return taskQueues.nextLimits(T0, lastSelectTime, RELOAD_INTERVAL, MIN_QUEUE_SIZE, MAX_ALL_QUEUES_SIZE);
+    private List<Integer> nextLimits(Instant lastQueueSelectTime) {
+        return taskQueues.nextLimits(T0, lastQueueSelectTime, RELOAD_INTERVAL, MIN_QUEUE_SIZE, MAX_TOTAL_QUEUE_SIZE);
     }
 
     /** Domain with limit 2 whose statuses are processed as soon as possible. */

@@ -100,7 +100,7 @@ public class DoerServiceTest {
 
     @Test
     void start__should_reloadQueues_and_start_processing_loaded_tasks() throws Exception {
-        service.setMinSingleQueueSize(5);
+        service.setMinQueueSize(5);
         {
             // 3 queues (asap, delayed 2 min, retry 5 min)
             HashMap<String, Duration> delays = new HashMap<>();
@@ -130,7 +130,7 @@ public class DoerServiceTest {
 
     @Test
     void reloadQueues__should_increase_limit() throws Exception {
-        service.setMinSingleQueueSize(2);
+        service.setMinQueueSize(2);
         {
             HashMap<String, Duration> delays = new HashMap<>();
             delays.put("A", Duration.ZERO);
@@ -283,7 +283,7 @@ public class DoerServiceTest {
         service.tst_task_from_db.add(elsewhere);
         service.tst_tasks_by_id.put(elsewhere.getId(), copyOf(elsewhere));
         service.start();
-        // The load skips the task in progress on the other node, and the first re-check finds it unchanged
+        // The load skips the task in progress on the other node, and the first reconciliation finds it unchanged
         assertTrue(waitUntil(() -> service.tst_loaded_ids.contains(elsewhere.getId()), Duration.ofSeconds(5)));
 
         // The other node finishes its step
@@ -298,7 +298,7 @@ public class DoerServiceTest {
     }
 
     @Test
-    void scheduler__should_re_check_skipped_tasks_with_one_query_outside_lock() throws Exception {
+    void scheduler__should_reconcile_skipped_tasks_with_one_query_outside_lock() throws Exception {
         useThreadPool();
         service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
         Task first = inProgressElsewhere("S");
@@ -312,27 +312,27 @@ public class DoerServiceTest {
     }
 
     @Test
-    void scheduler__should_drop_re_check_of_older_load() throws Exception {
+    void scheduler__should_drop_reconciliation_of_older_load() throws Exception {
         useThreadPool();
         service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
         inProgressElsewhere("S");
-        CountDownLatch reCheckStarted = new CountDownLatch(1);
+        CountDownLatch reconciliationStarted = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         service.tst_on_load_tasks = ids -> {
-            if (reCheckStarted.getCount() > 0) {
-                reCheckStarted.countDown();
+            if (reconciliationStarted.getCount() > 0) {
+                reconciliationStarted.countDown();
                 assertTrue(release.await(10, TimeUnit.SECONDS));
             }
         };
         service.start();
-        assertTrue(reCheckStarted.await(5, TimeUnit.SECONDS));
+        assertTrue(reconciliationStarted.await(5, TimeUnit.SECONDS));
 
-        // While the re-check of the first load waits for its query, the second load skips another task
+        // While the reconciliation of the first load waits for its query, the second load skips another task
         Task next = inProgressElsewhere("S");
         service.triggerQueuesReload();
         assertTrue(waitUntil(() -> {
             synchronized (service) {
-                return service.reCheckTasks.stream().anyMatch(t -> t.getId() == next.getId());
+                return service.tasksWithUncertainState.stream().anyMatch(t -> t.getId() == next.getId());
             }
         }, Duration.ofSeconds(5)));
         // The other node finishes it
@@ -340,11 +340,11 @@ public class DoerServiceTest {
         finished.setInProgress(false);
         finished.setVersion(next.getVersion() + 1);
         service.tst_tasks_by_id.put(finished.getId(), finished);
-        // The query of the first re-check returns without the task of the second load
+        // The query of the first reconciliation returns without the task of the second load
         release.countDown();
 
         assertTrue(waitForRun("S", Duration.ofSeconds(5)),
-                "the task skipped by the second load was dropped by the re-check of the first load");
+                "the task skipped by the second load was dropped by the reconciliation of the first load");
     }
 
     @Test
@@ -356,7 +356,7 @@ public class DoerServiceTest {
         int loads = service.tst_loads.get();
         // The reset is due, but nothing is told about it; no tick runs before stop
         synchronized (service) {
-            service.lastStalledTaskChecked = Instant.now().minus(Duration.ofHours(1));
+            service.lastStalledTaskCheckTime = Instant.now().minus(Duration.ofHours(1));
             service.stop();
         }
 
@@ -592,7 +592,7 @@ public class DoerServiceTest {
         BooleanSupplier waits = () -> {
             synchronized (service) {
                 Duration delay = service.wakeUpTimer == null ? null : service.wakeUpTimer.plannedDelay();
-                return service.lastSelectTime != null
+                return service.lastQueueSelectTime != null
                         && service.queuesReloadState == DoerService.QueuesReloadState.IDLE
                         && delay != null && delay.compareTo(Duration.ofSeconds(1)) > 0;
             }
