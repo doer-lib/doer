@@ -5,6 +5,7 @@ import com.doer.DoerService;
 import com.doer.Task;
 import com.doer.TaskDataLoader;
 import com.doer.TaskDataSaver;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -55,29 +56,29 @@ public class TransactionMethods {
     @Transactional
     @AcceptStatus("Transaction own")
     public void ownTransaction(Task task) throws SQLException {
-        logTransaction(task, "TransactionOwn");
-        logTransaction(task, "TransactionOwn");
+        logTransaction(TaskSnapshot.of(task), "TransactionOwn");
+        logTransaction(TaskSnapshot.of(task), "TransactionOwn");
         task.setStatus("Transaction own done");
     }
 
     @TaskDataLoader
-    public TransactionData load(Task task) throws SQLException {
+    public TransactionData load(TaskSnapshot task) throws SQLException {
         logTransaction(task, "TransactionData");
         return new TransactionData();
     }
 
     @TaskDataSaver
-    public void save(Task task, TransactionData data) throws SQLException {
+    public void save(TaskSnapshot task, TransactionData data) throws SQLException {
         logTransaction(task, "TransactionData");
     }
 
-    private void logTransaction(Task task, String objectType) throws SQLException {
+    private void logTransaction(TaskSnapshot task, String objectType) throws SQLException {
         String sql = "insert into demo_log_tasks (object_type, task_id, in_progress, tx_id) "
                 + "values (?, ?, ?, txid_current())";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setString(1, objectType);
-            pst.setLong(2, task.getId());
-            pst.setBoolean(3, task.isInProgress());
+            pst.setLong(2, task.id());
+            pst.setBoolean(3, task.inProgress());
             pst.executeUpdate();
         }
     }

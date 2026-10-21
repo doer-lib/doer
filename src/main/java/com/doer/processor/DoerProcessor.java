@@ -77,7 +77,8 @@ public class DoerProcessor extends AbstractProcessor {
      * a user class with the same short name would hide them.
      */
     private static final List<String> TYPES_USED_IN_GENERATED_CODE = List.of(
-            "com.doer.Task", "com.doer.DoerService", "com.doer.TaskUpdater", "com.doer.TaskAndDataUpdater",
+            "com.doer.Task", "com.doer.TaskSnapshot", "com.doer.DoerService", "com.doer.TaskUpdater",
+            "com.doer.TaskAndDataUpdater",
             "java.lang.Override", "java.lang.Exception", "java.lang.Throwable", "java.lang.String",
             "java.lang.Object", "java.lang.Class", "java.lang.Integer", "java.lang.IllegalArgumentException",
             "jakarta.transaction.Transactional", "jakarta.inject.Inject", "jakarta.inject.Provider",
@@ -356,7 +357,8 @@ public class DoerProcessor extends AbstractProcessor {
      */
     private String supportedTaskDataType(TypeMirror type, String what, Element element) {
         String name = supportedDoerArgumentType(type, what, element);
-        if (Task.class.getName().equals(name) || DoerService.class.getName().equals(name)) {
+        if (Task.class.getName().equals(name) || TaskSnapshot.class.getName().equals(name)
+                || DoerService.class.getName().equals(name)) {
             error("Type " + name + " of " + what + " can not be task data.", element);
             return null;
         }
@@ -589,9 +591,9 @@ public class DoerProcessor extends AbstractProcessor {
                 continue;
             }
             List<? extends TypeMirror> args = method.getParameterTypes();
-            if (args.size() != 1 || !Task.class.getName().equals(args.get(0).toString())) {
+            if (args.size() != 1 || !TaskSnapshot.class.getName().equals(args.get(0).toString())) {
                 error(TaskDataLoader.class.getName() + " should have exactly 1 argument of type "
-                        + Task.class.getName(), element);
+                        + TaskSnapshot.class.getName(), element);
                 continue;
             }
             String type = supportedTaskDataType(method.getReturnType(),
@@ -611,10 +613,11 @@ public class DoerProcessor extends AbstractProcessor {
                 continue;
             }
             List<? extends TypeMirror> args = method.getParameterTypes();
-            if (args.size() != 2 || !Task.class.getName().equals(args.get(0).toString())
+            if (args.size() != 2 || !TaskSnapshot.class.getName().equals(args.get(0).toString())
                     || method.getReturnType().getKind() != TypeKind.VOID) {
                 error(TaskDataSaver.class.getName()
-                        + " should have exactly 2 arguments: Task and the task data to save, and should return void.",
+                        + " should have exactly 2 arguments: TaskSnapshot and the task data to save, and should return"
+                        + " void.",
                         element);
                 continue;
             }
@@ -638,15 +641,17 @@ public class DoerProcessor extends AbstractProcessor {
                 continue;
             }
             List<? extends TypeMirror> args = method.getParameterTypes();
-            if (args.size() != 3 || !Task.class.getName().equals(args.get(0).toString())
+            if (args.size() != 3 || !TaskSnapshot.class.getName().equals(args.get(0).toString())
                     || !"jakarta.json.JsonObjectBuilder".equals(args.get(2).toString())
                     || method.getReturnType().getKind() != TypeKind.VOID) {
                 error("@" + ExceptionDescriber.class.getSimpleName() + " method should return void and have exactly "
-                        + "3 parameters: Task, the exception type it describes (Throwable or any subclass of it) "
+                        + "3 parameters: TaskSnapshot, the exception type it describes "
+                        + "(Throwable or any subclass of it) "
                         + "and JsonObjectBuilder.\n"
                         + "Example:\n"
                         + "@" + ExceptionDescriber.class.getName() + "\n"
-                        + "public void describeSqlException(Task task, SQLException e, JsonObjectBuilder builder) {\n"
+                        + "public void describeSqlException(TaskSnapshot task, SQLException e, "
+                        + "JsonObjectBuilder builder) {\n"
                         + "}", element);
                 continue;
             }
@@ -820,7 +825,7 @@ public class DoerProcessor extends AbstractProcessor {
     private void generateExtraJson(PrintWriter out, Map<String, String> shortcuts) {
         out.print("""
                     @Override
-                    public String createExtraJson(Task task, Throwable exception) {
+                    public String createExtraJson(TaskSnapshot task, Throwable exception) {
                         JsonObjectBuilder builder = Json.createObjectBuilder();
                         try {
                             fillExtraJson(task, exception, builder);
@@ -828,7 +833,7 @@ public class DoerProcessor extends AbstractProcessor {
                                 | StackOverflowError | AssertionError e) {
                             // As in DoerService.callDoerMethod: the failure of the method is still recorded
                             LOG.log(java.util.logging.Level.SEVERE,
-                                    "ExtraJson creation error. TaskId: " + task.getId(), e);
+                                    "ExtraJson creation error. TaskId: " + task.id(), e);
                         }
                         JsonObject jsonObject = builder.build();
                         if (jsonObject.isEmpty()) {
@@ -846,7 +851,8 @@ public class DoerProcessor extends AbstractProcessor {
                         return sw.toString();
                     }
 
-                    private void fillExtraJson(Task task, Throwable exception, JsonObjectBuilder builder) throws Exception {
+                    private void fillExtraJson(TaskSnapshot task, Throwable exception, JsonObjectBuilder builder)
+                            throws Exception {
                         if (exception == null) {
                             return;
                         }
@@ -889,7 +895,7 @@ public class DoerProcessor extends AbstractProcessor {
 
     private void generateLoad(PrintWriter out, Map<String, String> shortcuts) {
         out.println("    @Override");
-        out.println("    protected Object _load(Task task, Class<?> type) throws Exception {");
+        out.println("    protected Object _load(TaskSnapshot task, Class<?> type) throws Exception {");
         for (TypedMethodInfo loader : firstByType(loaders).values()) {
             out.println("        if (" + shortcuts.get(loader.type()) + ".class.equals(type)) {");
             out.println("            return " + beanRef(loader.className(), shortcuts) + "." + loader.methodName()
@@ -902,7 +908,7 @@ public class DoerProcessor extends AbstractProcessor {
 
     private void generateSave(PrintWriter out, Map<String, String> shortcuts) {
         out.println("    @Override");
-        out.println("    protected void _save(Task task, Class<?> type, Object data) throws Exception {");
+        out.println("    protected void _save(TaskSnapshot task, Class<?> type, Object data) throws Exception {");
         for (TypedMethodInfo saver : firstByType(savers).values()) {
             String typeName = shortcuts.get(saver.type());
             out.println("        if (" + typeName + ".class.equals(type)) {");
@@ -939,6 +945,9 @@ public class DoerProcessor extends AbstractProcessor {
             out.println((i == 0 ? "       " : " else") + " if (" + condition + ") {");
 
             out.println("            callDoerMethod(task, () -> {");
+            if (params.stream().anyMatch(loadersByType::containsKey)) {
+                out.println("                    TaskSnapshot snapshot = TaskSnapshot.of(task);");
+            }
             for (int p = 0; p < params.size(); p++) {
                 String paramClass = params.get(p);
                 if (paramClass.equals(Task.class.getName())) {
@@ -947,14 +956,14 @@ public class DoerProcessor extends AbstractProcessor {
                 TypedMethodInfo loader = loadersByType.get(paramClass);
                 if (loader != null) {
                     out.println("                    args[" + p + "] = " + beanRef(loader.className(), shortcuts) + "."
-                            + loader.methodName() + "(task);");
+                            + loader.methodName() + "(snapshot);");
                     continue;
                 }
                 if (missingLoadersReported.add(paramClass)) {
                     error("No @" + TaskDataLoader.class.getSimpleName() + " found for argument " + p + "\n"
                             + "Please declare loader method:\n"
                             + "@" + TaskDataLoader.class.getName() + "\n"
-                            + "public " + paramClass + " method(" + Task.class.getName() + " task) {}\n",
+                            + "public " + paramClass + " method(" + TaskSnapshot.class.getName() + " task) {}\n",
                             info.element);
                 }
                 out.println("                    args[" + p + "] = null;");
@@ -970,11 +979,14 @@ public class DoerProcessor extends AbstractProcessor {
                     + String.join(", ", argumentCodes) + ");");
             out.println("                    return null;");
             out.println("                }, () -> {");
+            if (params.stream().anyMatch(saversByType::containsKey)) {
+                out.println("                    TaskSnapshot snapshot = TaskSnapshot.of(task);");
+            }
             for (int p = params.size() - 1; p >= 0; p--) {
                 TypedMethodInfo saver = saversByType.get(params.get(p));
                 if (saver != null && !params.get(p).equals(Task.class.getName())) {
                     out.println("                    " + beanRef(saver.className(), shortcuts) + "." + saver.methodName()
-                            + "(task, (" + shortcuts.get(params.get(p)) + ")args[" + p + "]);");
+                            + "(snapshot, (" + shortcuts.get(params.get(p)) + ")args[" + p + "]);");
                 }
             }
             out.println("                    return null;");

@@ -1,8 +1,8 @@
 package transitsims;
 
-import com.doer.Task;
 import com.doer.TaskDataLoader;
 import com.doer.TaskDataSaver;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -83,13 +83,13 @@ public class BusRepository {
     }
 
     @TaskDataLoader
-    public Bus load(Task task) throws SQLException {
-        List<Bus> buses = select(SELECT + " WHERE b.task_id = ?", task.getId());
+    public Bus load(TaskSnapshot task) throws SQLException {
+        List<Bus> buses = select(SELECT + " WHERE b.task_id = ?", task.id());
         return buses.isEmpty() ? null : buses.get(0);
     }
 
     @TaskDataSaver
-    public void save(Task task, Bus bus) throws SQLException {
+    public void save(TaskSnapshot task, Bus bus) throws SQLException {
         String sql = "UPDATE buses SET json_data = ?::json, modified = now() WHERE id = ?";
         try (Connection con = ds.getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setString(1, JsonData.JSONB.toJson(bus));

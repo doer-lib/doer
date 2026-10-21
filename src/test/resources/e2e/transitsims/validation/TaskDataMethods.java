@@ -3,14 +3,15 @@ package transitsims.validation;
 import com.doer.AcceptStatus;
 import com.doer.Task;
 import com.doer.TaskDataLoader;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 
 /** The loader of {@link TaskDataRecord}, without a saver, and a doer method that gets the record. */
 @ApplicationScoped
 public class TaskDataMethods {
     @TaskDataLoader
-    public TaskDataRecord load(Task task) {
-        return new TaskDataRecord(task.getId(), "TaskDataMethods.load");
+    public TaskDataRecord load(TaskSnapshot task) {
+        return new TaskDataRecord(task.id(), "TaskDataMethods.load");
     }
 
     @AcceptStatus("Task data record")

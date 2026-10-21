@@ -398,17 +398,17 @@ public class DoerServiceJdbcITCase {
         }
 
         @Override
-        protected Object _load(Task task, Class<?> type) {
+        protected Object _load(TaskSnapshot task, Class<?> type) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        protected void _save(Task task, Class<?> type, Object data) {
+        protected void _save(TaskSnapshot task, Class<?> type, Object data) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public String createExtraJson(Task task, Throwable exception) {
+        public String createExtraJson(TaskSnapshot task, Throwable exception) {
             throw new UnsupportedOperationException();
         }
     }

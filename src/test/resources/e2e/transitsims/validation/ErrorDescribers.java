@@ -1,7 +1,7 @@
 package transitsims.validation;
 
 import com.doer.ExceptionDescriber;
-import com.doer.Task;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.json.JsonObjectBuilder;
 
@@ -9,7 +9,7 @@ import jakarta.json.JsonObjectBuilder;
 @ApplicationScoped
 public class ErrorDescribers {
     @ExceptionDescriber
-    public void describeException(Task task, Exception e, JsonObjectBuilder builder) {
+    public void describeException(TaskSnapshot task, Exception e, JsonObjectBuilder builder) {
         builder.add("e1", "Exception");
     }
 }

@@ -371,8 +371,8 @@ public class GeneratorITCase implements InWorkspace {
                 import com.doer.*;
                 public class DemoClassLoader {
                     @TaskDataLoader
-                    public DemoClass loadDemoClass(Task task) {
-                        System.out.println("---load-DemoClass-for-" + task.getStatus() + "---");
+                    public DemoClass loadDemoClass(TaskSnapshot task) {
+                        System.out.println("---load-DemoClass-for-" + task.status() + "---");
                         DemoClass c = new DemoClass();
                         c.name = "d1";
                         return c;
@@ -427,13 +427,13 @@ public class GeneratorITCase implements InWorkspace {
                         System.out.println("---" + task.getStatus() + "---" + data + "---");
                     }
                     @TaskDataLoader
-                    public String loaderMethod(Task task) {
-                        System.out.println("---load-String-for-" + task.getStatus() + "---");
+                    public String loaderMethod(TaskSnapshot task) {
+                        System.out.println("---load-String-for-" + task.status() + "---");
                         return "d2";
                     }
                     @TaskDataSaver
-                    public void saverMethod(Task task, String data) {
-                        System.out.println("---save-String-for-" + task.getStatus() + "---" + data + "---");
+                    public void saverMethod(TaskSnapshot task, String data) {
+                        System.out.println("---save-String-for-" + task.status() + "---" + data + "---");
                     }
                 }
                 """);
@@ -468,10 +468,10 @@ public class GeneratorITCase implements InWorkspace {
                     public static void main(String[] args) throws Exception {
                         var doer = new _GeneratedDoerService() {
                             Object tst_load(Task task, Class<?> type) throws Exception {
-                                return _load(task, type);
+                                return _load(TaskSnapshot.of(task), type);
                             }
                             void tst_save(Task task, Class<?> type, Object data) throws Exception {
-                                _save(task, type, data);
+                                _save(TaskSnapshot.of(task), type, data);
                             }
                         };
                         doer._inject_main(Main::new);
@@ -492,12 +492,12 @@ public class GeneratorITCase implements InWorkspace {
                         System.out.println("---Integer-save-ignored---");
                     }
                     @TaskDataLoader
-                    public String loaderMethod(Task task) {
-                        System.out.println("---load-String-for-" + task.getStatus() + "---");
+                    public String loaderMethod(TaskSnapshot task) {
+                        System.out.println("---load-String-for-" + task.status() + "---");
                         return "d2";
                     }
                     @TaskDataSaver
-                    public void saverMethod(Task task, String data) {
+                    public void saverMethod(TaskSnapshot task, String data) {
                         System.out.println("---save-String-" + data + "---");
                     }
                 }
@@ -529,13 +529,13 @@ public class GeneratorITCase implements InWorkspace {
                     }
 
                     @TaskDataLoader
-                    public CancellationContext loadContext(Task task) {
+                    public CancellationContext loadContext(TaskSnapshot task) {
                         System.out.println("---load-CancellationContext---");
                         return new CancellationContext("late");
                     }
 
                     @TaskDataSaver
-                    public void saveContext(Task task, CancellationContext context) {
+                    public void saveContext(TaskSnapshot task, CancellationContext context) {
                         System.out.println("---save-CancellationContext-" + context.reason() + "---");
                     }
                 }
@@ -602,35 +602,35 @@ public class GeneratorITCase implements InWorkspace {
                     }
 
                     @TaskDataLoader
-                    public String loadPlain(Task task) {
+                    public String loadPlain(TaskSnapshot task) {
                         System.out.println("load java.lang.String");
                         return "plain-1";
                     }
 
                     @TaskDataLoader
-                    public demo.data.String loadText(Task task) {
+                    public demo.data.String loadText(TaskSnapshot task) {
                         System.out.println("load demo.data.String");
                         return new demo.data.String("text-1");
                     }
 
                     @TaskDataLoader
-                    public demo.data.Task loadData(Task task) {
+                    public demo.data.Task loadData(TaskSnapshot task) {
                         System.out.println("load demo.data.Task");
                         return new demo.data.Task("data-1");
                     }
 
                     @TaskDataSaver
-                    public void saveData(Task task, demo.data.Task data) {
+                    public void saveData(TaskSnapshot task, demo.data.Task data) {
                         System.out.println("save demo.data.Task " + data.value);
                     }
 
                     @TaskDataSaver
-                    public void savePlain(Task task, String plain) {
+                    public void savePlain(TaskSnapshot task, String plain) {
                         System.out.println("save java.lang.String " + plain);
                     }
 
                     @TaskDataSaver
-                    public void saveText(Task task, demo.data.String text) {
+                    public void saveText(TaskSnapshot task, demo.data.String text) {
                         System.out.println("save demo.data.String " + text.value);
                     }
                 }
@@ -650,14 +650,15 @@ public class GeneratorITCase implements InWorkspace {
                         doer.runTask(task);
 
                         System.out.println("--- _load and _save by type ---");
-                        doer._load(task, demo.data.Task.class);
-                        doer._save(task, demo.data.Task.class, new demo.data.Task("data-2"));
-                        doer._load(task, demo.data.String.class);
-                        doer._save(task, demo.data.String.class, new demo.data.String("text-2"));
-                        doer._load(task, java.lang.String.class);
-                        doer._save(task, java.lang.String.class, "plain-2");
+                        TaskSnapshot snapshot = TaskSnapshot.of(task);
+                        doer._load(snapshot, demo.data.Task.class);
+                        doer._save(snapshot, demo.data.Task.class, new demo.data.Task("data-2"));
+                        doer._load(snapshot, demo.data.String.class);
+                        doer._save(snapshot, demo.data.String.class, new demo.data.String("text-2"));
+                        doer._load(snapshot, java.lang.String.class);
+                        doer._save(snapshot, java.lang.String.class, "plain-2");
                         try {
-                            doer._load(task, com.doer.Task.class);
+                            doer._load(snapshot, com.doer.Task.class);
                         } catch (IllegalArgumentException e) {
                             System.out.println(e.getMessage());
                         }
@@ -696,11 +697,12 @@ public class GeneratorITCase implements InWorkspace {
                 import jakarta.json.JsonObjectBuilder;
                 public class Describers {
                     @ExceptionDescriber
-                    public void describeException(Task task, Exception ex, JsonObjectBuilder builder) {
+                    public void describeException(TaskSnapshot task, Exception ex, JsonObjectBuilder builder) {
                         builder.add("type", ex.getClass().getSimpleName());
                     }
                     @ExceptionDescriber
-                    public void describeIllegalState(Task task, IllegalStateException ex, JsonObjectBuilder builder) {
+                    public void describeIllegalState(TaskSnapshot task, IllegalStateException ex,
+                            JsonObjectBuilder builder) {
                         builder.add("illegal_state", true);
                     }
                 }
@@ -714,7 +716,7 @@ public class GeneratorITCase implements InWorkspace {
                     public static void main(String[] args) throws Exception {
                         var doer = new TestDoerService();
                         doer._inject_describers(Describers::new);
-                        Task task = new Task();
+                        TaskSnapshot task = TaskSnapshot.of(new Task());
                         System.out.println(doer.createExtraJson(task, new Exception()));
                         System.out.println("---");
                         System.out.println(doer.createExtraJson(task, new IOException("Disk full")));
@@ -931,15 +933,15 @@ public class GeneratorITCase implements InWorkspace {
                     public void accept(Task task, Order order) {}
 
                     @TaskDataLoader
-                    public Order loadOrder(Task task) {
+                    public Order loadOrder(TaskSnapshot task) {
                         return new Order();
                     }
 
                     @TaskDataSaver
-                    public void saveOrder(Task task, Order order) {}
+                    public void saveOrder(TaskSnapshot task, Order order) {}
 
                     @ExceptionDescriber
-                    public void describe(Task task, IllegalStateException e, JsonObjectBuilder builder) {}
+                    public void describe(TaskSnapshot task, IllegalStateException e, JsonObjectBuilder builder) {}
                 }
                 """);
 

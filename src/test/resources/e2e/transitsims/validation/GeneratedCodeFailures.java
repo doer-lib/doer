@@ -6,6 +6,7 @@ import com.doer.RetryPolicy;
 import com.doer.Task;
 import com.doer.TaskDataLoader;
 import com.doer.TaskDataSaver;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.json.JsonObjectBuilder;
@@ -66,23 +67,24 @@ public class GeneratedCodeFailures {
 
     /** Fails for the task of {@link #loaderException}. */
     @TaskDataLoader
-    public GeneratedCodeFailingData loadFailing(Task task) {
+    public GeneratedCodeFailingData loadFailing(TaskSnapshot task) {
         callTrace.add(task, "GeneratedCodeFailures.loadFailing");
-        if ("Generated code loader exception".equals(task.getStatus())) {
+        if ("Generated code loader exception".equals(task.status())) {
             throw new IllegalStateException("Generated code loader exception");
         }
         return new GeneratedCodeFailingData();
     }
 
     @TaskDataSaver
-    public void saveFailing(Task task, GeneratedCodeFailingData data) {
+    public void saveFailing(TaskSnapshot task, GeneratedCodeFailingData data) {
         callTrace.add(task, "GeneratedCodeFailures.saveFailing(" + data + ")");
         throw new IllegalStateException("Generated code saver exception");
     }
 
     /** Fails with an error, not an exception: the generated createExtraJson catches only exceptions. */
     @ExceptionDescriber
-    public void describeUndescribable(Task task, GeneratedCodeUndescribableException e, JsonObjectBuilder builder) {
+    public void describeUndescribable(TaskSnapshot task, GeneratedCodeUndescribableException e,
+            JsonObjectBuilder builder) {
         throw new AssertionError("Generated code describer error");
     }
 }
