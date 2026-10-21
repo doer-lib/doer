@@ -4,6 +4,7 @@ import com.doer.DoerService;
 import com.doer.Task;
 import com.doer.TaskDataLoader;
 import com.doer.TaskDataSaver;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -77,12 +78,12 @@ public class SimRepository {
     }
 
     @TaskDataLoader
-    public Simulation load(Task task) throws SQLException {
-        return selectOne("SELECT id, task_id, json_data FROM sims WHERE task_id = ?", task.getId());
+    public Simulation load(TaskSnapshot task) throws SQLException {
+        return selectOne("SELECT id, task_id, json_data FROM sims WHERE task_id = ?", task.id());
     }
 
     @TaskDataSaver
-    public void save(Task task, Simulation simulation) throws SQLException {
+    public void save(TaskSnapshot task, Simulation simulation) throws SQLException {
         update(simulation);
     }
 

@@ -4,6 +4,7 @@ import com.doer.AcceptStatus;
 import com.doer.Task;
 import com.doer.TaskDataLoader;
 import com.doer.TaskDataSaver;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -42,7 +43,7 @@ public class GeneratedCodeMethods {
     }
 
     @TaskDataLoader
-    public GeneratedCodeSecondData loadSecond(Task task) {
+    public GeneratedCodeSecondData loadSecond(TaskSnapshot task) {
         callTrace.add(task, "GeneratedCodeMethods.loadSecond");
         GeneratedCodeSecondData second = new GeneratedCodeSecondData();
         second.touch("loadSecond");
@@ -50,7 +51,7 @@ public class GeneratedCodeMethods {
     }
 
     @TaskDataSaver
-    public void saveSecond(Task task, GeneratedCodeSecondData second) {
+    public void saveSecond(TaskSnapshot task, GeneratedCodeSecondData second) {
         callTrace.add(task, "GeneratedCodeMethods.saveSecond(" + second + ")");
     }
 }

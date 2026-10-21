@@ -60,6 +60,7 @@ v1 is the last chance to rename public types without a deprecation cycle. This d
 | `ConcurrencyDomain` | package-private (or keep public with `getValue` → `getLimit`) | See below. |
 | `DoerService` | `DoerService` | Rule 1. |
 | `Task` | `Task` | — |
+| — | `TaskSnapshot` | New: what loaders, savers and describers get instead of `Task` (see below). |
 | `TaskNotFoundException` | `TaskNotFoundException` | — |
 | `TaskInProgressException` | `TaskInProgressException` | — |
 | `OptimisticLockException` | `TaskVersionConflictException`, with `getTaskId()` | No clash with JPA (problem 6); says what conflicted. |
@@ -95,21 +96,25 @@ public void bankError(Task task, BankException e, JsonObjectBuilder json) { ... 
 public void payOrder(Task task, Order order) { ... }
 
 @TaskDataLoader
-public Order loadOrder(Task task) { ... }
+public Order loadOrder(TaskSnapshot task) { ... }
 
 @TaskDataSaver
-public void saveOrder(Task task, Order order) { ... }
+public void saveOrder(TaskSnapshot task, Order order) { ... }
 
 @ExceptionDescriber
-public void describeBankError(Task task, BankException e, JsonObjectBuilder json) { ... }
+public void describeBankError(TaskSnapshot task, BankException e, JsonObjectBuilder json) { ... }
 ```
+
+## `TaskSnapshot` for loaders, savers and describers
+
+In 0.x loaders, savers and describers get the `Task` that Doer writes after them, so they can change its status or `failingSince` and the API suggests that they may. In v1 they get `TaskSnapshot`, an immutable record of the task (`id`, `status`, `inProgress`, `created`, `modified`, `failingSince`, `version`) made at their call: a loader sees the task with its in_progress mark, a saver sees the new status of the doer method, and a describer sees the task as the failure is written. Only doer methods and the updaters of `facilitateCoordinatedUpdate` get `Task`: they set the status.
 
 ## `@ExceptionDescriber` (was `@DoerExtraJson`)
 
 The annotated method is called when a doer method throws an exception of the type of its second parameter (or a subclass). It reads the task and the exception and adds fields to the `JsonObjectBuilder`, which Doer writes to `task_logs.extra_json`. Doer also calls describers for the exception's cause and suppressed exceptions, recursively; their details go into nested `cause` and `suppressed` objects:
 
 ```java
-public void describeBankError(Task task, BankException e, JsonObjectBuilder json) {
+public void describeBankError(TaskSnapshot task, BankException e, JsonObjectBuilder json) {
     json.add("bankCode", e.getCode());
 }
 ```
@@ -372,6 +377,7 @@ and then reloads the queues (`GET /api/validation/load`, `triggerQueuesReload()`
 
 - All renames are source-incompatible, which v1 allows. Annotations have `CLASS` retention and the generated service is regenerated on recompilation, so for them there is nothing to keep at runtime. The interfaces are runtime types: a library compiled against 0.x that calls `facilitateCoordinatedUpdate` with `DoerTaskConsumer` or `DoerUpdater` fails at runtime with v1 until it is recompiled.
 - v1 stops retrying unannotated doer methods after 1 day (see "Methods without `@RetryPolicy`"), so every doer method that relies on endless retries needs `@RetryPolicy(interval = "5m")`. The renames break compilation, but this change does not, so the processor warns about every doer method without `@RetryPolicy`. The release notes must call it out as well.
+- Loaders, savers and describers take `TaskSnapshot` instead of `Task` (getters become record accessors: `task.getId()` → `task.id()`); the processor reports a method with `Task`.
 - Processor error messages that name annotations must use the new names (they currently also say `DoerParameterLoader`, a name that does not exist).
 - Optional: in the last 0.x release, have the processor accept both old and new annotations and warn on the old ones. That gives users one release to migrate with compiler guidance.
 - The `doer.json` format changes, and tools that read it need updating with the release:

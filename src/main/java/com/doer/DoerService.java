@@ -757,7 +757,7 @@ public abstract class DoerService {
                 task.setInProgress(false);
                 updateAndBumpVersionOrThrow(task);
                 String exceptionType = finalFailure.getClass().getName();
-                String extraJson = createExtraJson(task, finalFailure);
+                String extraJson = createExtraJson(TaskSnapshot.of(task), finalFailure);
                 int t = (int) (System.currentTimeMillis() - t0);
                 writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, exceptionType,
                         extraJson, t);
@@ -888,13 +888,13 @@ public abstract class DoerService {
             }
             String initialStatus = task.getStatus();
             long t0 = System.currentTimeMillis();
-            T data = dataType == null ? null : dataType.cast(_load(task, dataType));
+            T data = dataType == null ? null : dataType.cast(_load(TaskSnapshot.of(task), dataType));
             updater.update(task, data);
             task.setInProgress(false);
             task.setFailingSince(null);
             updateAndBumpVersionOrThrow(task);
             if (dataType != null) {
-                _save(task, dataType, data);
+                _save(TaskSnapshot.of(task), dataType, data);
             }
             int t = (int) (System.currentTimeMillis() - t0);
             writeTaskLog(taskId, initialStatus, task.getStatus(), className, methodName, null, null, t);
@@ -909,13 +909,13 @@ public abstract class DoerService {
      *
      * @throws IllegalArgumentException no {@link TaskDataLoader} for {@code type}
      */
-    protected abstract Object _load(Task task, Class<?> type) throws Exception;
+    protected abstract Object _load(TaskSnapshot task, Class<?> type) throws Exception;
 
     /**
      * Saves {@code data} with the {@link TaskDataSaver} for {@code type}, if declared; otherwise does nothing.
      * Implemented by the generated service.
      */
-    protected abstract void _save(Task task, Class<?> type, Object data) throws Exception;
+    protected abstract void _save(TaskSnapshot task, Class<?> type, Object data) throws Exception;
 
     /**
      * Locks the task row in the current transaction.
@@ -989,7 +989,7 @@ public abstract class DoerService {
      * extra_json of the task_logs row of a failure, from the exception describers; null for none. A failure of a
      * describer is logged, so that the failure of the doer method is still recorded.
      */
-    public abstract String createExtraJson(Task task, Throwable exception);
+    public abstract String createExtraJson(TaskSnapshot task, Throwable exception);
 
     public long writeTaskLog(Long taskId, String initialStatus, String finalStatus, String className, String methodName,
             String exceptionType, String extraJson, Integer durationMs) throws SQLException {

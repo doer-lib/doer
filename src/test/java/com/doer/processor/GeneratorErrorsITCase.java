@@ -470,7 +470,7 @@ public class GeneratorErrorsITCase implements InWorkspace {
                 import com.doer.*;
                 public class Orders {
                     @TaskDataLoader
-                    public String loadName(Task task, String prefix) {
+                    public String loadName(TaskSnapshot task, String prefix) {
                         return prefix;
                     }
                 }
@@ -479,26 +479,31 @@ public class GeneratorErrorsITCase implements InWorkspace {
         var result = javac("Orders.java").assertStatus(1);
 
         assertEquals("""
-                Orders.java:5: error: com.doer.TaskDataLoader should have exactly 1 argument of type com.doer.Task
-                    public String loadName(Task task, String prefix) {
+                Orders.java:5: error: com.doer.TaskDataLoader should have exactly 1 argument of type com.doer.TaskSnapshot
+                    public String loadName(TaskSnapshot task, String prefix) {
                                   ^
                 1 error
                 """, result.stdErr());
     }
 
     @Test
-    void TaskDataLoader__should_fail_on_Task_and_DoerService_types() throws Exception {
+    void TaskDataLoader__should_fail_on_Task_TaskSnapshot_and_DoerService_types() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
                 import com.doer.*;
                 public class Orders {
                     @TaskDataLoader
-                    public Task loadTask(Task task) {
+                    public Task loadTask(TaskSnapshot task) {
+                        return null;
+                    }
+
+                    @TaskDataLoader
+                    public TaskSnapshot loadSnapshot(TaskSnapshot task) {
                         return task;
                     }
 
                     @TaskDataLoader
-                    public DoerService loadDoerService(Task task) {
+                    public DoerService loadDoerService(TaskSnapshot task) {
                         return null;
                     }
                 }
@@ -508,6 +513,8 @@ public class GeneratorErrorsITCase implements InWorkspace {
 
         assertThat(result.stdErr(), allOf(
                 containsString("Type com.doer.Task of return value of @TaskDataLoader method can not be task data"),
+                containsString("Type com.doer.TaskSnapshot of return value of @TaskDataLoader method "
+                        + "can not be task data"),
                 containsString("Type com.doer.DoerService of return value of @TaskDataLoader method "
                         + "can not be task data"),
                 not(containsString("_GeneratedDoerService.java"))));
@@ -520,10 +527,10 @@ public class GeneratorErrorsITCase implements InWorkspace {
                 import com.doer.*;
                 public class Orders {
                     @TaskDataSaver
-                    public void saveName(Task task) {}
+                    public void saveName(TaskSnapshot task) {}
 
                     @TaskDataSaver
-                    public boolean saveText(Task task, String text) {
+                    public boolean saveText(TaskSnapshot task, String text) {
                         return true;
                     }
                 }
@@ -532,27 +539,30 @@ public class GeneratorErrorsITCase implements InWorkspace {
         var result = javac("Orders.java").assertStatus(1);
 
         assertEquals("""
-                Orders.java:5: error: com.doer.TaskDataSaver should have exactly 2 arguments: Task and the task data to save, and should return void.
-                    public void saveName(Task task) {}
+                Orders.java:5: error: com.doer.TaskDataSaver should have exactly 2 arguments: TaskSnapshot and the task data to save, and should return void.
+                    public void saveName(TaskSnapshot task) {}
                                 ^
-                Orders.java:8: error: com.doer.TaskDataSaver should have exactly 2 arguments: Task and the task data to save, and should return void.
-                    public boolean saveText(Task task, String text) {
+                Orders.java:8: error: com.doer.TaskDataSaver should have exactly 2 arguments: TaskSnapshot and the task data to save, and should return void.
+                    public boolean saveText(TaskSnapshot task, String text) {
                                    ^
                 2 errors
                 """, result.stdErr());
     }
 
     @Test
-    void TaskDataSaver__should_fail_on_Task_and_DoerService_types() throws Exception {
+    void TaskDataSaver__should_fail_on_Task_TaskSnapshot_and_DoerService_types() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;
                 import com.doer.*;
                 public class Orders {
                     @TaskDataSaver
-                    public void saveTask(Task task, Task data) {}
+                    public void saveTask(TaskSnapshot task, Task data) {}
 
                     @TaskDataSaver
-                    public void saveDoerService(Task task, DoerService service) {}
+                    public void saveSnapshot(TaskSnapshot task, TaskSnapshot data) {}
+
+                    @TaskDataSaver
+                    public void saveDoerService(TaskSnapshot task, DoerService service) {}
                 }
                 """);
 
@@ -560,8 +570,41 @@ public class GeneratorErrorsITCase implements InWorkspace {
 
         assertThat(result.stdErr(), allOf(
                 containsString("Type com.doer.Task of parameter data of @TaskDataSaver method can not be task data"),
+                containsString("Type com.doer.TaskSnapshot of parameter data of @TaskDataSaver method "
+                        + "can not be task data"),
                 containsString("Type com.doer.DoerService of parameter service of @TaskDataSaver method "
                         + "can not be task data"),
+                not(containsString("_GeneratedDoerService.java"))));
+    }
+
+    @Test
+    void task_data_methods__should_fail_on_Task_instead_of_TaskSnapshot() throws Exception {
+        writeSource("Orders.java", """
+                package demo.test;
+                import com.doer.*;
+                import jakarta.json.JsonObjectBuilder;
+                public class Orders {
+                    @TaskDataLoader
+                    public String loadName(Task task) {
+                        return null;
+                    }
+
+                    @TaskDataSaver
+                    public void saveName(Task task, String name) {}
+
+                    @ExceptionDescriber
+                    public void describe(Task task, Exception e, JsonObjectBuilder builder) {}
+                }
+                """);
+
+        var result = javac("Orders.java").assertStatus(1);
+
+        assertThat(result.stdErr(), allOf(
+                containsString("com.doer.TaskDataLoader should have exactly 1 argument of type com.doer.TaskSnapshot"),
+                containsString("com.doer.TaskDataSaver should have exactly 2 arguments: TaskSnapshot and the task data "
+                        + "to save, and should return void."),
+                containsString("@ExceptionDescriber method should return void and have exactly 3 parameters: "
+                        + "TaskSnapshot, the exception type"),
                 not(containsString("_GeneratedDoerService.java"))));
     }
 
@@ -582,12 +625,12 @@ public class GeneratorErrorsITCase implements InWorkspace {
                     public void ship(Task task, String[] addresses) {}
 
                     @TaskDataLoader
-                    public List<String> loadNames(Task task) {
+                    public List<String> loadNames(TaskSnapshot task) {
                         return null;
                     }
 
                     @TaskDataSaver
-                    public void saveAddresses(Task task, String[] addresses) {}
+                    public void saveAddresses(TaskSnapshot task, String[] addresses) {}
                 }
                 """);
 
@@ -633,7 +676,7 @@ public class GeneratorErrorsITCase implements InWorkspace {
                 import jakarta.json.JsonObjectBuilder;
                 public class Describers {
                     @ExceptionDescriber
-                    public void describeText(Task task, String text, JsonObjectBuilder builder) {}
+                    public void describeText(TaskSnapshot task, String text, JsonObjectBuilder builder) {}
                 }
                 """);
 
@@ -652,7 +695,7 @@ public class GeneratorErrorsITCase implements InWorkspace {
                 import com.doer.*;
                 public class Describers {
                     @ExceptionDescriber
-                    public void describe(Task task, Exception e) {}
+                    public void describe(TaskSnapshot task, Exception e) {}
                 }
                 """);
 
@@ -660,7 +703,7 @@ public class GeneratorErrorsITCase implements InWorkspace {
 
         assertThat(result.stdErr(), allOf(
                 containsString("@ExceptionDescriber method should return void and have exactly 3 parameters: "
-                        + "Task, the exception type it describes (Throwable or any subclass of it) "
+                        + "TaskSnapshot, the exception type it describes (Throwable or any subclass of it) "
                         + "and JsonObjectBuilder."),
                 not(containsString("_GeneratedDoerService.java"))));
     }
@@ -680,17 +723,17 @@ public class GeneratorErrorsITCase implements InWorkspace {
                     public void ship(Task task, Contexts.ShippingContext context) {}
 
                     @TaskDataLoader
-                    public Contexts.ShippingContext loadShippingContext(Task task) {
+                    public Contexts.ShippingContext loadShippingContext(TaskSnapshot task) {
                         return null;
                     }
 
                     @TaskDataLoader
-                    public Hidden.PaymentContext loadPaymentContext(Task task) {
+                    public Hidden.PaymentContext loadPaymentContext(TaskSnapshot task) {
                         return null;
                     }
 
                     @ExceptionDescriber
-                    public void describe(Task task, HiddenException e, jakarta.json.JsonObjectBuilder builder) {}
+                    public void describe(TaskSnapshot task, HiddenException e, jakarta.json.JsonObjectBuilder builder) {}
                 }
 
                 class HiddenException extends Exception {

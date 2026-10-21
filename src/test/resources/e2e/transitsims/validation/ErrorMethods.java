@@ -4,6 +4,7 @@ import com.doer.AcceptStatus;
 import com.doer.ExceptionDescriber;
 import com.doer.RetryPolicy;
 import com.doer.Task;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.json.JsonObjectBuilder;
 
@@ -39,7 +40,7 @@ public class ErrorMethods {
     }
 
     @ExceptionDescriber
-    public void describeRuntimeException(Task task, RuntimeException e, JsonObjectBuilder builder) {
+    public void describeRuntimeException(TaskSnapshot task, RuntimeException e, JsonObjectBuilder builder) {
         builder.add("e2", "RuntimeException");
     }
 }

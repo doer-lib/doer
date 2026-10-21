@@ -1,8 +1,8 @@
 package transitsims.validation;
 
-import com.doer.Task;
 import com.doer.TaskDataLoader;
 import com.doer.TaskDataSaver;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -17,7 +17,7 @@ public class GeneratedCodeTaskData {
     }
 
     @TaskDataLoader
-    public GeneratedCodeFirstData loadFirst(Task task) {
+    public GeneratedCodeFirstData loadFirst(TaskSnapshot task) {
         callTrace.add(task, "GeneratedCodeTaskData.loadFirst");
         GeneratedCodeFirstData first = new GeneratedCodeFirstData();
         first.touch("loadFirst");
@@ -25,7 +25,7 @@ public class GeneratedCodeTaskData {
     }
 
     @TaskDataSaver
-    public void saveFirst(Task task, GeneratedCodeFirstData first) {
+    public void saveFirst(TaskSnapshot task, GeneratedCodeFirstData first) {
         callTrace.add(task, "GeneratedCodeTaskData.saveFirst(" + first + ")");
     }
 }

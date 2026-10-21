@@ -1,6 +1,7 @@
 package transitsims.validation;
 
 import com.doer.Task;
+import com.doer.TaskSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
 import java.util.Map;
@@ -16,7 +17,15 @@ public class CallTrace {
     final Map<Long, List<String>> calls = new ConcurrentHashMap<>();
 
     public void add(Task task, String call) {
-        calls.computeIfAbsent(task.getId(), id -> new CopyOnWriteArrayList<>()).add(call);
+        add(task.getId(), call);
+    }
+
+    public void add(TaskSnapshot task, String call) {
+        add(task.id(), call);
+    }
+
+    private void add(long taskId, String call) {
+        calls.computeIfAbsent(taskId, id -> new CopyOnWriteArrayList<>()).add(call);
     }
 
     /** Calls made for the task, removed from the trace. */

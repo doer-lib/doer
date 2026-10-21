@@ -92,11 +92,11 @@ public final class Sources {
                     return 1;
                 }
                 @Override
-                public Object _load(Task task, Class<?> type) throws Exception {
+                public Object _load(TaskSnapshot task, Class<?> type) throws Exception {
                     return super._load(task, type);
                 }
                 @Override
-                public void _save(Task task, Class<?> type, Object data) throws Exception {
+                public void _save(TaskSnapshot task, Class<?> type, Object data) throws Exception {
                     super._save(task, type, data);
                 }
             }
