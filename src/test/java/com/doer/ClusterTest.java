@@ -166,7 +166,7 @@ public class ClusterTest {
             this.name = name;
             this.db = db;
             setExecutor(jobs::add);
-            setSelfReference(this);
+            beanProviders.put(DoerService.class, () -> this);
             // The timer is never fired: the test runs the jobs in turn
             wakeUpTimerFactory = onWakeUp -> new ManualWakeUpTimer(onWakeUp, clock);
             setupConcurrencyDomain("D1", 2, Map.of("A", Duration.ZERO, "B", Duration.ZERO, "C", Duration.ZERO),

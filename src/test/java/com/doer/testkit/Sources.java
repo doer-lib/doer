@@ -80,7 +80,7 @@ public final class Sources {
             import com.doer.generated._GeneratedDoerService;
             public class TestDoerService extends _GeneratedDoerService {
                 public TestDoerService() {
-                    setSelfReference(this);
+                    beanProviders.put(DoerService.class, () -> this);
                 }
                 @Override
                 public boolean updateAndBumpVersion(Task task) {

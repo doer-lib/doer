@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -46,7 +47,7 @@ public class DoerServiceTest {
         executorJobs = new LinkedList<>();
         service = new TstDoerService();
         service.setExecutor(executorJobs::add);
-        service.setSelfReference(service);
+        service.beanProviders.put(DoerService.class, () -> service);
         service.clock = clock;
         service.wakeUpTimerFactory = onWakeUp -> timer = new ManualWakeUpTimer(onWakeUp, clock);
     }
@@ -348,6 +349,40 @@ public class DoerServiceTest {
     }
 
     @Test
+    void scheduler__should_run_loaded_tasks_while_next_load_is_requested() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        Task task = createNewTask("S");
+        service.tst_tasks_by_id.put(task.getId(), copyOf(task));
+        service.tst_task_from_db.add(copyOf(task));
+        // The task leaves its status when it runs: the next load does not select it
+        service.tst_on_run = t -> service.tst_task_from_db.clear();
+        // Each load selects the task and gets a request for one more load, until the task runs
+        service.tst_on_select = new TstDoerService.Hook() {
+            @Override
+            public void run() {
+                if (service.tst_run_statuses.isEmpty() && service.tst_loads.get() < 10) {
+                    service.tst_task_from_db.add(copyOf(task));
+                    service.tst_on_select = this;
+                    service.triggerQueuesReload();
+                }
+            }
+        };
+        service.start();
+
+        runAllExecutorJobs();
+
+        assertEquals(List.of("S"), List.copyOf(service.tst_run_statuses));
+        assertTrue(service.tst_loads.get() < 10, "the task waited for the end of the loads");
+    }
+
+    @Test
+    void triggerStalledTaskReset__should_not_submit_job_when_not_running() {
+        service.triggerStalledTaskReset();
+
+        assertTrue(executorJobs.isEmpty(), "a job was submitted to the executor");
+    }
+
+    @Test
     void stop__should_stop_planned_work() throws Exception {
         useThreadPool();
         service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
@@ -414,6 +449,37 @@ public class DoerServiceTest {
         runAllExecutorJobs();
 
         assertEquals(List.of("S"), List.copyOf(service.tst_run_statuses), "the load dropped the task");
+    }
+
+    @Test
+    void facilitateCoordinatedUpdate__should_wait_for_end_of_run_here_without_polling() throws Exception {
+        useThreadPool();
+        service.setupConcurrencyDomain("D1", 1, Map.of("Long", Duration.ZERO), Map.of());
+        Task task = createNewTask("Long");
+        service.tst_task_from_db.add(copyOf(task));
+        Task inProgress = copyOf(task);
+        inProgress.setInProgress(true);
+        service.tst_tasks_by_id.put(task.getId(), inProgress);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        // The row is in progress while the task runs, and the run commits it before it finishes
+        service.tst_on_run = t -> {
+            started.countDown();
+            release.await();
+            service.tst_tasks_by_id.put(task.getId(), copyOf(task));
+        };
+        service.start();
+        assertTrue(started.await(10, TimeUnit.SECONDS));
+
+        Future<Task> update = threadPool.submit(() -> service.facilitateCoordinatedUpdate(task.getId(),
+                Duration.ofSeconds(10), false, t -> t.setStatus("Done")));
+        assertTrue(waitUntil(() -> service.tst_row_locks.get() == 1, Duration.ofSeconds(5)));
+        // Polling would try again 50, 150 and 350 ms after the first attempt
+        Thread.sleep(500);
+        release.countDown();
+
+        assertEquals("Done", update.get(5, TimeUnit.SECONDS).getStatus());
+        assertEquals(2, service.tst_row_locks.get(), "the database was polled while the task ran here");
     }
 
     @Test
@@ -573,17 +639,6 @@ public class DoerServiceTest {
         assertEquals("No provider of bean java.lang.String was injected", e.getMessage());
     }
 
-    @Test
-    void setSelfReference__should_replace_provider_of_self() {
-        TstDoerService other = new TstDoerService();
-        other.beanProviders.put(DoerService.class, () -> fail("the provider must not be used"));
-
-        other.setSelfReference(service);
-
-        assertSame(service, other.getSelfReference());
-        assertFalse(other.beanProviders.containsKey(DoerService.class));
-    }
-
     /**
      * Waits until the first load is done and nothing is due for a while: the timer of the scheduler waits for more than
      * a second.
@@ -639,6 +694,8 @@ public class DoerServiceTest {
         };
         /** Called once by {@link #loadTasksFromDatabase} after the select, before the load replaces the buffers. */
         volatile Hook tst_on_select;
+        /** Number of calls of {@link #selectTaskForUpdate}: the attempts of facilitateCoordinatedUpdate. */
+        AtomicInteger tst_row_locks = new AtomicInteger();
         /** Number of the calls of the database methods made under the lock of DoerService. */
         AtomicInteger tst_db_calls_under_lock = new AtomicInteger();
 
@@ -668,8 +725,9 @@ public class DoerServiceTest {
         /** The row of {@link #tst_tasks_by_id}, as the database would lock it. */
         @Override
         protected Task selectTaskForUpdate(long taskId, boolean allowInProgress) {
+            tst_row_locks.incrementAndGet();
             Task row = tst_tasks_by_id.get(taskId);
-            return row == null ? null : copyOf(row);
+            return row == null || !allowInProgress && row.isInProgress() ? null : copyOf(row);
         }
 
         @Override
