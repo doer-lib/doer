@@ -730,6 +730,7 @@ public class DoerProcessor extends AbstractProcessor {
                         @Inject
                         public void _inject_self(Provider<DoerService> provider) {
                             beanProviders.put(DoerService.class, provider::get);
+                            beans.remove(DoerService.class);
                         }
 
                         @Override

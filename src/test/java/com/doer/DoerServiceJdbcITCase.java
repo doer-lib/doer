@@ -379,7 +379,7 @@ public class DoerServiceJdbcITCase {
 
         TstJdbcService() {
             setDataSource(Postgres.dataSource());
-            setSelfReference(this);
+            beanProviders.put(DoerService.class, () -> this);
         }
 
         @Override

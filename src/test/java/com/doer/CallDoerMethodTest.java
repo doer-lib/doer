@@ -253,7 +253,7 @@ public class CallDoerMethodTest {
         Function<Throwable, String> extraJson = e -> "{\"message\": \"" + e.getMessage() + "\"}";
 
         FakeDbService() {
-            setSelfReference(this);
+            beanProviders.put(DoerService.class, () -> this);
         }
 
         Task insertRow(String status, Instant failingSince) {

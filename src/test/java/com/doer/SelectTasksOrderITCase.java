@@ -110,7 +110,7 @@ public class SelectTasksOrderITCase implements InWorkspace {
         try (URLClassLoader loader = generatedClassLoader()) {
             DoerService service = (DoerService) loader.loadClass("com.doer.generated._GeneratedDoerService")
                     .getDeclaredConstructor().newInstance();
-            queues = service.queues().stream().map(Select::of).toList();
+            queues = service.taskQueues.queues().stream().map(Select::of).toList();
         }
 
         assertEquals(selects, queues);

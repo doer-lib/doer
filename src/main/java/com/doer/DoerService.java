@@ -74,7 +74,7 @@ public abstract class DoerService {
      */
     protected final ConcurrentHashMap<Class<?>, Supplier<?>> beanProviders = new ConcurrentHashMap<>();
     /** Beans looked up by their providers, and the self reference. */
-    private final ConcurrentHashMap<Class<?>, Object> beans = new ConcurrentHashMap<>();
+    protected final ConcurrentHashMap<Class<?>, Object> beans = new ConcurrentHashMap<>();
     private Executor executor;
     private DataSource dataSource;
 
@@ -95,7 +95,7 @@ public abstract class DoerService {
 
     // Queue loading: state
 
-    private final TaskQueues taskQueues = new TaskQueues();
+    final TaskQueues taskQueues = new TaskQueues();
     QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
     /** Set before the select of each load, also of a load that fails. */
     Instant lastQueueSelectTime;
@@ -138,15 +138,6 @@ public abstract class DoerService {
 
     /** Set by the first start: the first reset is due {@link #stalledTaskCheckInterval} after it. */
     Instant lastStalledTaskCheckTime;
-
-    public DoerService getSelfReference() {
-        return self();
-    }
-
-    public void setSelfReference(DoerService self) {
-        beans.put(DoerService.class, self);
-        beanProviders.remove(DoerService.class);
-    }
 
     /** This service as the container gives it to other beans, so that calls go through its interceptors. */
     private DoerService self() {
@@ -265,15 +256,14 @@ public abstract class DoerService {
         executor.execute(self()::reloadQueues);
     }
 
-    /** A reload that hasn't selected yet will see the task, so the task needs no reload of its own. */
-    private boolean queuesReloadPending() {
-        return queuesReloadState == QueuesReloadState.SCHEDULED
-                || queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN;
-    }
-
     public void triggerTaskReloadFromDb(long taskId) {
         synchronized (this) {
-            if (!isRunning || queuesReloadPending()) {
+            if (!isRunning) {
+                return;
+            }
+            // A reload that hasn't selected yet will see the task, so the task needs no reload of its own
+            if (queuesReloadState == QueuesReloadState.SCHEDULED
+                    || queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN) {
                 return;
             }
             if (queuesReloadState == QueuesReloadState.RUNNING) {
@@ -645,25 +635,28 @@ public abstract class DoerService {
                 reloadAfterLoad.clear();
                 if (!isRunning) {
                     queuesReloadState = QueuesReloadState.IDLE;
-                } else if (queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN) {
-                    scheduleQueuesReload();
                 } else {
-                    queuesReloadState = QueuesReloadState.IDLE;
+                    if (queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN) {
+                        scheduleQueuesReload();
+                    } else {
+                        queuesReloadState = QueuesReloadState.IDLE;
+                    }
+                    // The load may have queued ready tasks: they don't wait for the next load
                     executor.execute(this::onTick);
                 }
             }
         }
     }
 
-    private OffsetDateTime toOffsetDateTime(Instant instant) {
+    private static OffsetDateTime toOffsetDateTime(Instant instant) {
         return instant == null ? null : OffsetDateTime.ofInstant(instant, ZoneId.systemDefault());
     }
 
-    private Instant toInstant(OffsetDateTime odt) {
+    private static Instant toInstant(OffsetDateTime odt) {
         return odt == null ? null : odt.toInstant();
     }
 
-    private Task readTask(ResultSet rs) throws SQLException {
+    private static Task readTask(ResultSet rs) throws SQLException {
         Task task = new Task();
         task.setId(rs.getLong("id"));
         task.setCreated(toInstant(rs.getObject("created", OffsetDateTime.class)));
@@ -782,7 +775,8 @@ public abstract class DoerService {
      * Updates a task in coordination with the scheduler. Must be called outside a transaction.
      * <p>
      * Waits up to {@code waitDuration} for the task to stop being in progress, polling in short transactions
-     * that hold no connection between attempts. The attempt that locks the task continues in the same
+     * that hold no connection between attempts; for a task in progress on this node it waits for the end of its run
+     * instead of polling. The attempt that locks the task continues in the same
      * transaction: calls {@code updater}, saves the task and writes a task_logs row. If the task is still in
      * progress after {@code waitDuration}, it is hijacked when {@code allowHijacking} is true. After the commit
      * the scheduler is notified, and only then the method returns.
@@ -833,9 +827,34 @@ public abstract class DoerService {
                 requeueCommittedTask(row);
                 return task;
             }
+            if (waitUntilFinishedHere(taskId, deadline)) {
+                continue;
+            }
             long timeoutMs = Math.max(1, Math.min(sleepMs, remainingMs));
             Thread.sleep(timeoutMs);
             sleepMs = Math.min(sleepMs * 2, 1000);
+        }
+    }
+
+    /**
+     * Waits until the task in progress here finishes, but not after the deadline (of {@link System#nanoTime}): its run
+     * has committed the row then. Returns false at once when the task does not run here: it runs on another node, or
+     * it is stalled.
+     */
+    private boolean waitUntilFinishedHere(long taskId, long deadline) throws InterruptedException {
+        synchronized (this) {
+            if (!taskQueues.isInProgress(taskId)) {
+                return false;
+            }
+            // processNextTask notifies when a task finishes
+            while (taskQueues.isInProgress(taskId)) {
+                long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                if (remainingMs <= 0) {
+                    break;
+                }
+                wait(remainingMs);
+            }
+            return true;
         }
     }
 
@@ -917,23 +936,28 @@ public abstract class DoerService {
 
     /** Resets stalled tasks in a thread of the executor, and loads the queues when any task was reset. */
     public void triggerStalledTaskReset() {
-        executor.execute(() -> {
-            synchronized (this) {
-                if (!isRunning) {
-                    return;
-                }
+        synchronized (this) {
+            if (!isRunning) {
+                return;
             }
-            try {
-                if (self().resetStalledInProgressTasks(stalledTaskTimeout) > 0) {
-                    // The reset tasks are queued now, not by the next periodic load
-                    triggerQueuesReload();
+            executor.execute(() -> {
+                try {
+                    if (self().resetStalledInProgressTasks(stalledTaskTimeout) > 0) {
+                        // The reset tasks are queued now, not by the next periodic load
+                        triggerQueuesReload();
+                    }
+                } catch (SQLException e) {
+                    LOG.log(Level.WARNING, "Error resetting stalled tasks", e);
                 }
-            } catch (SQLException e) {
-                LOG.log(Level.WARNING, "Error resetting stalled tasks", e);
-            }
-        });
+            });
+        }
     }
 
+    /**
+     * Resets the in_progress mark of the tasks not modified for the timeout, with a task_logs row for each; returns the
+     * number of reset tasks. Public only for the @Transactional override in the generated service: the container runs
+     * the log and the reset in one transaction. Use {@link #triggerStalledTaskReset}.
+     */
     public int resetStalledInProgressTasks(Duration timeout) throws SQLException {
         if (timeout.isNegative()) {
             throw new IllegalArgumentException("Stalled tasks timeout should be a positive duration");
@@ -1023,6 +1047,8 @@ public abstract class DoerService {
             Thread.currentThread().setName(threadName);
             synchronized (this) {
                 boolean reloadRequested = taskQueues.finish(task, domain);
+                // facilitateCoordinatedUpdate may wait for the task (see waitUntilFinishedHere)
+                notifyAll();
                 if (processedSuccessfully) {
                     ConcurrencyDomain newDomain = taskQueues.requeue(task);
                     if (newDomain != null) {
@@ -1057,14 +1083,7 @@ public abstract class DoerService {
         }
     }
 
-    /** Sub-queues of all domains, in the order of the LIMIT parameters of SelectTasks.sql (checked by tests). */
-    List<SubQueue> queues() {
-        synchronized (this) {
-            return taskQueues.queues();
-        }
-    }
-
-    protected String limitTo1024(String s) {
+    protected static String limitTo1024(String s) {
         if (s == null) {
             return null;
         }
