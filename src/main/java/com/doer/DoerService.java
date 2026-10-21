@@ -675,6 +675,11 @@ public abstract class DoerService {
         return odt == null ? null : odt.toInstant();
     }
 
+    /** Milliseconds since {@code startNanos} of {@link System#nanoTime}: duration_ms of task_logs. */
+    private static int millisSince(long startNanos) {
+        return (int) TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    }
+
     private static Task readTask(ResultSet rs) throws SQLException {
         Task task = new Task();
         task.setId(rs.getLong("id"));
@@ -707,7 +712,7 @@ public abstract class DoerService {
     public void callDoerMethod(Task task, Callable<Object> loader, Callable<Object> caller, Callable<Object> saver,
             String className, String methodName, Duration errorTimeout, String onErrorStatus) throws Exception {
         String initialStatus = task.getStatus();
-        long t0 = System.currentTimeMillis();
+        long startNanos = System.nanoTime();
         Throwable failure = null;
         Task initialTask = new Task();
         initialTask.assignFieldsFrom(task);
@@ -744,9 +749,8 @@ public abstract class DoerService {
                         task.setInProgress(false);
                         updateAndBumpVersionOrThrow(task);
                         saver.call();
-                        int t = (int) (System.currentTimeMillis() - t0);
                         writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, null, null,
-                                t);
+                                millisSince(startNanos));
                         return null;
                     });
                     return;
@@ -777,9 +781,8 @@ public abstract class DoerService {
                 updateAndBumpVersionOrThrow(task);
                 String exceptionType = finalFailure.getClass().getName();
                 String extraJson = createExtraJson(TaskSnapshot.of(task), finalFailure);
-                int t = (int) (System.currentTimeMillis() - t0);
                 writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, exceptionType,
-                        extraJson, t);
+                        extraJson, millisSince(startNanos));
                 return null;
             });
         } finally {
@@ -906,7 +909,7 @@ public abstract class DoerService {
                         extraJson, null);
             }
             String initialStatus = task.getStatus();
-            long t0 = System.currentTimeMillis();
+            long startNanos = System.nanoTime();
             T data = dataType == null ? null : dataType.cast(_load(TaskSnapshot.of(task), dataType));
             updater.update(task, data);
             task.setInProgress(false);
@@ -915,8 +918,8 @@ public abstract class DoerService {
             if (dataType != null) {
                 _save(TaskSnapshot.of(task), dataType, data);
             }
-            int t = (int) (System.currentTimeMillis() - t0);
-            writeTaskLog(taskId, initialStatus, task.getStatus(), className, methodName, null, null, t);
+            writeTaskLog(taskId, initialStatus, task.getStatus(), className, methodName, null, null,
+                    millisSince(startNanos));
             result[0] = task;
             return null;
         });
