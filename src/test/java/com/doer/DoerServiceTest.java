@@ -22,6 +22,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
@@ -41,12 +42,22 @@ public class DoerServiceTest {
     /** Executor of the tests with real threads (see {@link #useThreadPool}); stopped after the test. */
     ExecutorService threadPool;
     long nextTaskId = 1000;
+    /** Jobs the executor of the test accepts before it rejects all others; any number when negative. */
+    int jobsToAccept = -1;
 
     @BeforeEach
     void init() {
         executorJobs = new LinkedList<>();
         service = new TstDoerService();
-        service.setExecutor(executorJobs::add);
+        service.setExecutor(job -> {
+            if (jobsToAccept == 0) {
+                throw new RejectedExecutionException("Rejected by the test");
+            }
+            if (jobsToAccept > 0) {
+                jobsToAccept--;
+            }
+            executorJobs.add(job);
+        });
         service.beanProviders.put(DoerService.class, () -> service);
         service.clock = clock;
         service.wakeUpTimerFactory = onWakeUp -> timer = new ManualWakeUpTimer(onWakeUp, clock);
@@ -380,6 +391,114 @@ public class DoerServiceTest {
         service.triggerStalledTaskReset();
 
         assertTrue(executorJobs.isEmpty(), "a job was submitted to the executor");
+    }
+
+    @Test
+    void start__should_load_queues_at_next_tick_after_rejected_load() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        jobsToAccept = 0;
+        service.start();
+        assertEquals(0, service.tst_loads.get());
+
+        jobsToAccept = -1;
+        advanceToWakeUp();
+
+        assertEquals(1, service.tst_loads.get());
+        assertEquals(DoerService.QueuesReloadState.IDLE, service.queuesReloadState);
+    }
+
+    @Test
+    void reloadQueues__should_not_stay_running_when_executor_rejects_jobs_after_load() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        Task task = createNewTask("S");
+        service.tst_tasks_by_id.put(task.getId(), task);
+        // The task is changed while the load runs, and then the executor rejects all jobs
+        service.tst_on_select = () -> {
+            service.tst_task_from_db.add(copyOf(task));
+            service.triggerTaskReloadFromDb(task.getId());
+            jobsToAccept = 0;
+        };
+        service.start();
+        runAllExecutorJobs();
+        assertEquals(DoerService.QueuesReloadState.IDLE, service.queuesReloadState);
+
+        jobsToAccept = -1;
+        advanceToWakeUp();
+
+        assertEquals(2, service.tst_loads.get(), "the rejected reload of the task was not replaced by a load");
+        assertEquals(List.of("S"), List.copyOf(service.tst_run_statuses));
+    }
+
+    @Test
+    void facilitateCoordinatedUpdate__should_not_throw_when_executor_rejects_start_of_task() throws Exception {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        service.start();
+        runAllExecutorJobs();
+        Task task = createNewTask("New");
+        service.tst_tasks_by_id.put(task.getId(), task);
+        jobsToAccept = 0;
+
+        service.facilitateCoordinatedUpdate(task.getId(), Duration.ZERO, false, t -> t.setStatus("S"));
+        jobsToAccept = -1;
+        advanceToWakeUp();
+
+        assertEquals(List.of("S"), List.copyOf(service.tst_run_statuses));
+    }
+
+    @Test
+    void processNextTask__should_free_slot_when_executor_rejects_load_of_drained_queue() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        // As many as the LIMIT of the sub-queue: the last start drains the sub-queue and asks for a load
+        for (int i = 0; i < 10; i++) {
+            service.tst_task_from_db.add(createNewTask("S"));
+        }
+        service.tst_on_run = task -> {
+            if (service.tst_run_statuses.size() == 9) {
+                // The start of the last task is accepted, the load it asks for is rejected
+                jobsToAccept = 1;
+            }
+        };
+        service.start();
+
+        runAllExecutorJobs();
+
+        assertEquals(10, service.tst_run_statuses.size());
+        assertEquals(1, service.taskQueues.domains().get(0).freeSlots(), "the slot of the last task was not freed");
+        jobsToAccept = -1;
+        advanceToWakeUp();
+        assertEquals(2, service.tst_loads.get(), "the rejected load was not retried");
+    }
+
+    @Test
+    void scheduler__should_retry_stalled_task_reset_rejected_by_executor() {
+        service.stalledTaskCheckInterval = Duration.ofSeconds(30);
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        service.start();
+        runAllExecutorJobs();
+        // The tick is accepted, the reset it starts is rejected
+        jobsToAccept = 1;
+        advanceToWakeUp();
+        assertTrue(service.tst_stalled_resets.isEmpty());
+
+        jobsToAccept = -1;
+        advanceToWakeUp();
+
+        assertEquals(1, service.tst_stalled_resets.size());
+    }
+
+    @Test
+    void scheduler__should_plan_next_wake_up_when_executor_throws_in_wakeUp() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        service.start();
+        runAllExecutorJobs();
+        service.setExecutor(job -> {
+            throw new IllegalStateException("Broken executor");
+        });
+        clock.set(timer.plannedAt());
+
+        assertTrue(timer.fireIfDue());
+
+        assertEquals(Duration.ofMinutes(1), timer.plannedDelay());
     }
 
     @Test

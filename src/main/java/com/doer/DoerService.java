@@ -104,6 +104,8 @@ public abstract class DoerService {
      * replaces, so they are reloaded when it ends.
      */
     private final Set<Long> reloadAfterLoad = new HashSet<>();
+    /** The executor rejected a load or a reload of a task: the next tick loads the queues. */
+    private boolean queuesReloadRetry;
 
     // Scheduler
 
@@ -252,8 +254,13 @@ public abstract class DoerService {
 
     /** Called under the lock. */
     private void scheduleQueuesReload() {
-        queuesReloadState = QueuesReloadState.SCHEDULED;
-        executor.execute(self()::reloadQueues);
+        // The job waits for the lock, so the state can be set after it is accepted
+        if (submitToExecutor("the load of the queues", self()::reloadQueues)) {
+            queuesReloadState = QueuesReloadState.SCHEDULED;
+        } else {
+            queuesReloadState = QueuesReloadState.IDLE;
+            queuesReloadRetry = true;
+        }
     }
 
     public void triggerTaskReloadFromDb(long taskId) {
@@ -269,7 +276,9 @@ public abstract class DoerService {
             if (queuesReloadState == QueuesReloadState.RUNNING) {
                 reloadAfterLoad.add(taskId);
             }
-            executor.execute(() -> reloadQueuedTask(taskId));
+            if (!submitToExecutor("the reload of task " + taskId, () -> reloadQueuedTask(taskId))) {
+                queuesReloadRetry = true;
+            }
         }
     }
 
@@ -417,9 +426,10 @@ public abstract class DoerService {
     private void wakeUp() {
         try {
             executor.execute(this::onTick);
-        } catch (RejectedExecutionException e) {
-            LOG.log(Level.WARNING, "The executor rejected the tick of the scheduler. Next try in " + MAX_WAKE_UP_DELAY,
-                    e);
+        } catch (RuntimeException e) {
+            // Also other exceptions: without a planned wake-up the scheduler would stop
+            LOG.log(Level.WARNING, "The executor did not accept the tick of the scheduler. Next try in "
+                    + MAX_WAKE_UP_DELAY, e);
             synchronized (this) {
                 if (isRunning && wakeUpTimer != null) {
                     wakeUpTimer.wakeUpNoLaterThan(MAX_WAKE_UP_DELAY);
@@ -433,39 +443,40 @@ public abstract class DoerService {
      * of the executor: when the timer wakes up, and after each load.
      */
     private void onTick() {
-        List<Long> reconciliationIds = null;
-        long reconciliationGeneration = 0;
-        synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            Instant now = getDbNow();
-            if (isDue(reloadTime(), now)) {
-                triggerQueuesReload();
-            }
-            if (isDue(stalledTaskResetTime(), now)) {
-                lastStalledTaskCheckTime = now;
-                triggerStalledTaskReset();
-            }
-            if (isDue(reconciliationTime(), now)) {
-                lastReconciliationTime = now;
-                reconciliationInProgress = true;
-                reconciliationIds = tasksWithUncertainState.stream().map(Task::getId).toList();
-                reconciliationGeneration = queueLoadGeneration;
-            }
-            for (ConcurrencyDomain domain : taskQueues.domains()) {
-                if (domain.hasReadyTask(now)) {
-                    for (int i = 0; i < domain.freeSlots(); i++) {
-                        executor.execute(() -> processNextTask(domain));
+        try {
+            List<Long> reconciliationIds = null;
+            long reconciliationGeneration = 0;
+            synchronized (this) {
+                if (!isRunning) {
+                    return;
+                }
+                Instant now = getDbNow();
+                if (isDue(reloadTime(), now)) {
+                    triggerQueuesReload();
+                }
+                if (isDue(stalledTaskResetTime(), now)) {
+                    triggerStalledTaskReset();
+                }
+                if (isDue(reconciliationTime(), now)) {
+                    lastReconciliationTime = now;
+                    reconciliationInProgress = true;
+                    reconciliationIds = tasksWithUncertainState.stream().map(Task::getId).toList();
+                    reconciliationGeneration = queueLoadGeneration;
+                }
+                for (ConcurrencyDomain domain : taskQueues.domains()) {
+                    if (domain.hasReadyTask(now) && !submitTaskStarts(domain, domain.freeSlots())) {
+                        break;
                     }
                 }
             }
-        }
-        if (reconciliationIds != null) {
-            reconcile(reconciliationIds, reconciliationGeneration);
-        }
-        synchronized (this) {
-            reschedule();
+            if (reconciliationIds != null) {
+                reconcile(reconciliationIds, reconciliationGeneration);
+            }
+        } finally {
+            // Also after a failure: the timer has no other wake-up planned
+            synchronized (this) {
+                reschedule();
+            }
         }
     }
 
@@ -497,7 +508,10 @@ public abstract class DoerService {
         if (queuesReloadState != QueuesReloadState.IDLE) {
             return null;
         }
-        return lastQueueSelectTime == null ? Instant.MIN : lastQueueSelectTime.plus(queueReloadInterval);
+        if (queuesReloadRetry || lastQueueSelectTime == null) {
+            return Instant.MIN;
+        }
+        return lastQueueSelectTime.plus(queueReloadInterval);
     }
 
     /** Called under the lock. When the reset of stalled tasks is due; null when it is turned off. */
@@ -553,7 +567,7 @@ public abstract class DoerService {
         ConcurrencyDomain domain = taskQueues.replaceTask(task);
         if (domain != null) {
             if (domain.hasFreeSlot()) {
-                executor.execute(() -> processNextTask(domain));
+                submitTaskStarts(domain, 1);
             }
             reschedule();
         }
@@ -603,6 +617,7 @@ public abstract class DoerService {
                     return;
                 }
                 queuesReloadState = QueuesReloadState.RUNNING;
+                queuesReloadRetry = false;
                 limits = taskQueues.nextLimits(getDbNow(), lastQueueSelectTime, queueReloadInterval, minQueueSize,
                         maxTotalQueueSize);
                 lastReconciliationTime = null;
@@ -629,7 +644,11 @@ public abstract class DoerService {
             synchronized (this) {
                 if (isRunning) {
                     for (long taskId : reloadAfterLoad) {
-                        executor.execute(() -> reloadQueuedTask(taskId));
+                        if (!submitToExecutor("the reload of task " + taskId, () -> reloadQueuedTask(taskId))) {
+                            // The next load replaces the reloads of the tasks
+                            queuesReloadRetry = true;
+                            break;
+                        }
                     }
                 }
                 reloadAfterLoad.clear();
@@ -642,7 +661,7 @@ public abstract class DoerService {
                         queuesReloadState = QueuesReloadState.IDLE;
                     }
                     // The load may have queued ready tasks: they don't wait for the next load
-                    executor.execute(this::onTick);
+                    submitToExecutor("the tick of the scheduler", this::onTick);
                 }
             }
         }
@@ -940,7 +959,10 @@ public abstract class DoerService {
             if (!isRunning) {
                 return;
             }
-            executor.execute(() -> {
+            // Set now: the next tick must not start the reset again before it runs
+            Instant previousCheckTime = lastStalledTaskCheckTime;
+            lastStalledTaskCheckTime = getDbNow();
+            boolean accepted = submitToExecutor("the reset of stalled tasks", () -> {
                 try {
                     if (self().resetStalledInProgressTasks(stalledTaskTimeout) > 0) {
                         // The reset tasks are queued now, not by the next periodic load
@@ -950,6 +972,10 @@ public abstract class DoerService {
                     LOG.log(Level.WARNING, "Error resetting stalled tasks", e);
                 }
             });
+            if (!accepted) {
+                // Still due: the next tick tries again
+                lastStalledTaskCheckTime = previousCheckTime;
+            }
         }
     }
 
@@ -1016,6 +1042,33 @@ public abstract class DoerService {
         }
     }
 
+    /**
+     * Called under the lock. Hands the job to the executor. A job the executor rejects is logged, and the caller gets
+     * false: it undoes what it has set for the job, and the next tick of the scheduler does the work.
+     */
+    private boolean submitToExecutor(String job, Runnable runnable) {
+        try {
+            executor.execute(runnable);
+            return true;
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "The executor rejected " + job + ". The scheduler tries again", e);
+            return false;
+        }
+    }
+
+    /**
+     * Called under the lock. Submits {@code count} starts of the next task of the domain; false when the executor
+     * rejected one: the tasks stay queued, and the next tick starts them.
+     */
+    private boolean submitTaskStarts(ConcurrencyDomain domain, int count) {
+        for (int i = 0; i < count; i++) {
+            if (!submitToExecutor("the start of a task", () -> processNextTask(domain))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private void processNextTask(ConcurrencyDomain domain) {
         Task task;
         synchronized (this) {
@@ -1051,22 +1104,14 @@ public abstract class DoerService {
                 notifyAll();
                 if (processedSuccessfully) {
                     ConcurrencyDomain newDomain = taskQueues.requeue(task);
-                    if (newDomain != null) {
-                        int nNew = newDomain.freeSlots();
-                        for (int i = 0; i < nNew; i++) {
-                            executor.execute(() -> processNextTask(newDomain));
-                        }
-                    }
-                    if (newDomain != domain) {
-                        int nOld = domain.freeSlots();
-                        for (int i = 0; i < nOld; i++) {
-                            executor.execute(() -> processNextTask(domain));
-                        }
+                    boolean accepted = newDomain == null || submitTaskStarts(newDomain, newDomain.freeSlots());
+                    if (accepted && newDomain != domain) {
+                        submitTaskStarts(domain, domain.freeSlots());
                     }
                 } else {
                     // When any task failed in concurrencyDomain we don't start all possible
                     // parralel executions, only one
-                    executor.execute(() -> processNextTask(domain));
+                    submitTaskStarts(domain, 1);
                 }
                 if (reloadRequested) {
                     triggerTaskReloadFromDb(task.getId());
