@@ -920,6 +920,78 @@ public class GeneratorITCase implements InWorkspace {
     }
 
     @Test
+    void setStatus__should_trace_parameters_of_private_methods_to_callers() throws Exception {
+        writeSource("Stork.java", """
+                package demo.test;
+                import java.util.function.Consumer;
+                import com.doer.*;
+                public class Stork {
+                    static final String LANDED = "Landed";
+                    @AcceptStatus("A1")
+                    public void fly(Task task) {
+                        land(task, "Direct");
+                        land(task, task.isInProgress() ? "Ternary" : LANDED);
+                        relay(task, "Relayed");
+                        ((Runnable) () -> land(task, "In lambda")).run();
+                        capture(task, "Captured");
+                        land(task, null);
+                    }
+                    public void notDoer(Task task) {
+                        land(task, "From public");
+                    }
+                    public void callsOverload(Task task) {
+                        overload(task, (Object) "Overload object");
+                        overload(task, "Overload string");
+                    }
+                    public void callsPackagePrivate(Task task) {
+                        packagePrivate(task, "Not traced");
+                    }
+                    private void relay(Task task, String status) {
+                        land(task, status);
+                    }
+                    private void land(Task task, String status) {
+                        if (task.isInProgress()) {
+                            land(task, status);
+                        }
+                        task.setStatus(status);
+                    }
+                    private void capture(Task task, String status) {
+                        ((Runnable) () -> task.setStatus(status)).run();
+                    }
+                    private void overload(Task task, String status) {
+                        task.setStatus(status);
+                    }
+                    private void overload(Task task, Object status) {
+                    }
+                    private void lambdaParameter(Task task) {
+                        Consumer<String> consumer = status -> task.setStatus(status);
+                        consumer.accept("Lambda parameter");
+                    }
+                    void packagePrivate(Task task, String status) {
+                        task.setStatus(status);
+                    }
+                    static class Wing {
+                        void flap(Task task, Stork stork) {
+                            stork.land(task, "From nested");
+                        }
+                    }
+                }
+                """);
+
+        javac("Stork.java").assertStatus(0);
+
+        JsonPath json = doerJson();
+        assertEquals(List.of("callsOverload", "fly", "notDoer", "flap"), json.getList("doer_methods.method"));
+        assertEquals(List.of("Overload string"), json.getList("doer_methods[0].emits"));
+        assertEquals(List.of("Captured", "Direct", "In lambda", "Landed", "Relayed", "Ternary"),
+                json.getList("doer_methods[1].emits"));
+        assertEquals(Boolean.TRUE, json.get("doer_methods[1].emits_null"));
+        assertEquals(List.of("From public"), json.getList("doer_methods[2].emits"));
+        assertNull(json.get("doer_methods[2].emits_null"));
+        assertEquals(List.of("From nested"), json.getList("doer_methods[3].emits"));
+    }
+
+    @Test
     void doer_json__should_list_delays_loaders_savers_and_describers() throws Exception {
         writeSource("Orders.java", """
                 package demo.test;

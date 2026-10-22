@@ -1069,15 +1069,20 @@ public abstract class DoerService {
         }
         try (Connection con = getConnection()) {
             Instant treshold = getDbNow().minus(timeout);
-            String sqlInsertLog = "INSERT INTO task_logs (task_id, initial_status, final_status, class_name, method_name, exception_type) "
-                    +
-                    "SELECT id, status, status, 'DoerService', 'resetStalledInProgressTasks', 'StalledTaskReset' " +
-                    "FROM tasks WHERE in_progress AND modified < ?";
+            String sqlInsertLog = """
+                    INSERT INTO task_logs (task_id, initial_status, final_status, class_name, method_name, exception_type)
+                    SELECT id, status, status, 'DoerService', 'resetStalledInProgressTasks', 'StalledTaskReset'
+                    FROM tasks WHERE in_progress AND modified < ?
+                    """;
             try (PreparedStatement pst = con.prepareStatement(sqlInsertLog)) {
                 pst.setObject(1, toOffsetDateTime(treshold));
                 pst.executeUpdate();
             }
-            String sqlUpdate = "UPDATE tasks SET in_progress = FALSE, version = version + 1, modified = now() WHERE in_progress AND modified < ?";
+            String sqlUpdate = """
+                    UPDATE tasks
+                    SET in_progress = FALSE, version = version + 1, modified = now()
+                    WHERE in_progress AND modified < ?
+                    """;
             try (PreparedStatement pst = con.prepareStatement(sqlUpdate)) {
                 pst.setObject(1, toOffsetDateTime(treshold));
                 int updated = pst.executeUpdate();
