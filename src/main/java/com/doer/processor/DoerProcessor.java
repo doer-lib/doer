@@ -832,8 +832,8 @@ public class DoerProcessor extends AbstractProcessor {
                         } catch (Exception | LinkageError | java.util.ServiceConfigurationError | OutOfMemoryError
                                 | StackOverflowError | AssertionError e) {
                             // As in DoerService.callDoerMethod: the failure of the method is still recorded
-                            LOG.log(java.util.logging.Level.SEVERE,
-                                    "ExtraJson creation error. TaskId: " + task.id(), e);
+                            LOG.log(java.util.logging.Level.SEVERE, "Exception describer failed: taskId=" + task.id()
+                                    + ", status=" + task.status() + ", exception=" + exception.getClass().getName(), e);
                         }
                         JsonObject jsonObject = builder.build();
                         if (jsonObject.isEmpty()) {

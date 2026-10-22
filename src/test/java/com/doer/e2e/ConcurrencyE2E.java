@@ -7,10 +7,17 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /** {@code @ConcurrencyLimit}, {@code @ConcurrencyGroup} and the queues of DoerService. */
 class ConcurrencyE2E extends E2eTestBase {
+
+    /**
+     * The line of the limits in the FINE message of each load ("Queues loaded by sub-queue"), which the runtimes of the
+     * tests write to the console: {@code "  limit:   10   20   10"}, under the first line of the message.
+     */
+    private static final Pattern LIMITS_LINE = Pattern.compile("\\s*limit:(\\s+\\d+)+\\s*");
 
     @Test
     void concurrency_1_should_run_only_1_method_at_a_time() {
@@ -114,7 +121,7 @@ class ConcurrencyE2E extends E2eTestBase {
         Thread.sleep(750);
         List<List<Integer>> limitsTable = E2eEnvironment.appLog(1).lines()
                 .skip(linesToSkip)
-                .filter(line -> line.contains(" Limits: "))
+                .filter(line -> LIMITS_LINE.matcher(line).matches())
                 .map(ConcurrencyE2E::parseLimitsLine)
                 .toList();
 
@@ -205,10 +212,10 @@ class ConcurrencyE2E extends E2eTestBase {
         return indexOfMaxValue;
     }
 
-    /** The limits of the queues in a log line {@code ... Limits: [10, 12, 10]}. */
+    /** The limits of the sub-queues in the line of {@link #LIMITS_LINE}. */
     private static List<Integer> parseLimitsLine(String line) {
-        String limits = line.split("Limits: \\[")[1].split("]")[0];
-        return Arrays.stream(limits.split(",\\s*")).map(Integer::valueOf).toList();
+        String limits = line.trim().substring("limit:".length()).trim();
+        return Arrays.stream(limits.split("\\s+")).map(Integer::valueOf).toList();
     }
 
     /** The task logs in their order, for the message of a failed check of timing. */
