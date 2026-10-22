@@ -8,7 +8,7 @@ on:
 
 jobs:
   java-compatibility:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       matrix:
         version: [ 17, 21, 25, 27 ]
@@ -67,7 +67,7 @@ jobs:
 
   # E2E suite (*E2E classes): Transit Sims in each runtime, in Docker, with one JDK; see src/test/README.md
   runtime-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -134,7 +134,7 @@ jobs:
   test-summary:
     needs: [ java-compatibility, runtime-e2e ]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       actions: read # the jobs of the run, for the wallclock of each matrix
