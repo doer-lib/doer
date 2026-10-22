@@ -140,7 +140,7 @@ public class SimResource {
      * progress is hijacked: the step fails on the version of the task, and its data is not saved.
      */
     private void setBusStatuses(UUID simulationId, String status) throws SQLException {
-        for (Task task : doerService.loadTasks(busRepository.taskIds(simulationId)).values()) {
+        for (Task task : doerService.loadTasksForUpdate(busRepository.taskIds(simulationId)).values()) {
             task.setInProgress(false);
             task.setFailingSince(null);
             task.setStatus(status);

@@ -184,6 +184,20 @@ public class DoerServiceJdbcITCase {
     }
 
     @Test
+    void loadTasksForUpdate__should_return_existing_tasks_once() throws Exception {
+        long id1 = insertTask("NEW", false, false, Duration.ZERO);
+        long id2 = insertTask("PAID", true, false, Duration.ZERO);
+
+        Map<Long, Task> result = service.loadTasksForUpdate(Arrays.asList(id2, id1, id2, 9839892L));
+
+        assertEquals(Set.of(id1, id2), result.keySet());
+        assertEquals("NEW", result.get(id1).getStatus());
+        assertEquals("PAID", result.get(id2).getStatus());
+        assertTrue(result.get(id2).isInProgress());
+        assertTrue(service.loadTasksForUpdate(Collections.emptyList()).isEmpty());
+    }
+
+    @Test
     void updateAndBumpVersion__should_update_task() throws Exception {
         long id = insertTask("NEW", false, false, Duration.ofMinutes(1));
         Sql.update(Postgres.dataSource(), "UPDATE tasks SET version = 3 WHERE id = " + id);

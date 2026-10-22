@@ -372,6 +372,26 @@ public abstract class DoerService {
         return result;
     }
 
+    /**
+     * Locks the task rows in the transaction of the caller, in the order of the ids against deadlocks. The generated
+     * service requires a transaction: without one the locks would be released at once.
+     */
+    public Map<Long, Task> loadTasksForUpdate(Collection<Long> ids) throws SQLException {
+        String sql = "SELECT * FROM tasks WHERE id = ANY(?) ORDER BY id FOR UPDATE";
+        HashMap<Long, Task> result = new HashMap<>();
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            Array sqlArray = con.createArrayOf("BIGINT", ids.toArray());
+            pst.setArray(1, sqlArray);
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    Task task = readTask(rs);
+                    result.put(task.getId(), task);
+                }
+            }
+        }
+        return result;
+    }
+
     public boolean updateAndBumpVersion(Task task) throws SQLException {
         int newVersion = task.getVersion() + 1;
         String sql = "UPDATE tasks SET in_progress = ?, status = ?, modified = now(), failing_since = ?, version = ? WHERE id = ? AND version = ? RETURNING *";
