@@ -79,7 +79,7 @@ public class CallDoerMethodTest {
         // The transaction of the loader is rolled back, the failure is saved in the next one
         assertRow("A", true, 1);
         assertEquals(List.of("A -> A java.lang.IllegalStateException"), service.logs());
-        assertLogged(Level.SEVERE, "Task data loader error");
+        assertLogged(Level.SEVERE, "Task data loader failed: taskId=" + task.getId() + ", status=A, method=Orders.accept");
         assertTaskIsRow();
     }
 
@@ -116,7 +116,7 @@ public class CallDoerMethodTest {
         assertEquals(List.of("load", "doer"), calls);
         assertRow("A", true, 2);
         assertEquals(List.of("A -> A java.lang.IllegalStateException"), service.logs());
-        assertLogged(Level.WARNING, "Doer method error");
+        assertLogged(Level.WARNING, "Doer method failed: taskId=" + task.getId() + ", status=A, method=Orders.accept");
     }
 
     @Test
@@ -136,7 +136,7 @@ public class CallDoerMethodTest {
         // The transaction of the saver is rolled back with the new status and its log
         assertRow("A", true, 2);
         assertEquals(List.of("A -> A java.lang.IllegalStateException"), service.logs());
-        assertLogged(Level.SEVERE, "Task data saver error");
+        assertLogged(Level.SEVERE, "Task data saver failed: taskId=" + task.getId() + ", status=A, method=Orders.accept");
         assertTaskIsRow();
     }
 
@@ -177,6 +177,22 @@ public class CallDoerMethodTest {
 
         assertEquals(List.of(), calls);
         assertEquals(List.of(), service.logs());
+    }
+
+    @Test
+    void version_conflict_after_doer_method__should_be_logged_as_warning() {
+        // The task is hijacked or reset as stalled while the doer method runs
+        Callable<Object> hijacked = () -> {
+            calls.add("doer");
+            task.setStatus("B");
+            service.row().setVersion(service.row().getVersion() + 1);
+            return null;
+        };
+
+        assertThrows(TaskVersionConflictException.class, () -> call(load(), hijacked, save()));
+
+        assertLogged(Level.WARNING, "Doer method result dropped, the task was changed while it ran: taskId="
+                + task.getId());
     }
 
     private void call(Callable<Object> loader, Callable<Object> caller, Callable<Object> saver) throws Exception {

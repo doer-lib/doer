@@ -30,7 +30,9 @@ class WildflyApp implements E2eApp {
         copyCustomSource("web.xml", webInf);
         // The pool of the ManagedExecutorService has as many threads as processors (4 on a runner of GitHub Actions)
         // and an unbounded queue: Doer would run fewer tasks at once than its limits. 200, as the pool of Quarkus.
-        copyCustomSource("executor.cli", workdir.resolve("src/main/wildfly"));
+        // The FINE messages of Doer on the console (DEBUG of the console handler): the limits and loaded rows of the
+        // sub-queues (ConcurrencyE2E).
+        copyCustomSource("server.cli", workdir.resolve("src/main/wildfly"));
     }
 
     /**
@@ -40,10 +42,10 @@ class WildflyApp implements E2eApp {
      * starts Java with {@code exec} in the foreground: Java gets the signals, and its exit code is the one of the container.
      * If {@code sed} finds nothing to change in a new {@code standalone.sh}, the container fails at once, rather than the
      * test of the exit code after SIGTERM. The data source gets the {@code E2E_DB_*} variables as system properties.
-     * Before the start, {@code executor.cli} configures the server with the embedded server of {@code jboss-cli.sh}.
+     * Before the start, {@code server.cli} configures the server with the embedded server of {@code jboss-cli.sh}.
      */
     static final String START = """
-            "$JBOSS_HOME/bin/jboss-cli.sh" --file=/opt/jboss/e2e/executor.cli
+            "$JBOSS_HOME/bin/jboss-cli.sh" --file=/opt/jboss/e2e/server.cli
             sed 's/eval \\\\"\\$JAVA\\\\" -D/eval exec \\\\"$JAVA\\\\" -D/' "$JBOSS_HOME/bin/standalone.sh" > "$JBOSS_HOME/bin/standalone-exec.sh"
             grep -q 'eval exec' "$JBOSS_HOME/bin/standalone-exec.sh" || { echo 'No exec in standalone-exec.sh' >&2; exit 1; }
             LAUNCH_JBOSS_IN_BACKGROUND= exec sh "$JBOSS_HOME/bin/standalone-exec.sh" -b 0.0.0.0 \\
@@ -54,7 +56,7 @@ class WildflyApp implements E2eApp {
     public DockerRunSpec dockerRun(Path workdir) {
         return new DockerRunSpec(List.of("-v", workdir.resolve("target/ROOT.war")
                 + ":/opt/jboss/wildfly/standalone/deployments/ROOT.war:ro",
-                "-v", workdir.resolve("src/main/wildfly/executor.cli") + ":/opt/jboss/e2e/executor.cli:ro"),
+                "-v", workdir.resolve("src/main/wildfly/server.cli") + ":/opt/jboss/e2e/server.cli:ro"),
                 WILDFLY_IMAGE, List.of("sh", "-c", START));
     }
 }

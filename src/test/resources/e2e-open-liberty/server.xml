@@ -10,8 +10,10 @@
     <variable name="env.E2E_DB_USER" defaultValue="doer"/>
     <variable name="env.E2E_DB_PASSWORD" defaultValue="doer"/>
 
-    <!-- The INFO messages of the application on the console, as in the other runtimes -->
-    <logging consoleLogLevel="INFO"/>
+    <!-- The INFO messages of the application on the console, as in the other runtimes. The console shows no level
+         below INFO, so the FINE messages of Doer (the limits and loaded rows of the sub-queues, ConcurrencyE2E) come
+         from the trace, which goes to stdout too -->
+    <logging consoleLogLevel="INFO" traceSpecification="*=info:com.doer.*=fine" traceFileName="stdout"/>
 
     <!-- The ManagedExecutorService runs on this pool, which starts with as many threads as processors (4 on
          a runner of GitHub Actions) and adds them slowly: Doer would run fewer tasks at once than its

@@ -12,7 +12,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.logging.Level;
 
 /**
  * Tasks of all concurrency domains in the memory of this node: queued in the sub-queues of the domains, or in
@@ -178,10 +178,11 @@ final class TaskQueues {
      */
     List<Task> replaceFromDb(List<Integer> limits, List<Task> rows, int minQueueSize) {
         List<List<Task>> rowsByQueue = rowsByQueue(rows);
-        LOG.info("Load tasks.size: " + rows.size());
-        LOG.info("Loaded in_progress: " + rows.stream().filter(Task::isInProgress).count());
-        LOG.info("Limits: " + limits);
-        LOG.info("Loads: " + rowsByQueue.stream().map(List::size).collect(Collectors.toList()));
+        if (LOG.isLoggable(Level.FINE)) {
+            LOG.log(Level.FINE, "Queues loaded by sub-queue: inProgress="
+                    + rows.stream().filter(Task::isInProgress).count() + "\n"
+                    + formatLoad(limits, rowsByQueue.stream().map(List::size).toList()));
+        }
 
         List<Task> tasksWithUncertainState = new ArrayList<>();
         Set<Task> notQueued = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -189,15 +190,16 @@ final class TaskQueues {
         for (Task row : rows) {
             Task queued = queuedTasks.get(row.getId());
             if (queued != null && queued.getVersion() > row.getVersion()) {
-                LOG.info("Newer task " + row.getId() + " " + row.getModified());
+                LOG.log(Level.FINER, "Loaded task not queued, a newer version is queued: taskId=" + row.getId());
                 tasksWithUncertainState.add(row);
                 notQueued.add(row);
             } else if (inProgress.containsKey(row.getId())) {
-                LOG.info("Skipped In progress " + row.getId() + " " + row.getModified());
+                LOG.log(Level.FINER, "Loaded task not queued, it runs here: taskId=" + row.getId());
                 notQueued.add(row);
                 reloadWhenFinished(row.getId());
             } else if (row.isInProgress()) {
-                LOG.info("Skipped DB In progress " + row.getId() + " " + row.getModified());
+                LOG.log(Level.FINER, "Loaded task not queued, it is in progress in the database: taskId="
+                        + row.getId());
                 tasksWithUncertainState.add(row);
                 notQueued.add(row);
             }
@@ -270,16 +272,17 @@ final class TaskQueues {
     }
 
     /** "limit/queued" of each sub-queue, for the log. */
-    String describeLoad(List<Integer> limits) {
-        StringBuilder sb = new StringBuilder();
+    /** Two lines, the LIMIT and the number of loaded rows of each sub-queue, one under the other. */
+    static String formatLoad(List<Integer> limits, List<Integer> loaded) {
+        StringBuilder limitLine = new StringBuilder("  limit: ");
+        StringBuilder loadedLine = new StringBuilder("  loaded:");
         for (int i = 0; i < limits.size(); i++) {
-            if (sb.length() > 0) {
-                sb.append(", ");
-            }
-            sb.append(limits.get(i))
-                    .append("/")
-                    .append(queues.get(i).size());
+            String limit = String.valueOf(limits.get(i));
+            String count = String.valueOf(loaded.get(i));
+            int width = Math.max(limit.length(), count.length()) + 2;
+            limitLine.append(" ".repeat(width - limit.length())).append(limit);
+            loadedLine.append(" ".repeat(width - count.length())).append(count);
         }
-        return sb.toString();
+        return limitLine + "\n" + loadedLine;
     }
 }

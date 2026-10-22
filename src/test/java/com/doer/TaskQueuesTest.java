@@ -176,7 +176,6 @@ public class TaskQueuesTest {
         assertEquals(List.of(), tasksWithUncertainState);
         assertEquals(List.of(a1, a2), List.copyOf(domain.queues().get(0).tasks()));
         assertEquals(List.of(failing), List.copyOf(domain.queues().get(1).tasks()));
-        assertEquals("4/2, 10/1", taskQueues.describeLoad(List.of(4, 10)));
         // asap: 2 of 4 loaded, the db may have more; failing: 1 of 10 loaded, the capacity is halved
         assertEquals(List.of(4, 5), nextLimits(T0));
         assertFalse(domain.queues().get(0).isDrained());
@@ -346,5 +345,13 @@ public class TaskQueuesTest {
         copy.assignFieldsFrom(task);
         copy.setVersion(version);
         return copy;
+    }
+
+    @Test
+    void formatLoad__should_put_loaded_rows_under_limit_of_each_sub_queue() {
+        assertEquals("""
+                  limit:   10  100     5
+                  loaded:   3   97  1234\
+                """, TaskQueues.formatLoad(List.of(10, 100, 5), List.of(3, 97, 1234)));
     }
 }

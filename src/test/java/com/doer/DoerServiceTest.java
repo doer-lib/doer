@@ -26,6 +26,9 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -94,6 +97,12 @@ public class DoerServiceTest {
         clock.set(plannedAt);
         assertTrue(timer.fireIfDue());
         runAllExecutorJobs();
+    }
+
+    /** Fires the wake-up that each load plans 10 s after its start, to log it if it is slow; nothing is due then. */
+    void advanceToSlowLoadCheck() {
+        assertEquals(Duration.ofSeconds(10), timer.plannedDelay());
+        advanceToWakeUp();
     }
 
     @Test
@@ -204,8 +213,9 @@ public class DoerServiceTest {
         service.start();
         runAllExecutorJobs();
         assertEquals(1, service.tst_loads.get());
+        advanceToSlowLoadCheck();
 
-        assertEquals(Duration.ofSeconds(30), timer.plannedDelay());
+        assertEquals(Duration.ofSeconds(20), timer.plannedDelay());
         advanceToWakeUp();
 
         assertEquals(2, service.tst_loads.get());
@@ -216,6 +226,7 @@ public class DoerServiceTest {
         service.setupConcurrencyDomain("D1", 2, Map.of("S", Duration.ZERO), Map.of());
         service.start();
         runAllExecutorJobs();
+        advanceToSlowLoadCheck();
 
         // The next load is due in 10 min, the reset of stalled tasks in 30 min
         assertEquals(Duration.ofMinutes(1), timer.plannedDelay());
@@ -499,6 +510,44 @@ public class DoerServiceTest {
         assertTrue(timer.fireIfDue());
 
         assertEquals(Duration.ofMinutes(1), timer.plannedDelay());
+    }
+
+    @Test
+    void scheduler__should_log_slow_load_with_stack_trace_of_its_thread() {
+        service.setupConcurrencyDomain("D1", 1, Map.of("S", Duration.ZERO), Map.of());
+        List<LogRecord> records = new ArrayList<>();
+        Handler handler = new Handler() {
+            @Override
+            public void publish(LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        DoerService.LOG.addHandler(handler);
+        try {
+            // The select still runs when the scheduler wakes up
+            service.tst_on_select = () -> {
+                assertEquals(Duration.ofSeconds(10), timer.plannedDelay());
+                advanceToWakeUp();
+            };
+            service.start();
+            runAllExecutorJobs();
+        } finally {
+            DoerService.LOG.removeHandler(handler);
+        }
+
+        LogRecord slow = records.stream().filter(r -> r.getLevel() == Level.SEVERE).findFirst().orElseThrow();
+        assertTrue(slow.getMessage().startsWith("Queues load is slow: runningMs=10000, thread="), slow.getMessage());
+        assertTrue(Arrays.stream(slow.getThrown().getStackTrace())
+                        .anyMatch(frame -> frame.getMethodName().equals("loadTasksFromDatabase")),
+                "the stack trace is not of the thread of the load");
     }
 
     @Test

@@ -34,7 +34,6 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.stream.Collectors;
 import javax.sql.DataSource;
 
 /**
@@ -62,6 +61,8 @@ public abstract class DoerService {
     private static final Duration MAX_WAKE_UP_DELAY = Duration.ofMinutes(1);
     /** Work that is due but cannot be done now (a load is running) does not wake the scheduler more often. */
     private static final Duration MIN_WAKE_UP_DELAY = Duration.ofMillis(100);
+    /** A load of the queues that runs longer is logged as an error, with the stack trace of its thread. */
+    private static final Duration SLOW_QUEUES_LOAD = Duration.ofSeconds(10);
 
     // Dependencies: from the container
 
@@ -106,6 +107,9 @@ public abstract class DoerService {
     private final Set<Long> reloadAfterLoad = new HashSet<>();
     /** The executor rejected a load or a reload of a task: the next tick loads the queues. */
     private boolean queuesReloadRetry;
+    /** Thread of the running load, for the stack trace of a slow load (see {@link #SLOW_QUEUES_LOAD}). */
+    private Thread queuesLoadThread;
+    private boolean slowQueuesLoadReported;
 
     // Scheduler
 
@@ -221,11 +225,16 @@ public abstract class DoerService {
             }
             triggerQueuesReload();
             reschedule();
+            LOG.log(Level.INFO, "DoerService started: domains=" + taskQueues.domains().size() + ", subQueues="
+                    + taskQueues.queues().size());
         }
     }
 
     public void stop() {
         synchronized (this) {
+            if (isRunning) {
+                LOG.log(Level.INFO, "DoerService stopped");
+            }
             isRunning = false;
             stopWakeUpTimer();
         }
@@ -255,7 +264,7 @@ public abstract class DoerService {
     /** Called under the lock. */
     private void scheduleQueuesReload() {
         // The job waits for the lock, so the state can be set after it is accepted
-        if (submitToExecutor("the load of the queues", self()::reloadQueues)) {
+        if (submitToExecutor("queuesLoad", self()::reloadQueues)) {
             queuesReloadState = QueuesReloadState.SCHEDULED;
         } else {
             queuesReloadState = QueuesReloadState.IDLE;
@@ -276,7 +285,7 @@ public abstract class DoerService {
             if (queuesReloadState == QueuesReloadState.RUNNING) {
                 reloadAfterLoad.add(taskId);
             }
-            if (!submitToExecutor("the reload of task " + taskId, () -> reloadQueuedTask(taskId))) {
+            if (!submitToExecutor("taskReload, taskId=" + taskId, () -> reloadQueuedTask(taskId))) {
                 queuesReloadRetry = true;
             }
         }
@@ -428,8 +437,7 @@ public abstract class DoerService {
             executor.execute(this::onTick);
         } catch (RuntimeException e) {
             // Also other exceptions: without a planned wake-up the scheduler would stop
-            LOG.log(Level.WARNING, "The executor did not accept the tick of the scheduler. Next try in "
-                    + MAX_WAKE_UP_DELAY, e);
+            LOG.log(Level.WARNING, "Executor did not accept scheduler tick: retryIn=" + MAX_WAKE_UP_DELAY, e);
             synchronized (this) {
                 if (isRunning && wakeUpTimer != null) {
                     wakeUpTimer.wakeUpNoLaterThan(MAX_WAKE_UP_DELAY);
@@ -446,11 +454,18 @@ public abstract class DoerService {
         try {
             List<Long> reconciliationIds = null;
             long reconciliationGeneration = 0;
+            Thread slowLoadThread = null;
+            long slowLoadMs = 0;
             synchronized (this) {
                 if (!isRunning) {
                     return;
                 }
                 Instant now = getDbNow();
+                if (isDue(slowQueuesLoadTime(), now)) {
+                    slowQueuesLoadReported = true;
+                    slowLoadThread = queuesLoadThread;
+                    slowLoadMs = Duration.between(lastQueueSelectTime, now).toMillis();
+                }
                 if (isDue(reloadTime(), now)) {
                     triggerQueuesReload();
                 }
@@ -468,6 +483,9 @@ public abstract class DoerService {
                         break;
                     }
                 }
+            }
+            if (slowLoadThread != null) {
+                logSlowQueuesLoad(slowLoadThread, slowLoadMs);
             }
             if (reconciliationIds != null) {
                 reconcile(reconciliationIds, reconciliationGeneration);
@@ -489,6 +507,7 @@ public abstract class DoerService {
         next = earlier(next, reloadTime());
         next = earlier(next, stalledTaskResetTime());
         next = earlier(next, reconciliationTime());
+        next = earlier(next, slowQueuesLoadTime());
         next = earlier(next, taskQueues.earliestReadyTimeOfFreeDomains());
         return next;
     }
@@ -533,6 +552,22 @@ public abstract class DoerService {
         return lastReconciliationTime == null ? Instant.MIN : lastReconciliationTime.plus(reconciliationInterval);
     }
 
+    /** Called under the lock. When the running load becomes slow; null when none runs, or it is logged already. */
+    private Instant slowQueuesLoadTime() {
+        if (queuesLoadThread == null || slowQueuesLoadReported) {
+            return null;
+        }
+        return lastQueueSelectTime.plus(SLOW_QUEUES_LOAD);
+    }
+
+    /** Logs the stack trace of the thread of the load: where it waits (the database, a lock, the pool). */
+    private static void logSlowQueuesLoad(Thread thread, long runningMs) {
+        Throwable stackTrace = new Throwable("Stack trace of " + thread.getName());
+        stackTrace.setStackTrace(thread.getStackTrace());
+        LOG.log(Level.SEVERE, "Queues load is slow: runningMs=" + runningMs + ", thread=" + thread.getName(),
+                stackTrace);
+    }
+
     private static boolean isDue(Instant time, Instant now) {
         return time != null && !time.isAfter(now);
     }
@@ -550,8 +585,8 @@ public abstract class DoerService {
                 }
             }
         } catch (SQLException e) {
+            LOG.log(Level.WARNING, "Task reload failed, the queues are loaded instead: taskId=" + taskId, e);
             triggerQueuesReload();
-            LOG.log(Level.WARNING, "Failed to load single task. Queue reloade initiated.", e);
         }
     }
 
@@ -582,7 +617,7 @@ public abstract class DoerService {
         try {
             dbTasks = self().loadTasks(ids);
         } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to load tasks for reconciliation", e);
+            LOG.log(Level.WARNING, "Reconciliation failed: taskIds=" + ids, e);
         }
         synchronized (this) {
             reconciliationInProgress = false;
@@ -624,27 +659,34 @@ public abstract class DoerService {
                 tasksWithUncertainState.clear();
                 queueLoadGeneration++;
                 lastQueueSelectTime = getDbNow();
+                queuesLoadThread = Thread.currentThread();
+                slowQueuesLoadReported = false;
+                // The wake-up that logs a slow load
+                reschedule();
             }
+            long startNanos = System.nanoTime();
             List<Task> tasksFromDb = self().loadTasksFromDatabase(limits);
-            String infoMessage;
+            int selectMs = millisSince(startNanos);
             synchronized (this) {
                 if (isRunning) {
                     tasksWithUncertainState.addAll(taskQueues.replaceFromDb(limits, tasksFromDb, minQueueSize));
-                    LOG.info("Tasks to reload later: "
-                            + tasksWithUncertainState.stream().map(Task::getId).collect(Collectors.toList()));
-                    infoMessage = "Queues Loaded (limit/loaded): " + taskQueues.describeLoad(limits);
+                    LOG.log(Level.INFO, "Queues loaded: tasks=" + tasksFromDb.size() + ", selectMs=" + selectMs);
+                    if (!tasksWithUncertainState.isEmpty() && LOG.isLoggable(Level.FINER)) {
+                        LOG.log(Level.FINER, "Tasks to reconcile: taskIds="
+                                + tasksWithUncertainState.stream().map(Task::getId).toList());
+                    }
                 } else {
-                    infoMessage = "Queues Loaded but skipped. Because DoerService was stopped";
+                    LOG.log(Level.FINE, "Queues load dropped, the service is stopped: tasks=" + tasksFromDb.size());
                 }
             }
-            LOG.info(infoMessage);
         } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to load tasks from db. Limits: " + limits, e);
+            LOG.log(Level.WARNING, "Queues load failed: limits=" + limits, e);
         } finally {
             synchronized (this) {
+                queuesLoadThread = null;
                 if (isRunning) {
                     for (long taskId : reloadAfterLoad) {
-                        if (!submitToExecutor("the reload of task " + taskId, () -> reloadQueuedTask(taskId))) {
+                        if (!submitToExecutor("taskReload, taskId=" + taskId, () -> reloadQueuedTask(taskId))) {
                             // The next load replaces the reloads of the tasks
                             queuesReloadRetry = true;
                             break;
@@ -661,7 +703,7 @@ public abstract class DoerService {
                         queuesReloadState = QueuesReloadState.IDLE;
                     }
                     // The load may have queued ready tasks: they don't wait for the next load
-                    submitToExecutor("the tick of the scheduler", this::onTick);
+                    submitToExecutor("schedulerTick", this::onTick);
                 }
             }
         }
@@ -712,6 +754,8 @@ public abstract class DoerService {
     public void callDoerMethod(Task task, Callable<Object> loader, Callable<Object> caller, Callable<Object> saver,
             String className, String methodName, Duration errorTimeout, String onErrorStatus) throws Exception {
         String initialStatus = task.getStatus();
+        String details = "taskId=" + task.getId() + ", status=" + initialStatus + ", method=" + className + "."
+                + methodName;
         long startNanos = System.nanoTime();
         Throwable failure = null;
         Task initialTask = new Task();
@@ -724,13 +768,15 @@ public abstract class DoerService {
                 return null;
             });
         } catch (TaskVersionConflictException e) {
+            // Usual in a cluster: another node has started the task
+            LOG.log(Level.FINE, "Task not started, it was changed concurrently: " + details);
             throw e;
         } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
                 | AssertionError e) {
             failure = e;
             // The transaction is rolled back: the task is as it was before
             task.assignFieldsFrom(initialTask);
-            LOG.log(Level.SEVERE, "Task data loader error. TaskId: " + task.getId(), e);
+            LOG.log(Level.SEVERE, "Task data loader failed: " + details, e);
         }
         if (failure == null) {
             Task startedTask = new Task();
@@ -740,7 +786,7 @@ public abstract class DoerService {
             } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
                     | AssertionError e) {
                 failure = e;
-                LOG.log(Level.WARNING, "Doer method error. TaskId: " + task.getId(), e);
+                LOG.log(Level.WARNING, "Doer method failed: " + details, e);
             }
             if (failure == null) {
                 try {
@@ -755,13 +801,15 @@ public abstract class DoerService {
                     });
                     return;
                 } catch (TaskVersionConflictException e) {
+                    // The task was hijacked or reset as stalled while the method ran: its result is lost
+                    LOG.log(Level.WARNING, "Doer method result dropped, the task was changed while it ran: " + details);
                     throw e;
                 } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
                         | AssertionError e) {
                     failure = e;
                     // The transaction is rolled back: the task is in progress, as after the start
                     task.assignFieldsFrom(startedTask);
-                    LOG.log(Level.SEVERE, "Task data saver error. TaskId: " + task.getId(), e);
+                    LOG.log(Level.SEVERE, "Task data saver failed: " + details, e);
                 }
             }
         }
@@ -785,6 +833,9 @@ public abstract class DoerService {
                         extraJson, millisSince(startNanos));
                 return null;
             });
+        } catch (TaskVersionConflictException e) {
+            LOG.log(Level.WARNING, "Doer method failure not recorded, the task was changed while it ran: " + details);
+            throw e;
         } finally {
             if (failure instanceof InterruptedException) {
                 // Caught from the user's code, which cleared the flag: the thread is still to be interrupted
@@ -903,6 +954,8 @@ public abstract class DoerService {
                     throw new TaskInProgressException(taskId);
                 }
                 Instant inProgressSince = task.getModified();
+                LOG.log(Level.FINE, "Task hijacked: taskId=" + taskId + ", status=" + task.getStatus()
+                        + ", inProgressSince=" + inProgressSince + ", by=" + className + "." + methodName);
                 String extraJson = inProgressSince == null ? null
                         : "{\"inProgressSince\": \"" + inProgressSince + "\"}";
                 writeTaskLog(taskId, task.getStatus(), task.getStatus(), className, methodName, "TaskHijacked",
@@ -965,14 +1018,14 @@ public abstract class DoerService {
             // Set now: the next tick must not start the reset again before it runs
             Instant previousCheckTime = lastStalledTaskCheckTime;
             lastStalledTaskCheckTime = getDbNow();
-            boolean accepted = submitToExecutor("the reset of stalled tasks", () -> {
+            boolean accepted = submitToExecutor("stalledTaskReset", () -> {
                 try {
                     if (self().resetStalledInProgressTasks(stalledTaskTimeout) > 0) {
                         // The reset tasks are queued now, not by the next periodic load
                         triggerQueuesReload();
                     }
                 } catch (SQLException e) {
-                    LOG.log(Level.WARNING, "Error resetting stalled tasks", e);
+                    LOG.log(Level.WARNING, "Stalled task reset failed: timeout=" + stalledTaskTimeout, e);
                 }
             });
             if (!accepted) {
@@ -1008,7 +1061,11 @@ public abstract class DoerService {
             try (PreparedStatement pst = con.prepareStatement(sqlUpdate)) {
                 pst.setObject(1, toOffsetDateTime(treshold));
                 int updated = pst.executeUpdate();
-                LOG.info("Reset stalled in_progress tasks. Updated " + updated + " rows");
+                if (updated > 0) {
+                    LOG.log(Level.WARNING, "Stalled tasks reset: tasks=" + updated + ", timeout=" + timeout);
+                } else {
+                    LOG.log(Level.FINE, "No stalled tasks: timeout=" + timeout);
+                }
                 return updated;
             }
         }
@@ -1048,13 +1105,15 @@ public abstract class DoerService {
     /**
      * Called under the lock. Hands the job to the executor. A job the executor rejects is logged, and the caller gets
      * false: it undoes what it has set for the job, and the next tick of the scheduler does the work.
+     *
+     * @param job name of the job for the log, with its details as key=value: {@code "taskReload, taskId=5"}
      */
     private boolean submitToExecutor(String job, Runnable runnable) {
         try {
             executor.execute(runnable);
             return true;
         } catch (RejectedExecutionException e) {
-            LOG.log(Level.WARNING, "The executor rejected " + job + ". The scheduler tries again", e);
+            LOG.log(Level.WARNING, "Executor rejected job, next tick retries: job=" + job, e);
             return false;
         }
     }
@@ -1065,7 +1124,7 @@ public abstract class DoerService {
      */
     private boolean submitTaskStarts(ConcurrencyDomain domain, int count) {
         for (int i = 0; i < count; i++) {
-            if (!submitToExecutor("the start of a task", () -> processNextTask(domain))) {
+            if (!submitToExecutor("taskStart, domain=" + domain.name(), () -> processNextTask(domain))) {
                 return false;
             }
         }
@@ -1095,10 +1154,9 @@ public abstract class DoerService {
             processedSuccessfully = true;
         } catch (TaskVersionConflictException e) {
             // Another node or facilitateCoordinatedUpdate changed the task: the task is dropped here, the one that
-            // changed it queues it. A reload this node was asked for meanwhile is done below.
-            LOG.fine("Task changed concurrently, dropped. TaskId: " + task.getId());
+            // changed it queues it. A reload this node was asked for meanwhile is done below. Logged by callDoerMethod.
         } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to run task TaskId: " + task.getId(), e);
+            LOG.log(Level.WARNING, "Task run failed: taskId=" + task.getId() + ", status=" + task.getStatus(), e);
         } finally {
             Thread.currentThread().setName(threadName);
             synchronized (this) {
