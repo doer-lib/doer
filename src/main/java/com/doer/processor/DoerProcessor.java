@@ -89,7 +89,7 @@ public class DoerProcessor extends AbstractProcessor {
             "jakarta.json.JsonWriter", "jakarta.json.stream.JsonGenerator",
             "java.util.concurrent.Callable", "java.util.concurrent.Executor", "javax.sql.DataSource",
             "java.sql.SQLException", "java.io.IOException", "java.io.StringWriter", "java.util.List",
-            "java.util.HashMap", "java.time.Duration");
+            "java.util.HashMap", "java.util.Map", "java.util.Collection", "java.time.Duration");
 
     // Filled by process() in the round with doer annotations
     private final List<DoerMethodInfo> doerMethods = new ArrayList<>();
@@ -789,6 +789,12 @@ public class DoerProcessor extends AbstractProcessor {
                         @Transactional(Transactional.TxType.REQUIRED)
                         public List<Task> loadTasksFromDatabase(List<Integer> limits) throws SQLException, IOException {
                             return super.loadTasksFromDatabase(limits);
+                        }
+
+                        @Override
+                        @Transactional(Transactional.TxType.MANDATORY)
+                        public Map<Long, Task> loadTasksForUpdate(Collection<Long> ids) throws SQLException {
+                            return super.loadTasksForUpdate(ids);
                         }
 
                     """);
