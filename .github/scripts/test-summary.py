@@ -3,7 +3,7 @@
 
 Per matrix: tests run/failed/skipped, wallclock of the matrix jobs, and a table
 with a row per test class (time of the class) and a row per test method, a column per matrix value.
-Time of a failed test is red; a cell is empty when the test did not run there.
+Time of a failed test is marked with 🔴; a cell is empty when the test did not run there.
 When an artifact has container-usage.json (written by the e2e suite, see E2eEnvironment), the table starts with
 the CPU, disk and network I/O of the application containers, summed over all of them (node 1, node 2, restarts).
 
@@ -159,7 +159,7 @@ def cell(result):
     if result is None or result.status == SKIPPED:
         return ""
     time = f"{result.time:.3f}"
-    return f"$\\color{{red}}{{{time}}}$" if result.status == FAILED else time
+    return f"🔴 {time}" if result.status == FAILED else time
 
 
 def matrix_summary(title, job_name, artifact_prefix, reports_dir, jobs):
