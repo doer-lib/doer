@@ -309,9 +309,9 @@ public class DoerServiceJdbcITCase {
         assertEquals("NEW", stalledTask.getStatus());
         assertEquals(1, stalledTask.getVersion());
         assertTrue(stalledTask.getModified().isAfter(stalledModified));
-        List<TaskLog> stalledLogs = taskLogs(stalled);
+        List<TaskLogRow> stalledLogs = taskLogs(stalled);
         assertEquals(1, stalledLogs.size());
-        assertEquals(new TaskLog(stalled, 1, stalledLogs.get(0).created(), "NEW", "NEW", "DoerService",
+        assertEquals(new TaskLogRow(stalled, 1, stalledLogs.get(0).created(), "NEW", "NEW", "DoerService",
                 "resetStalledInProgressTasks", null, "StalledTaskReset", null), stalledLogs.get(0));
         Task runningTask = service.loadTask(running);
         assertTrue(runningTask.isInProgress());
@@ -329,35 +329,34 @@ public class DoerServiceJdbcITCase {
 
     @Test
     void insertTaskLog__should_write_all_columns() throws Exception {
-        TaskLog written = service.insertTaskLog(new TaskLog(801L, "NEW", "PAID", "Orders", "process", 15,
-                "java.lang.IllegalStateException", "{\"e1\": \"Exception\"}"));
+        service.insertTaskLog(801L, "NEW", "PAID", "Orders", "process", 15, "java.lang.IllegalStateException",
+                "{\"e1\": \"Exception\"}");
 
-        assertEquals(1, written.seqNo());
-        assertNotNull(written.created());
-        assertEquals(new TaskLog(801L, 1, written.created(), "NEW", "PAID", "Orders", "process", 15,
-                "java.lang.IllegalStateException", "{\"e1\": \"Exception\"}"), written);
-        assertEquals(List.of(written), taskLogs(801L));
+        List<TaskLogRow> logs = taskLogs(801L);
+        assertEquals(1, logs.size());
+        assertNotNull(logs.get(0).created());
+        assertEquals(new TaskLogRow(801L, 1, logs.get(0).created(), "NEW", "PAID", "Orders", "process", 15,
+                "java.lang.IllegalStateException", "{\"e1\": \"Exception\"}"), logs.get(0));
     }
 
     @Test
     void insertTaskLog__should_write_nulls() throws Exception {
-        TaskLog written = service.insertTaskLog(new TaskLog(802L, "NEW", null, "Orders", "process", null, null, null));
+        service.insertTaskLog(802L, "NEW", null, "Orders", "process", null, null, null);
 
-        assertEquals(new TaskLog(802L, 1, written.created(), "NEW", null, "Orders", "process", null, null, null),
-                written);
-        assertEquals(List.of(written), taskLogs(802L));
+        List<TaskLogRow> logs = taskLogs(802L);
+        assertEquals(List.of(new TaskLogRow(802L, 1, logs.get(0).created(), "NEW", null, "Orders", "process", null,
+                null, null)), logs);
     }
 
     @Test
     void insertTaskLog__should_number_logs_of_each_task() throws Exception {
-        TaskLog first = service.insertTaskLog(new TaskLog(803L, "A", "B", "Orders", "process", null, null, null));
-        TaskLog other = service.insertTaskLog(new TaskLog(804L, "A", "B", "Orders", "process", null, null, null));
-        TaskLog second = service.insertTaskLog(new TaskLog(803L, "B", "C", "Orders", "process", null, null, null));
+        service.insertTaskLog(803L, "A", "B", "Orders", "process", null, null, null);
+        service.insertTaskLog(804L, "A", "B", "Orders", "process", null, null, null);
+        service.insertTaskLog(803L, "B", "C", "Orders", "process", null, null, null);
 
-        assertEquals(1, first.seqNo());
-        assertEquals(1, other.seqNo());
-        assertEquals(2, second.seqNo());
-        assertEquals(List.of(first, second), taskLogs(803L));
+        assertEquals(List.of(1, 2), taskLogs(803L).stream().map(TaskLogRow::seqNo).toList());
+        assertEquals(List.of("B", "C"), taskLogs(803L).stream().map(TaskLogRow::finalStatus).toList());
+        assertEquals(List.of(1), taskLogs(804L).stream().map(TaskLogRow::seqNo).toList());
     }
 
     /**
@@ -370,17 +369,20 @@ public class DoerServiceJdbcITCase {
         try (Connection con = Postgres.dataSource().getConnection(); Statement st = con.createStatement()) {
             con.setAutoCommit(false);
             st.executeUpdate("INSERT INTO task_logs (task_id, seqno, final_status) VALUES (805, 1, 'Concurrent')");
-            Future<TaskLog> written = executor.submit(() -> service.insertTaskLog(
-                    new TaskLog(805L, "A", "B", "Orders", "process", null, null, null)));
+            Future<?> written = executor.submit(() -> {
+                service.insertTaskLog(805L, "A", "B", "Orders", "process", null, null, null);
+                return null;
+            });
             waitForLockWait();
             assertFalse(written.isDone());
             con.commit();
 
-            assertEquals(2, written.get(10, TimeUnit.SECONDS).seqNo());
+            written.get(10, TimeUnit.SECONDS);
         } finally {
             executor.shutdownNow();
         }
-        assertEquals(List.of("Concurrent", "B"), taskLogs(805L).stream().map(TaskLog::finalStatus).toList());
+        assertEquals(List.of(1, 2), taskLogs(805L).stream().map(TaskLogRow::seqNo).toList());
+        assertEquals(List.of("Concurrent", "B"), taskLogs(805L).stream().map(TaskLogRow::finalStatus).toList());
     }
 
     /** Waits until an insert into task_logs waits for a lock. */
@@ -421,17 +423,22 @@ public class DoerServiceJdbcITCase {
         }
     }
 
+    /** A row of task_logs. */
+    record TaskLogRow(long taskId, int seqNo, Instant created, String initialStatus, String finalStatus,
+            String className, String methodName, Integer durationMs, String exceptionType, String extraJson) {
+    }
+
     /** The task_logs rows of the task, in the order they were written. */
-    List<TaskLog> taskLogs(long taskId) throws SQLException {
+    List<TaskLogRow> taskLogs(long taskId) throws SQLException {
         String sql = "SELECT task_id, seqno, created, initial_status, final_status, class_name, method_name, "
                 + "duration_ms, exception_type, extra_json::text FROM task_logs WHERE task_id = ? ORDER BY seqno";
-        List<TaskLog> logs = new ArrayList<>();
+        List<TaskLogRow> logs = new ArrayList<>();
         try (Connection con = Postgres.dataSource().getConnection();
                 PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setLong(1, taskId);
             try (ResultSet rs = pst.executeQuery()) {
                 while (rs.next()) {
-                    logs.add(new TaskLog(rs.getLong(1), rs.getInt(2), rs.getObject(3, OffsetDateTime.class).toInstant(),
+                    logs.add(new TaskLogRow(rs.getLong(1), rs.getInt(2), rs.getObject(3, OffsetDateTime.class).toInstant(),
                             rs.getString(4), rs.getString(5), rs.getString(6), rs.getString(7),
                             rs.getObject(8, Integer.class), rs.getString(9), rs.getString(10)));
                 }

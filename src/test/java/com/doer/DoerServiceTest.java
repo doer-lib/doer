@@ -913,8 +913,8 @@ public class DoerServiceTest {
         }
 
         @Override
-        public TaskLog insertTaskLog(TaskLog log) {
-            return log;
+        protected void insertTaskLog(long taskId, String initialStatus, String finalStatus, String className,
+                String methodName, Integer durationMs, String exceptionType, String extraJson) {
         }
 
         @Override
