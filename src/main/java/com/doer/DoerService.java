@@ -1,6 +1,5 @@
 package com.doer;
 
-import com.doer.ConcurrencyDomainImpl.SubQueue;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Array;
@@ -9,190 +8,204 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Scanner;
+import java.util.ServiceConfigurationError;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.stream.Collectors;
+import javax.sql.DataSource;
 
+/**
+ * Runs the doer methods on the tasks of the database. The annotation processor generates its subclass
+ * {@code com.doer.generated._GeneratedDoerService}, which the application injects, starts and stops.
+ * <p>
+ * A node keeps the first tasks of each sub-queue in memory ({@link TaskQueues}), loads them from the database, and runs
+ * them in the threads of the executor of the container, at most the limit of their concurrency domain at a time. The
+ * scheduler does the work no event starts: it runs a task when its delay or retry interval has passed, reloads the
+ * queues every {@link #queueReloadInterval}, checks again the tasks a load skipped, and resets stalled tasks. Its timer
+ * ({@link WakeUpTimer}) only hands the tick to the executor. See scheduler-refactoring-design.md.
+ * <p>
+ * The state of the queues, the scheduler, the reconciliation and the stalled tasks is guarded by the lock of this
+ * object; the queries run outside it. All times are times of the database ({@link #getDbNow}).
+ * <p>
+ * The package-private fields are settings with their defaults, and hooks for the tests of {@code com.doer} (the
+ * clock, the timer): the tests set them before {@link #start}.
+ */
 public abstract class DoerService {
-    private static final long MAX_MONITOR_TIMEOUT_MS = 60 * 1000;
-    Logger logger = Logger.getLogger(DoerService.class.getName());
-    protected DoerService self;
-    protected volatile boolean isRunning;
-    protected volatile boolean taskLoadRequired;
-    protected volatile boolean loadingInProgress;
-    protected Executor executor;
 
+    // Constants
+
+    protected static final Logger LOG = Logger.getLogger(DoerService.class.getName());
+    /** Safety net: the scheduler wakes up at least this often, even when nothing is planned. */
+    private static final Duration MAX_WAKE_UP_DELAY = Duration.ofMinutes(1);
+    /** Work that is due but cannot be done now (a load is running) does not wake the scheduler more often. */
+    private static final Duration MIN_WAKE_UP_DELAY = Duration.ofMillis(100);
+    /** A load of the queues that runs longer is logged as an error, with the stack trace of its thread. */
+    private static final Duration SLOW_QUEUES_LOAD = Duration.ofSeconds(10);
+    /** Inserts of a task log, each with the next seqno of the task: a concurrent writer of the task may take it. */
+    private static final int TASK_LOG_ATTEMPTS = 3;
+
+    // Dependencies: from the container
+
+    /**
+     * Providers of the beans not looked up yet. The generated service puts a provider here in each @Inject method
+     * instead of the bean, and the bean is looked up on first use (see {@link #bean}). DoerService and the beans it
+     * calls may refer to each other, and DoerService calls itself through the container, so with providers no
+     * container has to resolve a circular reference. A provider is removed after the first successful lookup, so it
+     * can be garbage collected.
+     */
+    protected final ConcurrentHashMap<Class<?>, Supplier<?>> beanProviders = new ConcurrentHashMap<>();
+    /** Beans looked up by their providers, and the self reference. */
+    protected final ConcurrentHashMap<Class<?>, Object> beans = new ConcurrentHashMap<>();
+    private Executor executor;
+    private DataSource dataSource;
+
+    // Lifecycle
+
+    private boolean isRunning;
+
+    // Database time: getDbNow()
+
+    Clock clock = Clock.systemUTC();
     protected AtomicInteger dbTimeDiffMs = new AtomicInteger(0);
-    protected ConcurrentLinkedQueue<Task> inProgressTasks = new ConcurrentLinkedQueue<>();
-    protected ConcurrentLinkedQueue<Task> reCheckTasks = new ConcurrentLinkedQueue<>();
-    protected Instant lastReCheck;
 
-    private ConcurrentLinkedQueue<ConcurrencyDomainImpl> domains = new ConcurrentLinkedQueue<>();
-    private Set<String> statusesCache;
+    // Queue loading: configuration
 
     Duration queueReloadInterval = Duration.ofMinutes(10);
-    Instant lastSelectTime;
-    int maxAllQueuesSize = 10000;
-    int minSingleQueueSize = 10;
-    boolean monitorEnabled;
-    Thread monitorThread;
+    int maxTotalQueueSize = 10000;
+    int minQueueSize = 10;
+
+    // Queue loading: state
+
+    final TaskQueues taskQueues = new TaskQueues();
+    QueuesReloadState queuesReloadState = QueuesReloadState.IDLE;
+    /** Set before the select of each load, also of a load that fails. */
+    Instant lastQueueSelectTime;
+    /**
+     * Tasks queued while a load runs: the load may have selected before they changed, and drop them with the buffers it
+     * replaces, so they are reloaded when it ends.
+     */
+    private final Set<Long> reloadAfterLoad = new HashSet<>();
+    /** The executor rejected a load or a reload of a task: the next tick loads the queues. */
+    private boolean queuesReloadRetry;
+    /** Thread of the running load, for the stack trace of a slow load (see {@link #SLOW_QUEUES_LOAD}). */
+    private Thread queuesLoadThread;
+    private boolean slowQueuesLoadReported;
+
+    // Scheduler
+
+    Function<Runnable, WakeUpTimer> wakeUpTimerFactory = ScheduledWakeUpTimer::new;
+    /** Exists between {@link #start} and {@link #stop}. */
+    WakeUpTimer wakeUpTimer;
+
+    // Reconciliation: configuration
+
+    Duration reconciliationInterval = Duration.ofSeconds(2);
+    /** A skipped task unchanged for this time after its modified is not checked again: the next load sees it. */
+    Duration reconciliationWindow = Duration.ofSeconds(10);
+
+    // Reconciliation: state
+
+    /** Tasks skipped by the last load, to check again (see {@link TaskQueues#replaceFromDb}). */
+    final List<Task> tasksWithUncertainState = new ArrayList<>();
+    /**
+     * Number of the load that filled {@link #tasksWithUncertainState}: the result of a reconciliation of an older load
+     * is dropped.
+     */
+    private long queueLoadGeneration;
+    private boolean reconciliationInProgress;
+    private Instant lastReconciliationTime;
+
+    // Stalled tasks: configuration
+
     Duration stalledTaskCheckInterval = Duration.ofMinutes(30);
     Duration stalledTaskTimeout = Duration.ofHours(2);
-    Instant lastStalledTaskChecked = Instant.now();
 
-    public void start(boolean enableMonitor) {
-        synchronized (this) {
-            isRunning = true;
-            monitorEnabled = enableMonitor;
-            triggerQueuesReloadFromDb();
-            if (!enableMonitor) {
-                this.notify();
-            }
-        }
+    // Stalled tasks: state
+
+    /** Set by the first start: the first reset is due {@link #stalledTaskCheckInterval} after it. */
+    Instant lastStalledTaskCheckTime;
+
+    /** This service as the container gives it to other beans, so that calls go through its interceptors. */
+    private DoerService self() {
+        return bean(DoerService.class);
     }
 
-    public void stop() {
-        synchronized (this) {
-            isRunning = false;
-            this.notify();
-        }
+    /**
+     * The bean of the type, looked up by its provider on first use, once. When the provider throws or returns null,
+     * nothing is stored and the next call asks the provider again. A provider must not create a bean that calls
+     * DoerService while it is created: the lookup of another bean inside a lookup fails ("Recursive update").
+     */
+    protected <T> T bean(Class<T> type) {
+        return type.cast(beans.computeIfAbsent(type, t -> {
+            Supplier<?> provider = beanProviders.get(t);
+            if (provider == null) {
+                throw new IllegalStateException("No provider of bean " + t.getName() + " was injected");
+            }
+            Object bean = provider.get();
+            if (bean != null) {
+                beanProviders.remove(t);
+            }
+            return bean;
+        }));
     }
 
-    public boolean isMonitorEnabld() {
-        synchronized (this) {
-            return monitorEnabled;
-        }
+    public Executor getExecutor() {
+        return executor;
     }
 
-    public void setMonitorEnabled(boolean value) {
-        synchronized (this) {
-            monitorEnabled = value;
-            executor.execute(this::monitorIdleState);
-        }
+    public void setExecutor(Executor executor) {
+        this.executor = executor;
     }
 
-    private void monitorIdleState() {
-        synchronized (this) {
-            if (!monitorEnabled) {
-                return;
-            }
-            if (loadingInProgress) {
-                return;
-            }
-            if (!inProgressTasks.isEmpty()) {
-                return;
-            }
-            if (monitorThread != null) {
-                return;
-            }
-            monitorThread = Thread.currentThread();
-            String threadName = Thread.currentThread().getName();
-            Thread.currentThread().setName("doer-idle-monitor");
-            try {
-                long timeout = getNextCheckTime();
-                long waitTime = timeout > 0 ? timeout : 1000;
-                logInfo("Next check after " + waitTime);
-                this.wait(waitTime);
-                executor.execute(self::onCheckTime);
-            } catch (InterruptedException e) {
-                logWarning("Monitoring thread interrupted", e);
-            } finally {
-                Thread.currentThread().setName(threadName);
-                monitorThread = null;
-            }
-        }
+    public DataSource getDataSource() {
+        return dataSource;
     }
 
-    private long getNextCheckTime() {
-        TreeSet<Instant> plannedTimes = new TreeSet<>();
-        synchronized (this) {
-            Instant now = getDbNow();
-            if (lastSelectTime == null) {
-                return 0;
-            }
-            Instant nextDbLoadTime = lastSelectTime.plus(queueReloadInterval);
-            if (nextDbLoadTime.isBefore(now)) {
-                return 0;
-            }
-            plannedTimes.add(nextDbLoadTime);
-            for (ConcurrencyDomainImpl domain : domains) {
-                for (SubQueue queue : domain.queues) {
-                    if (!queue.buffer.isEmpty()) {
-                        Instant plannedTime = domain.getTaskReadyTime(queue.buffer.first());
-                        if (plannedTime.equals(Instant.MIN)) {
-                            return 0;
-                        }
-                        plannedTimes.add(plannedTime);
-                    }
-                }
-            }
-            if (stalledTaskCheckInterval != null) {
-                if (lastStalledTaskChecked == null) {
-                    return 0;
-                }
-                plannedTimes.add(lastStalledTaskChecked.plus(stalledTaskCheckInterval));
-            }
-            if (plannedTimes.isEmpty()) {
-                return MAX_MONITOR_TIMEOUT_MS;
-            }
-            long ms = Duration.between(now, plannedTimes.first()).toMillis();
-            return Math.min(MAX_MONITOR_TIMEOUT_MS, Math.max(0, ms));
-        }
+    public void setDataSource(DataSource dataSource) {
+        this.dataSource = dataSource;
     }
 
-    public void onCheckTime() {
-        synchronized (this) {
-            Instant now = getDbNow();
-            if (stalledTaskCheckInterval != null && lastStalledTaskChecked != null &&
-                    lastStalledTaskChecked.plus(stalledTaskCheckInterval).isBefore(now)) {
-                triggerStalledTaskReset();
-            } else if (lastSelectTime == null || lastSelectTime.plus(queueReloadInterval).isBefore(now)) {
-                triggerQueuesReloadFromDb();
-            }
-            checkTasksBecomeReady();
-        }
+    public void setMaxTotalQueueSize(int value) {
+        maxTotalQueueSize = value;
     }
 
-    public void setMaxAllQueuesSize(int value) {
-        maxAllQueuesSize = value;
+    public int getMaxTotalQueueSize() {
+        return maxTotalQueueSize;
     }
 
-    public int getMaxAllQueuesSize() {
-        return maxAllQueuesSize;
+    public void setMinQueueSize(int value) {
+        minQueueSize = value;
     }
 
-    public void setMinSingleQueueSize(int value) {
-        minSingleQueueSize = value;
-    }
-
-    public int getMinSingleQueueSize() {
-        return minSingleQueueSize;
+    public int getMinQueueSize() {
+        return minQueueSize;
     }
 
     public void setQueueReloadInterval(Duration value) {
+        // todo ban negative or 0 values
         queueReloadInterval = value;
     }
 
@@ -200,39 +213,65 @@ public abstract class DoerService {
         return queueReloadInterval;
     }
 
-    protected void setupConcurrencyDomain(String name, int concurrency, Map<String, Duration> delays, Map<String, Duration> retryDelays) {
-        HashSet<String> keys = new HashSet<>(delays.keySet());
-        keys.addAll(retryDelays.keySet());
-        List<String> statuses = new CopyOnWriteArrayList<>(keys);
-        Collections.sort(statuses);
-
-        ConcurrencyDomainImpl domain = new ConcurrencyDomainImpl();
-        domain.domainName = name;
-        domain.numberOfTasksToRunSimultaneously = concurrency;
-        domain.statuses = statuses;
-        domain.delays = new HashMap<>(delays);
-        domain.retryDelays = new HashMap<>(retryDelays);
-        domain.numberOfTasksInProgress = 0;
-        domain.initSubQueues(minSingleQueueSize);
-        domains.add(domain);
-        synchronized(this) {
-            this.statusesCache = null;
+    /**
+     * Starts the service: loads the queues and starts the scheduler, which runs the tasks when they are ready, reloads
+     * the queues and resets stalled tasks. A stopped service can be started again.
+     */
+    public void start() {
+        synchronized (this) {
+            isRunning = true;
+            if (wakeUpTimer == null) {
+                wakeUpTimer = wakeUpTimerFactory.apply(this::wakeUp);
+            }
+            if (lastStalledTaskCheckTime == null) {
+                lastStalledTaskCheckTime = getDbNow();
+            }
+            triggerQueuesReload();
+            reschedule();
+            LOG.log(Level.INFO, "DoerService started: domains=" + taskQueues.domains().size() + ", subQueues="
+                    + taskQueues.queues().size());
         }
     }
 
-    public void triggerQueuesReloadFromDb() {
+    public void stop() {
+        synchronized (this) {
+            if (isRunning) {
+                LOG.log(Level.INFO, "DoerService stopped");
+            }
+            isRunning = false;
+            stopWakeUpTimer();
+        }
+    }
+
+    /** Called under the lock. */
+    private void stopWakeUpTimer() {
+        if (wakeUpTimer != null) {
+            wakeUpTimer.shutdown();
+            wakeUpTimer = null;
+        }
+    }
+
+    public void triggerQueuesReload() {
         synchronized (this) {
             if (!isRunning) {
                 return;
             }
-            if (taskLoadRequired) {
-                return;
+            switch (queuesReloadState) {
+                case IDLE -> scheduleQueuesReload();
+                case RUNNING -> queuesReloadState = QueuesReloadState.RUNNING_THEN_AGAIN;
+                case SCHEDULED, RUNNING_THEN_AGAIN -> { }
             }
-            taskLoadRequired = true;
-            if (!loadingInProgress) {
-                loadingInProgress = true;
-                executor.execute(self::reloadTasksFromDb);
-            }
+        }
+    }
+
+    /** Called under the lock. */
+    private void scheduleQueuesReload() {
+        // The job waits for the lock, so the state can be set after it is accepted
+        if (submitToExecutor("queuesLoad", self()::reloadQueues)) {
+            queuesReloadState = QueuesReloadState.SCHEDULED;
+        } else {
+            queuesReloadState = QueuesReloadState.IDLE;
+            queuesReloadRetry = true;
         }
     }
 
@@ -241,373 +280,42 @@ public abstract class DoerService {
             if (!isRunning) {
                 return;
             }
-            if (taskLoadRequired) {
+            // A reload that hasn't selected yet will see the task, so the task needs no reload of its own
+            if (queuesReloadState == QueuesReloadState.SCHEDULED
+                    || queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN) {
                 return;
             }
-            executor.execute(() -> reloadQueuedTask(taskId));
-        }
-    }
-
-    private void reloadQueuedTask(long taskId) {
-        try {
-            Task task = self.loadTask(taskId);
-            if (task != null && !task.isInProgress()) {
-                synchronized (this) {
-                    for (Task t : inProgressTasks) {
-                        if (taskId == t.getId()) {
-                            return;
-                        }
-                    }
-                    for (ConcurrencyDomainImpl domain : domains) {
-                        domain.dropTask(taskId);
-                    }
-                    for (ConcurrencyDomainImpl domain : domains) {
-                        if (domain.getStatuses().contains(task.getStatus())) {
-                            domain.putTaskToQueue(task);
-                            if (domain.numberOfTasksInProgress < domain.getValue()) {
-                                executor.execute(() -> processNextTask(domain));
-                            }
-                            return;
-                        }
-                    }
-                }
+            if (queuesReloadState == QueuesReloadState.RUNNING) {
+                reloadAfterLoad.add(taskId);
             }
-        } catch (SQLException e) {
-            triggerQueuesReloadFromDb();
-            logWarning("Failed to load single task. Queue reloade initiated.", e);
+            if (!submitToExecutor("taskReload, taskId=" + taskId, () -> reloadQueuedTask(taskId))) {
+                queuesReloadRetry = true;
+            }
         }
     }
 
-    private void reCheckTask() {
-        if (reCheckTasks.isEmpty()) {
-            return;
-        }
+    /**
+     * Puts the copy of the row this node has just committed to the queues, in place of the queued copy, with no load of
+     * its own. While a load runs, the task is also reloaded when the load ends (see {@link #reloadAfterLoad}).
+     */
+    private void requeueCommittedTask(Task row) {
         synchronized (this) {
             if (!isRunning) {
                 return;
             }
-            if (lastReCheck != null) {
-                Duration breakBetweenChecks = Duration.ofSeconds(2);
-                Instant earliestNextCheckTime = lastReCheck.plus(breakBetweenChecks);
-                if (Instant.now().isBefore(earliestNextCheckTime)) {
-                    return;
-                }
+            if (queuesReloadState == QueuesReloadState.RUNNING) {
+                reloadAfterLoad.add(row.getId());
             }
-            lastReCheck = Instant.now();
-        }
-        try {
-            Iterator<Task> iterator = reCheckTasks.iterator();
-            while (iterator.hasNext()) {
-                Task task = iterator.next();
-                Task dbTask = self.loadTask(task.getId());
-                if (dbTask == null) {
-                    iterator.remove();
-                } else if (dbTask.getVersion() > task.getVersion()) {
-                    iterator.remove();
-                    self.triggerTaskReloadFromDb(task.getId());
-                } else if (getDbNow().isAfter(dbTask.getModified().plusSeconds(10))) {
-                    iterator.remove();
-                }
-            }
-        } catch (Exception e) {
-            logWarning("Failed to load task for re-check", e);
+            replaceQueuedTask(row);
         }
     }
 
-    public void checkTasksBecomeReady() {
-        reCheckTask();
-        synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            Iterator<ConcurrencyDomainImpl> iterator = domains.iterator();
-            while (iterator.hasNext()) {
-                ConcurrencyDomainImpl domain = iterator.next();
-                if (domain.numberOfTasksInProgress < domain.getValue()) {
-                    executor.execute(() -> processNextTask(domain));
-                }
-            }
-        }
-    }
-
-    public void reloadTasksFromDb() {
-        List<Integer> limits = new ArrayList<>();
-        synchronized (this) {
-            if (!isRunning) {
-                return;
-            }
-            taskLoadRequired = false;
-            loadingInProgress = true;
-            limits = calculateLimits();
-            lastReCheck = null;
-            reCheckTasks.clear();
-            lastSelectTime = getDbNow();
-        }
-        try {
-            List<Task> tasksFromDb = self.loadTasksFromDatabase(limits);
-            String infoMessage;
-            synchronized (this) {
-                if (isRunning) {
-                    updateQueues(limits, tasksFromDb);
-                    infoMessage = "Queues Loaded (limit/loaded): "
-                            + createLimitVolumeMessage(limits, getQueueVolumes());
-                } else {
-                    infoMessage = "Queues Loaded but skipped. Because DoerService was stopped";
-                }
-            }
-            logInfo(infoMessage);
-        } catch (Exception e) {
-            logWarning("Failed to load tasks from db. Limits: " + limits, e);
-        } finally {
-            synchronized (this) {
-                if (taskLoadRequired) {
-                    executor.execute(self::reloadTasksFromDb);
-                } else {
-                    loadingInProgress = false;
-                    executor.execute(self::checkTasksBecomeReady);
-                }
-            }
-        }
-    }
-
-    public Logger getLogger() {
-        return logger;
-    }
-
-    public void setLogger(Logger logger) {
-        this.logger = logger;
-    }
-
-    public void logWarning(String message, Exception e) {
-        if (logger != null) {
-            logger.log(Level.WARNING, message, e);
-        }
-    }
-
-    public void logInfo(String message) {
-        if (logger != null) {
-            logger.log(Level.INFO, message);
-        }
-    }
-
-    private List<Integer> calculateLimits() {
-        List<SubQueue> queues = new ArrayList<>();
-        for (ConcurrencyDomainImpl domain : domains) {
-            for (SubQueue queue : domain.queues) {
-                queues.add(queue);
-            }
-        }
-
-        boolean hasDrainedQueue = false;
-        int drainedQueueSize = 0;
-        int drainedQueueSizeIndex = 0;
-        for (int i = 0; i < queues.size(); i++) {
-            SubQueue queue = queues.get(i);
-            if (queue.buffer.isEmpty() && queue.hasMoreInDb) {
-                hasDrainedQueue = true;
-                drainedQueueSize = queue.queueSize;
-                drainedQueueSizeIndex = i;
-                break;
-            }
-        }
-
-        List<Integer> sizes = new ArrayList<>();
-        int totalQueuesSize = 0;
-        Duration queueUsageTime = (lastSelectTime == null ? Duration.ZERO : Duration.between(lastSelectTime, getDbNow()));
-        boolean queueIsUsed80PercentOfReloadTime = (queueUsageTime
-                .compareTo(queueReloadInterval.dividedBy(10).multipliedBy(8)) >= 0);
-        for (int i = 0; i < queues.size(); i++) {
-            SubQueue queue = queues.get(i);
-            int size;
-            if ((queueIsUsed80PercentOfReloadTime || hasDrainedQueue) && queue.queueSize > minSingleQueueSize
-                    && queue.buffer.size() > queue.queueSize / 2) {
-                size = Math.max(queue.queueSize / 2, minSingleQueueSize);
-            } else {
-                size = queue.queueSize;
-            }
-            sizes.add(size);
-            totalQueuesSize += size;
-        }
-        if (!queueIsUsed80PercentOfReloadTime) {
-            if (hasDrainedQueue && totalQueuesSize + drainedQueueSize <= maxAllQueuesSize) {
-                sizes.set(drainedQueueSizeIndex, drainedQueueSize * 2);
-            }
-        }
-        return sizes;
-    }
-
-    private void updateQueues(List<Integer> limits, List<Task> tasks) {
-        // We select tasks from db limited by each subquery, and additionally all
-        // in_progress.
-        // Using loaded snapshot we calculate how much we actually loaded for every
-        // subquery - to know that DB has more rows for that subquery.
-        // Since we read DB, till now DoerService may have updated some task, and now it
-        // has newer version of Task - we put that task in re-chek list.
-        // When we read DB we may see in_progress task that is not in our memory any
-        // more (other node processed it?)
-        LinkedList<Integer> limitsCopy = new LinkedList<>(limits);
-        LinkedList<Integer> loadedCounts = calculateActualLoadedCounts(tasks);
-        logInfo("Load tasks.size: " + tasks.size());
-        logInfo("Loaded in_progress: " + tasks.stream().filter(Task::isInProgress).count());
-        logInfo("Limits: " + limitsCopy);
-        logInfo("Loads: " + loadedCounts);
-        HashSet<Long> inProgressIds = new HashSet<>();
-        for (Task task : inProgressTasks) {
-            inProgressIds.add(task.getId());
-        }
-        LinkedList<Task> copy = new LinkedList<>();
-        HashMap<Long, Task> inMemoryTasks = getInMemoryTasks();
-        for (Task task : tasks) {
-            Task memo = inMemoryTasks.get(task.getId());
-            if (memo != null && memo.getVersion() > task.getVersion()) {
-                logInfo("Newer task " + task.getId() + " " + task.getModified());
-                reCheckTasks.add(task);
-            } else if (inProgressIds.contains(task.getId())) {
-                // We should not put task to the list, if it is in_progress
-                logInfo("Skipped In progress " + task.getId() + " " + task.getModified());
-            } else if (task.isInProgress()) {
-                // If task in db was in progress, and we don't have updated copy in memory, we
-                // need to check it a bit later.
-                logInfo("Skipped DB In progress " + task.getId() + " " + task.getModified());
-                reCheckTasks.add(task);
-            } else {
-                copy.add(task);
-            }
-        }
-        for (ConcurrencyDomainImpl domain : domains) {
-            HashMap<Duration, HashSet<String>> delayedStatuses = new HashMap<>();
-            HashMap<Duration, HashSet<String>> retryStatuses = new HashMap<>();
-            for (String status : domain.getStatuses()) {
-                delayedStatuses
-                        .computeIfAbsent(domain.getDelay(status), key -> new HashSet<>())
-                        .add(status);
-                retryStatuses
-                        .computeIfAbsent(domain.getRetryDelay(status), key -> new HashSet<>())
-                        .add(status);
-            }
-            for (SubQueue queue : domain.queues) {
-                List<Task> newBuffer = new ArrayList<>();
-                if (!queue.failingTaskQueue) {
-                    HashSet<String> statuses = delayedStatuses.get(queue.delay);
-                    Iterator<Task> iterator = copy.iterator();
-                    while (iterator.hasNext()) {
-                        Task task = iterator.next();
-                        if (task.getFailingSince() == null && statuses.contains(task.getStatus())) {
-                            iterator.remove();
-                            newBuffer.add(task);
-                        }
-                    }
-                } else {
-                    HashSet<String> statuses = retryStatuses.get(queue.delay);
-                    Iterator<Task> iterator = copy.iterator();
-                    while (iterator.hasNext()) {
-                        Task task = iterator.next();
-                        if (task.getFailingSince() != null && statuses.contains(task.getStatus())) {
-                            iterator.remove();
-                            newBuffer.add(task);
-                        }
-                    }
-                }
-                queue.buffer.clear();
-                queue.buffer.addAll(newBuffer);
-                int limit = limitsCopy.pollFirst();
-                int loaded = loadedCounts.pollFirst();
-                queue.queueSize = (loaded < limit / 2 ? Math.max(limit / 2, minSingleQueueSize) : limit);
-                queue.hasMoreInDb = (limit <= loaded);
-            }
-        }
-        logInfo("Tasks to reload later: " + reCheckTasks.stream().map(Task::getId).collect(Collectors.toList()));
-    }
-
-    private LinkedList<Integer> calculateActualLoadedCounts(List<Task> tasks) {
-        LinkedList<Integer> counts = new LinkedList<>();
-        LinkedList<Task> copy = new LinkedList<>(tasks);
-        for (ConcurrencyDomainImpl domain : domains) {
-            HashMap<Duration, HashSet<String>> delayedStatuses = new HashMap<>();
-            HashMap<Duration, HashSet<String>> retryStatuses = new HashMap<>();
-            for (String status : domain.getStatuses()) {
-                delayedStatuses
-                        .computeIfAbsent(domain.getDelay(status), key -> new HashSet<>())
-                        .add(status);
-                retryStatuses
-                        .computeIfAbsent(domain.getRetryDelay(status), key -> new HashSet<>())
-                        .add(status);
-            }
-            for (SubQueue queue : domain.queues) {
-                int loadedTasks = 0;
-                if (!queue.failingTaskQueue) {
-                    HashSet<String> statuses = delayedStatuses.get(queue.delay);
-                    Iterator<Task> iterator = copy.iterator();
-                    while (iterator.hasNext()) {
-                        Task task = iterator.next();
-                        if (task.getFailingSince() == null && statuses.contains(task.getStatus())) {
-                            iterator.remove();
-                            loadedTasks++;
-                        }
-                    }
-                } else {
-                    HashSet<String> statuses = retryStatuses.get(queue.delay);
-                    Iterator<Task> iterator = copy.iterator();
-                    while (iterator.hasNext()) {
-                        Task task = iterator.next();
-                        if (task.getFailingSince() != null && statuses.contains(task.getStatus())) {
-                            iterator.remove();
-                            loadedTasks++;
-                        }
-                    }
-                }
-                counts.add(loadedTasks);
-            }
-        }
-        return counts;
-    }
-
-    private HashMap<Long, Task> getInMemoryTasks() {
-        HashMap<Long, Task> inMemoryTasks = new HashMap<>();
-        for (ConcurrencyDomainImpl domain : domains) {
-            for (SubQueue queue : domain.queues) {
-                Iterator<Task> iterator = queue.buffer.iterator();
-                while (iterator.hasNext()) {
-                    Task task = iterator.next();
-                    inMemoryTasks.put(task.getId(), task);
-                }
-            }
-        }
-        return inMemoryTasks;
-    }
-
-    private List<Integer> getQueueVolumes() {
-        List<Integer> result = new ArrayList<>();
-        for (ConcurrencyDomainImpl domain : domains) {
-            for (SubQueue queue : domain.queues) {
-                result.add(queue.buffer.size());
-            }
-        }
-        return result;
-    }
-
-    private String createLimitVolumeMessage(List<Integer> limits, List<Integer> volumes) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < limits.size(); i++) {
-            if (sb.length() > 0) {
-                sb.append(", ");
-            }
-            sb.append(limits.get(i))
-                    .append("/")
-                    .append(volumes.get(i));
-        }
-        String ss = sb.toString();
-        return ss;
-    }
-
-    public void setExecutor(Executor executor) {
-        this.executor = executor;
+    public Connection getConnection() throws SQLException {
+        return dataSource.getConnection();
     }
 
     public Instant getDbNow() {
-        Instant i = Instant.now()
-                .plusMillis(dbTimeDiffMs.get());
-        return i;
+        return clock.instant().plusMillis(dbTimeDiffMs.get());
     }
 
     public long generateId() throws SQLException {
@@ -635,14 +343,6 @@ public abstract class DoerService {
                 }
             }
         }
-    }
-
-    private OffsetDateTime toOffsetDateTime(Instant instant) {
-        return instant == null ? null : OffsetDateTime.ofInstant(instant, ZoneId.systemDefault());
-    }
-
-    private Instant toInstant(OffsetDateTime odt) {
-        return odt == null ? null : odt.toInstant();
     }
 
     public Task loadTask(long id) throws SQLException {
@@ -675,16 +375,24 @@ public abstract class DoerService {
         return result;
     }
 
-    private Task readTask(ResultSet rs) throws SQLException {
-        Task task = new Task();
-        task.setId(rs.getLong("id"));
-        task.setCreated(toInstant(rs.getObject("created", OffsetDateTime.class)));
-        task.setModified(toInstant(rs.getObject("modified", OffsetDateTime.class)));
-        task.setStatus(rs.getString("status"));
-        task.setInProgress(rs.getBoolean("in_progress"));
-        task.setFailingSince(toInstant(rs.getObject("failing_since", OffsetDateTime.class)));
-        task.setVersion(rs.getInt("version"));
-        return task;
+    /**
+     * Locks the task rows in the transaction of the caller, in the order of the ids against deadlocks. The generated
+     * service requires a transaction: without one the locks would be released at once.
+     */
+    public Map<Long, Task> loadTasksForUpdate(Collection<Long> ids) throws SQLException {
+        String sql = "SELECT * FROM tasks WHERE id = ANY(?) ORDER BY id FOR UPDATE";
+        HashMap<Long, Task> result = new HashMap<>();
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            Array sqlArray = con.createArrayOf("BIGINT", ids.toArray());
+            pst.setArray(1, sqlArray);
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    Task task = readTask(rs);
+                    result.put(task.getId(), task);
+                }
+            }
+        }
+        return result;
     }
 
     public boolean updateAndBumpVersion(Task task) throws SQLException {
@@ -709,19 +417,15 @@ public abstract class DoerService {
         }
     }
 
-    public abstract void runTask(Task task) throws Exception;
-
-    public abstract void runInTransaction(Callable<Object> code) throws Exception;
-
-    public abstract Connection getConnection() throws SQLException;
+    private void updateAndBumpVersionOrThrow(Task task) throws SQLException {
+        if (!updateAndBumpVersion(task)) {
+            throw new TaskVersionConflictException(task.getId());
+        }
+    }
 
     public List<Task> loadTasksFromDatabase(List<Integer> limits) throws SQLException, IOException {
         List<Task> tasks = new ArrayList<>();
-        String sql;
-        try (InputStream is = getClass().getResourceAsStream("/com/doer/generated/SelectTasks.sql");
-             Scanner scanner = new Scanner(is, "UTF-8")) {
-            sql = scanner.useDelimiter("\\A").next();
-        }
+        String sql = readSelectTasksSql();
         try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             for (int i = 0; i < limits.size(); i++) {
                 pst.setInt(i + 1, limits.get(i));
@@ -736,229 +440,761 @@ public abstract class DoerService {
         return tasks;
     }
 
-    public void callDoerMethod(Task task, Callable<Object> loader, Callable<Object> caller, Callable<Object> unloader,
-            String className, String methodName, Duration errorTimeout, String onErrorStatus) throws Exception {
-        String initialStatus = task.getStatus();
-        long t0 = System.currentTimeMillis();
-        self.runInTransaction(() -> {
-            task.setInProgress(true);
-            if (!updateAndBumpVersion(task)) {
-                throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
-            }
-            loader.call();
-            return null;
-        });
-        Exception exception;
+    /** SQL generated by DoerProcessor that selects the tasks for the queues, one LIMIT parameter per queue. */
+    protected String readSelectTasksSql() throws IOException {
+        try (InputStream is = getClass().getResourceAsStream("/com/doer/generated/SelectTasks.sql");
+             Scanner scanner = new Scanner(is, "UTF-8")) {
+            return scanner.useDelimiter("\\A").next();
+        }
+    }
+
+    protected void setupConcurrencyDomain(String name, int limit, Map<String, Duration> delays, Map<String, Duration> retryDelays) {
+        synchronized (this) {
+            taskQueues.addDomain(name, limit, delays, retryDelays, minQueueSize);
+        }
+    }
+
+    /** Called by the timer of the scheduler, in its thread: hands the tick to the executor. */
+    private void wakeUp() {
         try {
-            caller.call();
-            exception = null;
-        } catch (Exception e) {
-            exception = e;
-            logWarning("Doer method error", e);
+            executor.execute(this::onTick);
+        } catch (RuntimeException e) {
+            // Also other exceptions: without a planned wake-up the scheduler would stop
+            LOG.log(Level.WARNING, "Executor did not accept scheduler tick: retryIn=" + MAX_WAKE_UP_DELAY, e);
+            synchronized (this) {
+                if (isRunning && wakeUpTimer != null) {
+                    wakeUpTimer.wakeUpNoLaterThan(MAX_WAKE_UP_DELAY);
+                }
+            }
         }
-        if (exception == null) {
-            try {
-                self.runInTransaction(() -> {
-                    task.setFailingSince(null);
-                    task.setInProgress(false);
-                    if (!updateAndBumpVersion(task)) {
-                        throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
+    }
+
+    /**
+     * Does the work of the scheduler that is due (see {@link #nextWakeUp}) and plans the next wake-up. Runs in a thread
+     * of the executor: when the timer wakes up, and after each load.
+     */
+    private void onTick() {
+        try {
+            List<Long> reconciliationIds = null;
+            long reconciliationGeneration = 0;
+            Thread slowLoadThread = null;
+            long slowLoadMs = 0;
+            synchronized (this) {
+                if (!isRunning) {
+                    return;
+                }
+                Instant now = getDbNow();
+                if (isDue(slowQueuesLoadTime(), now)) {
+                    slowQueuesLoadReported = true;
+                    slowLoadThread = queuesLoadThread;
+                    slowLoadMs = Duration.between(lastQueueSelectTime, now).toMillis();
+                }
+                if (isDue(reloadTime(), now)) {
+                    triggerQueuesReload();
+                }
+                if (isDue(stalledTaskResetTime(), now)) {
+                    triggerStalledTaskReset();
+                }
+                if (isDue(reconciliationTime(), now)) {
+                    lastReconciliationTime = now;
+                    reconciliationInProgress = true;
+                    reconciliationIds = tasksWithUncertainState.stream().map(Task::getId).toList();
+                    reconciliationGeneration = queueLoadGeneration;
+                }
+                for (ConcurrencyDomain domain : taskQueues.domains()) {
+                    if (domain.hasReadyTask(now) && !submitTaskStarts(domain, domain.freeSlots())) {
+                        break;
                     }
-                    unloader.call();
-                    int t = (int) (System.currentTimeMillis() - t0);
-                    writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, null, null, t);
-                    return null;
-                });
-                return;
-            } catch (OptimisticLockException e) {
-                throw e;
-            } catch (Exception e) {
-                exception = e;
-                logWarning("Unloader error", e);
+                }
             }
-        }
-        Exception finalException = exception;
-        self.runInTransaction(() -> {
-            if (task.getFailingSince() == null) {
-                task.setFailingSince(getDbNow());
-                task.setStatus(initialStatus);
-            } else if (errorTimeout != null && task.getFailingSince().plus(errorTimeout).isBefore(getDbNow())) {
-                task.setFailingSince(null);
-                task.setStatus(onErrorStatus);
-            } else {
-                task.setStatus(initialStatus);
+            if (slowLoadThread != null) {
+                logSlowQueuesLoad(slowLoadThread, slowLoadMs);
             }
-            task.setInProgress(false);
-            if (!updateAndBumpVersion(task)) {
-                throw new OptimisticLockException("Task update failed. Optimistic lock exception.");
+            if (reconciliationIds != null) {
+                reconcile(reconciliationIds, reconciliationGeneration);
             }
-            String exceptionType = finalException.getClass().getName();
-            String extraJson = createExtraJson(task, finalException);
-            int t = (int) (System.currentTimeMillis() - t0);
-            writeTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName, exceptionType, extraJson,
-                    t);
-            return null;
-        });
-    }
-
-    public void runWithTask(long taskId, String className, String methodName, CodeZero code) throws Exception {
-        Task task = self.loadTask(taskId);
-        if (task == null) {
-            throw new IllegalStateException("Task not found in database.");
-        }
-        if (task.isInProgress()) {
-            throw new OptimisticLockException("Task is in progress");
-        }
-        AtomicReference<Exception> exceptionRef = new AtomicReference<>();
-        callDoerMethod(task, () -> null, () -> {
-            try {
-                code.call(task);
-            } catch (Exception e) {
-                exceptionRef.set(e);
-                throw e;
-            } catch (Throwable e) {
-                // OutOfMemory and other errors
-                exceptionRef.set(new ExecutionException(e));
-                throw e;
+        } finally {
+            // Also after a failure: the timer has no other wake-up planned
+            synchronized (this) {
+                reschedule();
             }
-            return null;
-        }, () -> null, className, methodName, null, null);
-        if (exceptionRef.get() != null) {
-            throw exceptionRef.get();
         }
     }
 
-    public <T> void runWithTask(long taskId, String className, String methodName, Class<T> klazz, CodeOne<T> code) throws Exception {
-        Task task = self.loadTask(taskId);
-        if (task == null) {
-            throw new IllegalStateException("Task not found in database.");
+    /**
+     * Called under the lock. The earliest time some work of {@link #onTick} is due, at most {@link #MAX_WAKE_UP_DELAY}
+     * from now; {@link Instant#MIN} when a task is ready.
+     */
+    private Instant nextWakeUp(Instant now) {
+        Instant next = now.plus(MAX_WAKE_UP_DELAY);
+        next = earlier(next, reloadTime());
+        next = earlier(next, stalledTaskResetTime());
+        next = earlier(next, reconciliationTime());
+        next = earlier(next, slowQueuesLoadTime());
+        next = earlier(next, taskQueues.earliestReadyTimeOfFreeDomains());
+        return next;
+    }
+
+    /** Called under the lock. Moves the wake-up of the scheduler earlier when some work is due earlier. */
+    private void reschedule() {
+        if (!isRunning || wakeUpTimer == null) {
+            return;
         }
-        if (task.isInProgress()) {
-            throw new OptimisticLockException("Task is in progress");
+        Instant now = getDbNow();
+        Duration delay = Duration.between(now, nextWakeUp(now));
+        wakeUpTimer.wakeUpNoLaterThan(delay.compareTo(MIN_WAKE_UP_DELAY) < 0 ? MIN_WAKE_UP_DELAY : delay);
+    }
+
+    /** Called under the lock. When the periodic load is due; null while a load is scheduled or running. */
+    private Instant reloadTime() {
+        if (queuesReloadState != QueuesReloadState.IDLE) {
+            return null;
         }
-        AtomicReference<Exception> exceptionRef = new AtomicReference<>();
-        Object[] args = new Object[2];
-        callDoerMethod(task, () -> args[1] = _callLoader(klazz, task), () -> {
-            try {
-                code.call(task, (T) args[1]);
-            } catch (Exception e) {
-                exceptionRef.set(e);
-                throw e;
-            } catch (Throwable e) {
-                // OutOfMemory and other errors
-                exceptionRef.set(new ExecutionException(e));
-                throw e;
+        if (queuesReloadRetry || lastQueueSelectTime == null) {
+            return Instant.MIN;
+        }
+        return lastQueueSelectTime.plus(queueReloadInterval);
+    }
+
+    /** Called under the lock. When the reset of stalled tasks is due; null when it is turned off. */
+    private Instant stalledTaskResetTime() {
+        if (stalledTaskCheckInterval == null) {
+            return null;
+        }
+        return lastStalledTaskCheckTime == null ? Instant.MIN : lastStalledTaskCheckTime.plus(stalledTaskCheckInterval);
+    }
+
+    /**
+     * Called under the lock. When the reconciliation of the tasks skipped by the load is due; null when there are none,
+     * or a reconciliation is running.
+     */
+    private Instant reconciliationTime() {
+        if (tasksWithUncertainState.isEmpty() || reconciliationInProgress) {
+            return null;
+        }
+        return lastReconciliationTime == null ? Instant.MIN : lastReconciliationTime.plus(reconciliationInterval);
+    }
+
+    /** Called under the lock. When the running load becomes slow; null when none runs, or it is logged already. */
+    private Instant slowQueuesLoadTime() {
+        if (queuesLoadThread == null || slowQueuesLoadReported) {
+            return null;
+        }
+        return lastQueueSelectTime.plus(SLOW_QUEUES_LOAD);
+    }
+
+    /** Logs the stack trace of the thread of the load: where it waits (the database, a lock, the pool). */
+    private static void logSlowQueuesLoad(Thread thread, long runningMs) {
+        Throwable stackTrace = new Throwable("Stack trace of " + thread.getName());
+        stackTrace.setStackTrace(thread.getStackTrace());
+        LOG.log(Level.SEVERE, "Queues load is slow: runningMs=" + runningMs + ", thread=" + thread.getName(),
+                stackTrace);
+    }
+
+    private static boolean isDue(Instant time, Instant now) {
+        return time != null && !time.isAfter(now);
+    }
+
+    private static Instant earlier(Instant time, Instant other) {
+        return other != null && other.isBefore(time) ? other : time;
+    }
+
+    private void reloadQueuedTask(long taskId) {
+        try {
+            Task task = self().loadTask(taskId);
+            if (task != null && !task.isInProgress()) {
+                synchronized (this) {
+                    replaceQueuedTask(task);
+                }
             }
-            return null;
-        }, () -> {
-            _callUnLoader(klazz, task, args[1]);
-            return null;
-        }, className, methodName, null, null);
-        if (exceptionRef.get() != null) {
-            throw exceptionRef.get();
+        } catch (SQLException e) {
+            LOG.log(Level.WARNING, "Task reload failed, the queues are loaded instead: taskId=" + taskId, e);
+            triggerQueuesReload();
         }
     }
 
-    protected abstract Object _callLoader(Class<?> klazz, Task task) throws Exception;
-
-    protected abstract void _callUnLoader(Class<?> klazz, Task task, Object data) throws Exception;
-
-    public void triggerStalledTaskReset() {
-        executor.execute(() -> {
-            try {
-                self.resetStalledInProgressTasks(stalledTaskTimeout);
-            } catch (SQLException e) {
-                logWarning("Error resetting stalled tasks", e);
+    /**
+     * Called under the lock. Puts the task loaded from the database to the queues in place of its queued copy, or
+     * reloads it when it finishes, if it runs here.
+     */
+    private void replaceQueuedTask(Task task) {
+        if (taskQueues.isInProgress(task.getId())) {
+            taskQueues.reloadWhenFinished(task.getId());
+            return;
+        }
+        ConcurrencyDomain domain = taskQueues.replaceTask(task);
+        if (domain != null) {
+            if (domain.hasFreeSlot()) {
+                submitTaskStarts(domain, 1);
             }
-        });
+            reschedule();
+        }
     }
 
-    public int resetStalledInProgressTasks(Duration timeout) throws SQLException {
-        if (timeout.isNegative()) {
-            throw new IllegalArgumentException("Stalled tasks timeout should be a positive duration");
+    /**
+     * Reconciles the tasks skipped by the load (see {@link TaskQueues#replaceFromDb}) with one query, outside the lock.
+     * The result is dropped when a new load has replaced the tasks to reconcile meanwhile.
+     */
+    private void reconcile(List<Long> ids, long generation) {
+        Map<Long, Task> dbTasks = null;
+        try {
+            dbTasks = self().loadTasks(ids);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Reconciliation failed: taskIds=" + ids, e);
         }
         synchronized (this) {
-            lastStalledTaskChecked = getDbNow();
-        }
-        try (Connection con = getConnection()) {
-            Instant treshold = getDbNow().minus(timeout);
-            String sqlInsertLog = "INSERT INTO task_logs (task_id, initial_status, final_status, class_name, method_name, exception_type) "
-                    +
-                    "SELECT id, status, status, 'DoerService', 'resetStalledInProgressTasks', 'StalledTaskReset' " +
-                    "FROM tasks WHERE in_progress AND modified < ?";
-            try (PreparedStatement pst = con.prepareStatement(sqlInsertLog)) {
-                pst.setObject(1, toOffsetDateTime(treshold));
-                pst.executeUpdate();
+            reconciliationInProgress = false;
+            if (dbTasks == null || generation != queueLoadGeneration || !isRunning) {
+                return;
             }
-            String sqlUpdate = "UPDATE tasks SET in_progress = FALSE, version = version + 1, modified = now() WHERE in_progress AND modified < ?";
-            try (PreparedStatement pst = con.prepareStatement(sqlUpdate)) {
-                pst.setObject(1, toOffsetDateTime(treshold));
-                int updated = pst.executeUpdate();
-                logInfo("Reset stalled in_progress tasks. Updated " + updated + " rows");
-                return updated;
+            Instant now = getDbNow();
+            Iterator<Task> iterator = tasksWithUncertainState.iterator();
+            while (iterator.hasNext()) {
+                Task task = iterator.next();
+                Task dbTask = dbTasks.get(task.getId());
+                if (dbTask == null) {
+                    iterator.remove();
+                } else if (dbTask.getVersion() > task.getVersion()) {
+                    iterator.remove();
+                    if (!dbTask.isInProgress()) {
+                        replaceQueuedTask(dbTask);
+                    }
+                } else if (now.isAfter(dbTask.getModified().plus(reconciliationWindow))) {
+                    iterator.remove();
+                }
             }
         }
     }
 
-    public abstract String createExtraJson(Task task, Exception exception);
+    /** Public only for the @Transactional override in the generated service: use {@link #triggerQueuesReload}. */
+    public void reloadQueues() {
+        List<Integer> limits = null;
+        try {
+            synchronized (this) {
+                if (!isRunning) {
+                    return;
+                }
+                queuesReloadState = QueuesReloadState.RUNNING;
+                queuesReloadRetry = false;
+                limits = taskQueues.nextLimits(getDbNow(), lastQueueSelectTime, queueReloadInterval, minQueueSize,
+                        maxTotalQueueSize);
+                lastReconciliationTime = null;
+                tasksWithUncertainState.clear();
+                queueLoadGeneration++;
+                lastQueueSelectTime = getDbNow();
+                queuesLoadThread = Thread.currentThread();
+                slowQueuesLoadReported = false;
+                // The wake-up that logs a slow load
+                reschedule();
+            }
+            long startNanos = System.nanoTime();
+            List<Task> tasksFromDb = self().loadTasksFromDatabase(limits);
+            int selectMs = millisSince(startNanos);
+            synchronized (this) {
+                if (isRunning) {
+                    tasksWithUncertainState.addAll(taskQueues.replaceFromDb(limits, tasksFromDb, minQueueSize));
+                    LOG.log(Level.INFO, "Queues loaded: tasks=" + tasksFromDb.size() + ", selectMs=" + selectMs);
+                    if (!tasksWithUncertainState.isEmpty() && LOG.isLoggable(Level.FINER)) {
+                        LOG.log(Level.FINER, "Tasks to reconcile: taskIds="
+                                + tasksWithUncertainState.stream().map(Task::getId).toList());
+                    }
+                } else {
+                    LOG.log(Level.FINE, "Queues load dropped, the service is stopped: tasks=" + tasksFromDb.size());
+                }
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Queues load failed: limits=" + limits, e);
+        } finally {
+            synchronized (this) {
+                queuesLoadThread = null;
+                if (isRunning) {
+                    for (long taskId : reloadAfterLoad) {
+                        if (!submitToExecutor("taskReload, taskId=" + taskId, () -> reloadQueuedTask(taskId))) {
+                            // The next load replaces the reloads of the tasks
+                            queuesReloadRetry = true;
+                            break;
+                        }
+                    }
+                }
+                reloadAfterLoad.clear();
+                if (!isRunning) {
+                    queuesReloadState = QueuesReloadState.IDLE;
+                } else {
+                    if (queuesReloadState == QueuesReloadState.RUNNING_THEN_AGAIN) {
+                        scheduleQueuesReload();
+                    } else {
+                        queuesReloadState = QueuesReloadState.IDLE;
+                    }
+                    // The load may have queued ready tasks: they don't wait for the next load
+                    submitToExecutor("schedulerTick", this::onTick);
+                }
+            }
+        }
+    }
 
-    public long writeTaskLog(Long taskId, String initialStatus, String finalStatus, String className, String methodName,
-            String exceptionType, String extraJson, Integer durationMs) throws SQLException {
-        String sql = "INSERT INTO task_logs (task_id, initial_status, final_status, class_name, method_name, duration_ms, exception_type, extra_json) "
-                +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?::json) RETURNING id";
+    private static OffsetDateTime toOffsetDateTime(Instant instant) {
+        return instant == null ? null : OffsetDateTime.ofInstant(instant, ZoneId.systemDefault());
+    }
+
+    private static Instant toInstant(OffsetDateTime odt) {
+        return odt == null ? null : odt.toInstant();
+    }
+
+    /** Milliseconds since {@code startNanos} of {@link System#nanoTime}: duration_ms of task_logs. */
+    private static int millisSince(long startNanos) {
+        return (int) TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    }
+
+    private static Task readTask(ResultSet rs) throws SQLException {
+        Task task = new Task();
+        task.setId(rs.getLong("id"));
+        task.setCreated(toInstant(rs.getObject("created", OffsetDateTime.class)));
+        task.setModified(toInstant(rs.getObject("modified", OffsetDateTime.class)));
+        task.setStatus(rs.getString("status"));
+        task.setInProgress(rs.getBoolean("in_progress"));
+        task.setFailingSince(toInstant(rs.getObject("failing_since", OffsetDateTime.class)));
+        task.setVersion(rs.getInt("version"));
+        return task;
+    }
+
+    public abstract void runTask(Task task) throws Exception;
+
+    public abstract void runInTransaction(Callable<Object> code) throws Exception;
+
+    /**
+     * Runs a doer method on the task: its loaders and the in_progress mark in one transaction, the method itself, then
+     * its savers and the new status in another one. A failure of the user's code in any of them is recorded as a
+     * failure of the doer method: the task keeps its status (or gets {@code onErrorStatus} after
+     * {@code errorTimeout}), gets failing_since and a task_logs row with the exception. The transaction that failed
+     * is rolled back, so a failed loader leaves no in_progress mark, and a failed saver saves neither the data nor
+     * the new status.
+     * <p>
+     * A failure of the user's code is an exception, or an error after which the thread can go on: of class loading or
+     * linkage (also of a proxy), of memory or stack, or of an {@code assert}. Other errors ({@link InternalError},
+     * {@link ThreadDeath}, ...) are not caught. The generated {@code createExtraJson} catches the same for the
+     * exception describers.
+     */
+    public void callDoerMethod(Task task, Callable<Object> loader, Callable<Object> caller, Callable<Object> saver,
+            String className, String methodName, Duration errorTimeout, String onErrorStatus) throws Exception {
+        String initialStatus = task.getStatus();
+        String details = "taskId=" + task.getId() + ", status=" + initialStatus + ", method=" + className + "."
+                + methodName;
+        long startNanos = System.nanoTime();
+        Throwable failure = null;
+        Task initialTask = new Task();
+        initialTask.assignFieldsFrom(task);
+        try {
+            self().runInTransaction(() -> {
+                task.setInProgress(true);
+                updateAndBumpVersionOrThrow(task);
+                loader.call();
+                return null;
+            });
+        } catch (TaskVersionConflictException e) {
+            // Usual in a cluster: another node has started the task
+            LOG.log(Level.FINE, "Task not started, it was changed concurrently: " + details);
+            throw e;
+        } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
+                | AssertionError e) {
+            failure = e;
+            // The transaction is rolled back: the task is as it was before
+            task.assignFieldsFrom(initialTask);
+            LOG.log(Level.SEVERE, "Task data loader failed: " + details, e);
+        }
+        if (failure == null) {
+            Task startedTask = new Task();
+            startedTask.assignFieldsFrom(task);
+            try {
+                caller.call();
+            } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
+                    | AssertionError e) {
+                failure = e;
+                LOG.log(Level.WARNING, "Doer method failed: " + details, e);
+            }
+            if (failure == null) {
+                try {
+                    self().runInTransaction(() -> {
+                        task.setFailingSince(null);
+                        task.setInProgress(false);
+                        updateAndBumpVersionOrThrow(task);
+                        saver.call();
+                        insertTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName,
+                                millisSince(startNanos), null, null);
+                        return null;
+                    });
+                    return;
+                } catch (TaskVersionConflictException e) {
+                    // The task was hijacked or reset as stalled while the method ran: its result is lost
+                    LOG.log(Level.WARNING, "Doer method result dropped, the task was changed while it ran: " + details);
+                    throw e;
+                } catch (Exception | LinkageError | ServiceConfigurationError | OutOfMemoryError | StackOverflowError
+                        | AssertionError e) {
+                    failure = e;
+                    // The transaction is rolled back: the task is in progress, as after the start
+                    task.assignFieldsFrom(startedTask);
+                    LOG.log(Level.SEVERE, "Task data saver failed: " + details, e);
+                }
+            }
+        }
+        Throwable finalFailure = failure;
+        try {
+            self().runInTransaction(() -> {
+                if (task.getFailingSince() == null) {
+                    task.setFailingSince(getDbNow());
+                    task.setStatus(initialStatus);
+                } else if (errorTimeout != null && task.getFailingSince().plus(errorTimeout).isBefore(getDbNow())) {
+                    task.setFailingSince(null);
+                    task.setStatus(onErrorStatus);
+                } else {
+                    task.setStatus(initialStatus);
+                }
+                task.setInProgress(false);
+                updateAndBumpVersionOrThrow(task);
+                String exceptionType = finalFailure.getClass().getName();
+                String extraJson = createExtraJson(TaskSnapshot.of(task), finalFailure);
+                insertTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName,
+                        millisSince(startNanos), exceptionType, extraJson);
+                return null;
+            });
+        } catch (TaskVersionConflictException e) {
+            LOG.log(Level.WARNING, "Doer method failure not recorded, the task was changed while it ran: " + details);
+            throw e;
+        } finally {
+            if (failure instanceof InterruptedException) {
+                // Caught from the user's code, which cleared the flag: the thread is still to be interrupted
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * Updates a task in coordination with the scheduler. Must be called outside a transaction.
+     * <p>
+     * Waits up to {@code waitDuration} for the task to stop being in progress, polling in short transactions
+     * that hold no connection between attempts; for a task in progress on this node it waits for the end of its run
+     * instead of polling. The attempt that locks the task continues in the same
+     * transaction: calls {@code updater}, saves the task and writes a task_logs row. If the task is still in
+     * progress after {@code waitDuration}, it is hijacked when {@code allowHijacking} is true. After the commit
+     * the scheduler is notified, and only then the method returns.
+     *
+     * @param updater runs in Doer's transaction with the task row locked and sees the task as it is in the
+     *                database; may change the task only with {@link Task#setStatus(String)}
+     * @return the task as committed
+     * @throws TaskNotFoundException   no task with this id
+     * @throws TaskInProgressException still in progress after waitDuration, and allowHijacking is false
+     */
+    public Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
+            TaskUpdater updater) throws Exception {
+        Objects.requireNonNull(updater, "updater");
+        return facilitateCoordinatedUpdate(taskId, waitDuration, allowHijacking, null,
+                (task, data) -> updater.update(task));
+    }
+
+    /**
+     * Same as {@link #facilitateCoordinatedUpdate(long, Duration, boolean, TaskUpdater)}, but when
+     * {@code dataType} is not null, the second argument of {@code updater} is loaded with the {@link TaskDataLoader}
+     * for {@code dataType} before the update, and saved with the {@link TaskDataSaver} for {@code dataType} (if
+     * declared) after the task is written, in the same transaction.
+     *
+     * @throws IllegalArgumentException no {@link TaskDataLoader} for {@code dataType}
+     */
+    public <T> Task facilitateCoordinatedUpdate(long taskId, Duration waitDuration, boolean allowHijacking,
+            Class<T> dataType, TaskAndDataUpdater<T> updater) throws Exception {
+        Objects.requireNonNull(updater, "updater");
+        CallerInfo caller = StackWalker.getInstance()
+                .walk(frames -> frames
+                        .map(CallerInfo::fromFrame)
+                        .filter(c -> !c.looksLikeProxy())
+                        .filter(c -> !"facilitateCoordinatedUpdate".equals(c.methodName()))
+                        .findFirst())
+                .orElse(new CallerInfo("Unknown", "Unknown", "unknown"));
+        long waitNanos = waitDuration == null || waitDuration.isNegative() ? 0 : waitDuration.toNanos();
+        long deadline = System.nanoTime() + waitNanos;
+        long sleepMs = 50;
+        while (true) {
+            long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            boolean isLastAttempt = remainingMs <= 0;
+            Task task = attemptCoordinatedUpdate(taskId, isLastAttempt, allowHijacking, dataType, updater,
+                    caller.className(), caller.methodName());
+            if (task != null) {
+                // The caller gets the task itself: the queues get their own copy
+                Task row = new Task();
+                row.assignFieldsFrom(task);
+                requeueCommittedTask(row);
+                return task;
+            }
+            if (waitUntilFinishedHere(taskId, deadline)) {
+                continue;
+            }
+            long timeoutMs = Math.max(1, Math.min(sleepMs, remainingMs));
+            Thread.sleep(timeoutMs);
+            sleepMs = Math.min(sleepMs * 2, 1000);
+        }
+    }
+
+    /**
+     * Waits until the task in progress here finishes, but not after the deadline (of {@link System#nanoTime}): its run
+     * has committed the row then. Returns false at once when the task does not run here: it runs on another node, or
+     * it is stalled.
+     */
+    private boolean waitUntilFinishedHere(long taskId, long deadline) throws InterruptedException {
+        synchronized (this) {
+            if (!taskQueues.isInProgress(taskId)) {
+                return false;
+            }
+            // processNextTask notifies when a task finishes
+            while (taskQueues.isInProgress(taskId)) {
+                long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                if (remainingMs <= 0) {
+                    break;
+                }
+                wait(remainingMs);
+            }
+            return true;
+        }
+    }
+
+    /**
+     * One transaction: locks the task row, writes the hijack log (if hijacked), loads, calls
+     * {@code updater}, writes the task, saves the data and writes the task log.
+     *
+     * @param allowInProgressRowLock when false, an in-progress row is not locked and null is returned
+     * @return the committed task, or null when the task is in progress and allowInProgressRowLock is false
+     */
+    private <T> Task attemptCoordinatedUpdate(long taskId, boolean allowInProgressRowLock, boolean allowHijacking,
+            Class<T> dataType, TaskAndDataUpdater<T> updater, String className, String methodName) throws Exception {
+        Task[] result = new Task[1];
+        self().runInTransaction(() -> {
+            Task task = selectTaskForUpdate(taskId, allowInProgressRowLock);
+            if (task == null) {
+                if (allowInProgressRowLock) {
+                    throw new TaskNotFoundException(taskId);
+                }
+                return null;
+            }
+            if (task.isInProgress()) {
+                if (!allowHijacking) {
+                    throw new TaskInProgressException(taskId);
+                }
+                Instant inProgressSince = task.getModified();
+                LOG.log(Level.FINE, "Task hijacked: taskId=" + taskId + ", status=" + task.getStatus()
+                        + ", inProgressSince=" + inProgressSince + ", by=" + className + "." + methodName);
+                String extraJson = inProgressSince == null ? null
+                        : "{\"inProgressSince\": \"" + inProgressSince + "\"}";
+                insertTaskLog(taskId, task.getStatus(), task.getStatus(), className, methodName, null,
+                        "TaskHijacked", extraJson);
+            }
+            String initialStatus = task.getStatus();
+            long startNanos = System.nanoTime();
+            T data = dataType == null ? null : dataType.cast(_load(TaskSnapshot.of(task), dataType));
+            updater.update(task, data);
+            task.setInProgress(false);
+            task.setFailingSince(null);
+            updateAndBumpVersionOrThrow(task);
+            if (dataType != null) {
+                _save(TaskSnapshot.of(task), dataType, data);
+            }
+            insertTaskLog(taskId, initialStatus, task.getStatus(), className, methodName,
+                    millisSince(startNanos), null, null);
+            result[0] = task;
+            return null;
+        });
+        return result[0];
+    }
+
+    /**
+     * Loads with the {@link TaskDataLoader} for {@code type}. Implemented by the generated service.
+     *
+     * @throws IllegalArgumentException no {@link TaskDataLoader} for {@code type}
+     */
+    protected abstract Object _load(TaskSnapshot task, Class<?> type) throws Exception;
+
+    /**
+     * Saves {@code data} with the {@link TaskDataSaver} for {@code type}, if declared; otherwise does nothing.
+     * Implemented by the generated service.
+     */
+    protected abstract void _save(TaskSnapshot task, Class<?> type, Object data) throws Exception;
+
+    /**
+     * Locks the task row in the current transaction.
+     *
+     * @param allowInProgress when false, an in-progress row is skipped (not locked) and null is returned
+     */
+    protected Task selectTaskForUpdate(long taskId, boolean allowInProgress) throws SQLException {
+        String sql = allowInProgress
+                ? "SELECT * FROM tasks WHERE id = ? FOR UPDATE"
+                : "SELECT * FROM tasks WHERE id = ? AND NOT in_progress FOR UPDATE";
         try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setLong(1, taskId);
-            pst.setString(2, initialStatus);
-            pst.setString(3, finalStatus);
-            pst.setString(4, className);
-            pst.setString(5, methodName);
-            if (durationMs == null) {
-                pst.setNull(6, Types.INTEGER);
-            } else {
-                pst.setInt(6, durationMs);
-            }
-            pst.setString(7, exceptionType);
-            pst.setString(8, extraJson);
             try (ResultSet rs = pst.executeQuery()) {
-                rs.next();
-                return rs.getLong("id");
+                return rs.next() ? readTask(rs) : null;
             }
         }
     }
 
-    private ConcurrencyDomainImpl selectConcurrencyDomain(String status) {
-        Iterator<ConcurrencyDomainImpl> iterator = domains.iterator();
-        while (iterator.hasNext()) {
-            ConcurrencyDomainImpl domain = iterator.next();
-            if (domain.getStatuses().contains(status)) {
-                return domain;
+    /** Resets stalled tasks in a thread of the executor, and loads the queues when any task was reset. */
+    public void triggerStalledTaskReset() {
+        synchronized (this) {
+            if (!isRunning) {
+                return;
+            }
+            // Set now: the next tick must not start the reset again before it runs
+            Instant previousCheckTime = lastStalledTaskCheckTime;
+            lastStalledTaskCheckTime = getDbNow();
+            boolean accepted = submitToExecutor("stalledTaskReset", () -> {
+                try {
+                    if (self().resetStalledInProgressTasks(stalledTaskTimeout) > 0) {
+                        // The reset tasks are queued now, not by the next periodic load
+                        triggerQueuesReload();
+                    }
+                } catch (SQLException e) {
+                    LOG.log(Level.WARNING, "Stalled task reset failed: timeout=" + stalledTaskTimeout, e);
+                }
+            });
+            if (!accepted) {
+                // Still due: the next tick tries again
+                lastStalledTaskCheckTime = previousCheckTime;
             }
         }
-        return null;
     }
 
-    private void processNextTask(ConcurrencyDomainImpl domain) {
+    /**
+     * Resets the in_progress mark of the tasks not modified for the timeout, with a task_logs row for each; returns the
+     * number of reset tasks. Public only for the @Transactional override in the generated service: the container runs
+     * the reset and the logs in one transaction. Use {@link #triggerStalledTaskReset}.
+     * <p>
+     * The logs are written after the reset, which locks the rows: like the other writers of task logs, they are
+     * written under the lock of the task.
+     */
+    public int resetStalledInProgressTasks(Duration timeout) throws SQLException {
+        if (timeout.isNegative()) {
+            throw new IllegalArgumentException("Stalled tasks timeout should be a non-negative duration");
+        }
+        synchronized (this) {
+            lastStalledTaskCheckTime = getDbNow();
+        }
+        Instant treshold = getDbNow().minus(timeout);
+        String sqlUpdate = """
+                UPDATE tasks
+                SET in_progress = FALSE, version = version + 1, modified = now()
+                WHERE in_progress AND modified < ?
+                RETURNING id, status
+                """;
+        Map<Long, String> statuses = new LinkedHashMap<>();
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sqlUpdate)) {
+            pst.setObject(1, toOffsetDateTime(treshold));
+            try (ResultSet rs = pst.executeQuery()) {
+                while (rs.next()) {
+                    statuses.put(rs.getLong("id"), rs.getString("status"));
+                }
+            }
+        }
+        for (Map.Entry<Long, String> entry : statuses.entrySet()) {
+            insertTaskLog(entry.getKey(), entry.getValue(), entry.getValue(), "DoerService",
+                    "resetStalledInProgressTasks", null, "StalledTaskReset", null);
+        }
+        if (!statuses.isEmpty()) {
+            LOG.log(Level.WARNING, "Stalled tasks reset: tasks=" + statuses.size() + ", timeout=" + timeout);
+        } else {
+            LOG.log(Level.FINE, "No stalled tasks: timeout=" + timeout);
+        }
+        return statuses.size();
+    }
+
+    /**
+     * extra_json of the task_logs row of a failure, from the exception describers; null for none. A failure of a
+     * describer is logged, so that the failure of the doer method is still recorded.
+     */
+    public abstract String createExtraJson(TaskSnapshot task, Throwable exception);
+
+    /**
+     * Writes a task_logs row with the next seqno of the task: a change of the task by a doer method or a coordinated
+     * update, a failure of a doer method, a hijack or a reset of a stalled task. The database sets created.
+     * <p>
+     * The writers of the logs of a task hold the lock of its row, so the next seqno is normally free. When a writer
+     * without the lock has taken it, the insert does nothing and is repeated. ON CONFLICT DO NOTHING keeps the
+     * transaction usable, which a unique violation would abort. It waits for the transaction that inserted the
+     * conflicting row, so in READ COMMITTED the repeated insert sees the row and takes the seqno after it. In
+     * REPEATABLE READ and SERIALIZABLE, a conflict with the row of a concurrent transaction is a serialization failure.
+     */
+    protected void insertTaskLog(long taskId, String initialStatus, String finalStatus, String className,
+            String methodName, Integer durationMs, String exceptionType, String extraJson) throws SQLException {
+        String sql = """
+                INSERT INTO task_logs (task_id, seqno, initial_status, final_status, class_name, method_name,
+                    duration_ms, exception_type, extra_json)
+                VALUES (?, (SELECT coalesce(max(seqno), 0) + 1 FROM task_logs WHERE task_id = ?), ?, ?, ?, ?, ?, ?,
+                    ?::json)
+                ON CONFLICT DO NOTHING
+                """;
+        try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
+            pst.setLong(1, taskId);
+            pst.setLong(2, taskId);
+            pst.setString(3, initialStatus);
+            pst.setString(4, finalStatus);
+            pst.setString(5, className);
+            pst.setString(6, methodName);
+            if (durationMs == null) {
+                pst.setNull(7, Types.INTEGER);
+            } else {
+                pst.setInt(7, durationMs);
+            }
+            pst.setString(8, exceptionType);
+            pst.setString(9, extraJson);
+            for (int attempt = 1; attempt <= TASK_LOG_ATTEMPTS; attempt++) {
+                if (pst.executeUpdate() > 0) {
+                    return;
+                }
+                LOG.log(Level.FINE, "Task log seqno taken by a concurrent writer: taskId=" + taskId
+                        + ", attempt=" + attempt);
+            }
+            throw new SQLException("Task log not written, concurrent writers took its seqno " + TASK_LOG_ATTEMPTS
+                    + " times: taskId=" + taskId);
+        }
+    }
+
+    /**
+     * Called under the lock. Hands the job to the executor. A job the executor rejects is logged, and the caller gets
+     * false: it undoes what it has set for the job, and the next tick of the scheduler does the work.
+     *
+     * @param job name of the job for the log, with its details as key=value: {@code "taskReload, taskId=5"}
+     */
+    private boolean submitToExecutor(String job, Runnable runnable) {
+        try {
+            executor.execute(runnable);
+            return true;
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "Executor rejected job, next tick retries: job=" + job, e);
+            return false;
+        }
+    }
+
+    /**
+     * Called under the lock. Submits {@code count} starts of the next task of the domain; false when the executor
+     * rejected one: the tasks stay queued, and the next tick starts them.
+     */
+    private boolean submitTaskStarts(ConcurrencyDomain domain, int count) {
+        for (int i = 0; i < count; i++) {
+            if (!submitToExecutor("taskStart, domain=" + domain.name(), () -> processNextTask(domain))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void processNextTask(ConcurrencyDomain domain) {
         Task task;
         synchronized (this) {
             if (!isRunning) {
                 return;
             }
-            if (domain.numberOfTasksToRunSimultaneously - domain.numberOfTasksInProgress < 1) {
-                executor.execute(this::monitorIdleState);
-                return;
-            }
-            task = domain.pullNextReadyTask(getDbNow());
+            task = taskQueues.startNext(domain, getDbNow());
             if (task == null) {
-                executor.execute(this::monitorIdleState);
                 return;
             }
-            if (domain.hasDrainedQueue()) {
-                triggerQueuesReloadFromDb();
+            // A load that is scheduled or running refills the drained sub-queue
+            if (domain.hasDrainedQueue() && queuesReloadState == QueuesReloadState.IDLE) {
+                triggerQueuesReload();
             }
-            inProgressTasks.add(task);
-            domain.numberOfTasksInProgress++;
-            this.notify();
         }
         boolean processedSuccessfully = false;
         String threadName = Thread.currentThread().getName();
@@ -966,60 +1202,44 @@ public abstract class DoerService {
         try {
             runTask(task);
             processedSuccessfully = true;
-        } catch (OptimisticLockException e) {
-            // Other node is working with this task. So we should ignore it until next time
-            // we query db
+        } catch (TaskVersionConflictException e) {
+            // Another node or facilitateCoordinatedUpdate changed the task: the task is dropped here, the one that
+            // changed it queues it. A reload this node was asked for meanwhile is done below. Logged by callDoerMethod.
         } catch (Exception e) {
-            logWarning("Failed to run task TaskId: " + task.getId(), e);
+            LOG.log(Level.WARNING, "Task run failed: taskId=" + task.getId() + ", status=" + task.getStatus(), e);
         } finally {
             Thread.currentThread().setName(threadName);
             synchronized (this) {
-                domain.numberOfTasksInProgress--;
-                inProgressTasks.remove(task);
+                boolean reloadRequested = taskQueues.finish(task, domain);
+                // facilitateCoordinatedUpdate may wait for the task (see waitUntilFinishedHere)
+                notifyAll();
                 if (processedSuccessfully) {
-                    boolean nextProcessingStarted = false;
-                    ConcurrencyDomainImpl newDomain = selectConcurrencyDomain(task.getStatus());
-                    if (newDomain != null) {
-                        newDomain.putTaskToQueue(task);
-                        int nNew = newDomain.getValue() - domain.numberOfTasksInProgress;
-                        for (int i = 0; i < nNew; i++) {
-                            executor.execute(() -> processNextTask(newDomain));
-                            nextProcessingStarted = true;
-                        }
-                    }
-                    if (newDomain != domain) {
-                        int nOld = domain.getValue() - domain.numberOfTasksInProgress;
-                        for (int i = 0; i < nOld; i++) {
-                            executor.execute(() -> processNextTask(domain));
-                            nextProcessingStarted = true;
-                        }
-                    }
-                    if (!nextProcessingStarted && inProgressTasks.isEmpty()) {
-                        executor.execute(this::monitorIdleState);
+                    ConcurrencyDomain newDomain = taskQueues.requeue(task);
+                    boolean accepted = newDomain == null || submitTaskStarts(newDomain, newDomain.freeSlots());
+                    if (accepted && newDomain != domain) {
+                        submitTaskStarts(domain, domain.freeSlots());
                     }
                 } else {
                     // When any task failed in concurrencyDomain we don't start all possible
                     // parralel executions, only one
-                    executor.execute(() -> processNextTask(domain));
+                    submitTaskStarts(domain, 1);
                 }
+                if (reloadRequested) {
+                    triggerTaskReloadFromDb(task.getId());
+                }
+                // The task may be queued with a delay, and the slot of a domain is free
+                reschedule();
             }
         }
     }
 
     public Set<String> getActiveStatuses() {
         synchronized (this) {
-            if (statusesCache == null) {
-                HashSet<String> statuses = new HashSet<>();
-                for (ConcurrencyDomain domain : domains) {
-                    statuses.addAll(domain.getStatuses());
-                }
-                statusesCache = Collections.unmodifiableSet(statuses);
-            }
-            return statusesCache;
+            return taskQueues.activeStatuses();
         }
     }
 
-    protected String limitTo1024(String s) {
+    protected static String limitTo1024(String s) {
         if (s == null) {
             return null;
         }
@@ -1027,5 +1247,47 @@ public abstract class DoerService {
             return s;
         }
         return s.substring(0, 1023) + "\u2026";
+    }
+
+    private record CallerInfo(String fullClassName, String className, String methodName) {
+        boolean looksLikeProxy() {
+            return methodName.contains("$") ||
+                    fullClassName.contains("$") ||
+                    fullClassName.endsWith("_Subclass") ||
+                    fullClassName.endsWith("_ClientProxy") ||
+                    fullClassName.endsWith("_Bean") ||
+                    fullClassName.startsWith("io.quarkus.") ||
+                    fullClassName.startsWith("io.smallrye.") ||
+                    fullClassName.startsWith("org.jboss.") ||
+                    fullClassName.startsWith("org.apache.webbeans.") ||
+                    fullClassName.startsWith("org.springframework.") ||
+                    fullClassName.startsWith("org.glassfish.") ||
+                    fullClassName.startsWith("com.sun.ejb.") ||
+                    fullClassName.startsWith("com.arjuna.") ||
+                    fullClassName.startsWith("com.ibm.") ||
+                    fullClassName.startsWith("io.openliberty.") ||
+                    fullClassName.startsWith("jakarta.") ||
+                    fullClassName.startsWith("javax.") ||
+                    fullClassName.startsWith("java.lang.reflect.") ||
+                    fullClassName.startsWith("jdk.internal.") ||
+                    fullClassName.startsWith("sun.reflect.") ||
+                    fullClassName.startsWith("jdk.proxy");
+        }
+
+        static CallerInfo fromFrame(StackWalker.StackFrame frame) {
+            String fullClassName = frame.getClassName();
+            return new CallerInfo(fullClassName, fullClassName.replaceAll(".*\\.", ""), frame.getMethodName());
+        }
+    }
+
+    enum QueuesReloadState {
+        IDLE,
+        SCHEDULED,
+        RUNNING,
+        /**
+         * A reload is in progress, and another reload is needed. A request arrived
+         * during the SELECT, so the current run may not see the corresponding changes.
+         */
+        RUNNING_THEN_AGAIN
     }
 }
