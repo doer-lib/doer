@@ -37,20 +37,44 @@ import java.util.logging.Logger;
 import javax.sql.DataSource;
 
 /**
- * Runs the doer methods on the tasks of the database. The annotation processor generates its subclass
- * {@code com.doer.generated._GeneratedDoerService}, which the application injects, starts and stops.
+ * Runs doer methods for tasks stored in the database.
  * <p>
- * A node keeps the first tasks of each sub-queue in memory ({@link TaskQueues}), loads them from the database, and runs
- * them in the threads of the executor of the container, at most the limit of their concurrency domain at a time. The
- * scheduler does the work no event starts: it runs a task when its delay or retry interval has passed, reloads the
- * queues every {@link #queueReloadInterval}, checks again the tasks a load skipped, and resets stalled tasks. Its timer
- * ({@link WakeUpTimer}) only hands the tick to the executor. See scheduler-refactoring-design.md.
+ * The application injects this service and controls its lifecycle by calling
+ * {@link #start()} and {@link #stop()}. It can also configure the service using
+ * methods such as {@link #setMaxTotalQueueSize(int)} and
+ * {@link #setQueueReloadInterval(Duration)}.
  * <p>
- * The state of the queues, the scheduler, the reconciliation and the stalled tasks is guarded by the lock of this
- * object; the queries run outside it. All times are times of the database ({@link #getDbNow}).
+ * The application manages tasks in the database using methods such as
+ * {@link #loadTask(long)}, {@link #insert(Task)},
+ * {@link #updateAndBumpVersion(Task)} and
+ * {@link #loadTasksForUpdate(Collection)}.
  * <p>
- * The package-private fields are settings with their defaults, and hooks for the tests of {@code com.doer} (the
- * clock, the timer): the tests set them before {@link #start}.
+ * DoerService uses the database to coordinate concurrent access to tasks,
+ * allowing multiple application instances in a cluster to execute tasks
+ * reliably and safely. Execution is at-least-once: when a task is hijacked or
+ * reset as stalled while its doer method runs, the method may run again, and the
+ * result of the first run is dropped. The application can also coordinate
+ * updates to task data using
+ * {@link #facilitateCoordinatedUpdate(long, Duration, boolean, Class, TaskAndDataUpdater)}.
+ * <p>
+ * The application should use {@link TaskDataLoader} and {@link TaskDataSaver}
+ * to configure how task data is loaded from and saved to the database.
+ * <p>
+ * Doer methods should be annotated with {@link AcceptStatus} to specify the
+ * task statuses in which they can execute. These methods receive the task as a
+ * parameter and update its status to indicate progress.
+ * <p>
+ * Example:
+ * 
+ * <pre>
+ * &#64;AcceptStatus("New order created")
+ * public void allocateGoods(Task task, OrderData order) {
+ *     // ...
+ *     task.setStatus("Goods allocated");
+ * }
+ * </pre>
+ * 
+ * @see <a href="https://github.com/doer-lib/doer">Doer on GitHub</a>
  */
 public abstract class DoerService {
 
@@ -59,7 +83,6 @@ public abstract class DoerService {
     protected static final Logger LOG = Logger.getLogger(DoerService.class.getName());
     /** Safety net: the scheduler wakes up at least this often, even when nothing is planned. */
     private static final Duration MAX_WAKE_UP_DELAY = Duration.ofMinutes(1);
-    /** Work that is due but cannot be done now (a load is running) does not wake the scheduler more often. */
     private static final Duration MIN_WAKE_UP_DELAY = Duration.ofMillis(100);
     /** A load of the queues that runs longer is logged as an error, with the stack trace of its thread. */
     private static final Duration SLOW_QUEUES_LOAD = Duration.ofSeconds(10);
@@ -76,7 +99,6 @@ public abstract class DoerService {
      * can be garbage collected.
      */
     protected final ConcurrentHashMap<Class<?>, Supplier<?>> beanProviders = new ConcurrentHashMap<>();
-    /** Beans looked up by their providers, and the self reference. */
     protected final ConcurrentHashMap<Class<?>, Object> beans = new ConcurrentHashMap<>();
     private Executor executor;
     private DataSource dataSource;
@@ -103,8 +125,9 @@ public abstract class DoerService {
     /** Set before the select of each load, also of a load that fails. */
     Instant lastQueueSelectTime;
     /**
-     * Tasks queued while a load runs: the load may have selected before they changed, and drop them with the buffers it
-     * replaces, so they are reloaded when it ends.
+     * While the queues are being loaded from the database, some tasks may be
+     * updated and their changes may not be reflected in the loaded queues. Such
+     * tasks are fetched individually from the database later.
      */
     private final Set<Long> reloadAfterLoad = new HashSet<>();
     /** The executor rejected a load or a reload of a task: the next tick loads the queues. */
@@ -127,11 +150,17 @@ public abstract class DoerService {
 
     // Reconciliation: state
 
-    /** Tasks skipped by the last load, to check again (see {@link TaskQueues#replaceFromDb}). */
+    /**
+     * Tasks that were marked as {@code in_progress} when DoerService loaded the queues
+     * from the database. DoerService must periodically recheck them to determine
+     * whether they are no longer {@code in_progress}, have been updated, or are still
+     * {@code in_progress} because a long-running operation is ongoing (see
+     * {@link TaskQueues#replaceFromDb}).
+     */
     final List<Task> tasksWithUncertainState = new ArrayList<>();
     /**
-     * Number of the load that filled {@link #tasksWithUncertainState}: the result of a reconciliation of an older load
-     * is dropped.
+     * Number of the load that filled {@link #tasksWithUncertainState}: the result
+     * of a reconciliation of an older load is dropped.
      */
     private long queueLoadGeneration;
     private boolean reconciliationInProgress;
@@ -144,7 +173,6 @@ public abstract class DoerService {
 
     // Stalled tasks: state
 
-    /** Set by the first start: the first reset is due {@link #stalledTaskCheckInterval} after it. */
     Instant lastStalledTaskCheckTime;
 
     /** This service as the container gives it to other beans, so that calls go through its interceptors. */
@@ -155,7 +183,7 @@ public abstract class DoerService {
     /**
      * The bean of the type, looked up by its provider on first use, once. When the provider throws or returns null,
      * nothing is stored and the next call asks the provider again. A provider must not create a bean that calls
-     * DoerService while it is created: the lookup of another bean inside a lookup fails ("Recursive update").
+     * DoerService while it is created: the lookup of another bean inside a lookup may fail ("Recursive update").
      */
     protected <T> T bean(Class<T> type) {
         return type.cast(beans.computeIfAbsent(type, t -> {
@@ -213,8 +241,8 @@ public abstract class DoerService {
     }
 
     /**
-     * Starts the service: loads the queues and starts the scheduler, which runs the tasks when they are ready, reloads
-     * the queues and resets stalled tasks. A stopped service can be started again.
+     * Starts the service, which will read queues, execute tasks, reload queues, and
+     * reset stalled tasks while running. A stopped service can be started again.
      */
     public void start() {
         synchronized (this) {
@@ -294,8 +322,8 @@ public abstract class DoerService {
     }
 
     /**
-     * Puts the copy of the row this node has just committed to the queues, in place of the queued copy, with no load of
-     * its own. While a load runs, the task is also reloaded when the load ends (see {@link #reloadAfterLoad}).
+     * Puts the copy of the Task this node has just committed to the database, in
+     * place of the queued copy.
      */
     private void requeueCommittedTask(Task row) {
         synchronized (this) {
@@ -375,8 +403,9 @@ public abstract class DoerService {
     }
 
     /**
-     * Locks the task rows in the transaction of the caller, in the order of the ids against deadlocks. The generated
-     * service requires a transaction: without one the locks would be released at once.
+     * Reads and locks task rows using pessimistic locking within the caller's
+     * transaction. Rows are locked in ID order to prevent deadlocks. Requires an
+     * active transaction.
      */
     public Map<Long, Task> loadTasksForUpdate(Collection<Long> ids) throws SQLException {
         String sql = "SELECT * FROM tasks WHERE id = ANY(?) ORDER BY id FOR UPDATE";
@@ -777,8 +806,9 @@ public abstract class DoerService {
     /**
      * Runs a doer method on the task: its loaders and the in_progress mark in one transaction, the method itself, then
      * its savers and the new status in another one. A failure of the user's code in any of them is recorded as a
-     * failure of the doer method: the task keeps its status (or gets {@code onErrorStatus} after
-     * {@code errorTimeout}), gets failing_since and a task_logs row with the exception. The transaction that failed
+     * failure of the doer method, with a task_logs row with the exception: the task keeps its status and gets
+     * failing_since (an earlier one is kept), or, when {@code errorTimeout} has passed since failing_since, gets
+     * {@code onErrorStatus} and failing_since is cleared. The transaction that failed
      * is rolled back, so a failed loader leaves no in_progress mark, and a failed saver saves neither the data nor
      * the new status.
      * <p>
@@ -972,7 +1002,8 @@ public abstract class DoerService {
      * {@code updater}, writes the task, saves the data and writes the task log.
      *
      * @param allowInProgressRowLock when false, an in-progress row is not locked and null is returned
-     * @return the committed task, or null when the task is in progress and allowInProgressRowLock is false
+     * @return the committed task, or null when allowInProgressRowLock is false and the task is in progress or does
+     *         not exist
      */
     private <T> Task attemptCoordinatedUpdate(long taskId, boolean allowInProgressRowLock, boolean allowHijacking,
             Class<T> dataType, TaskAndDataUpdater<T> updater, String className, String methodName) throws Exception {
@@ -1045,7 +1076,7 @@ public abstract class DoerService {
         }
     }
 
-    /** Resets stalled tasks in a thread of the executor, and loads the queues when any task was reset. */
+    /** Resets stalled tasks in a thread of the executor, and reloads the queues when any task was reset. */
     public void triggerStalledTaskReset() {
         synchronized (this) {
             if (!isRunning) {
@@ -1081,7 +1112,7 @@ public abstract class DoerService {
      */
     public int resetStalledInProgressTasks(Duration timeout) throws SQLException {
         if (timeout.isNegative()) {
-            throw new IllegalArgumentException("Stalled tasks timeout should be a positive duration");
+            throw new IllegalArgumentException("Stalled tasks timeout should be a non-negative duration");
         }
         synchronized (this) {
             lastStalledTaskCheckTime = getDbNow();
@@ -1236,7 +1267,7 @@ public abstract class DoerService {
                     }
                 } else {
                     // When any task failed in concurrencyDomain we don't start all possible
-                    // parralel executions, only one
+                    // parallel executions, only one
                     submitTaskStarts(domain, 1);
                 }
                 if (reloadRequested) {
