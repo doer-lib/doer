@@ -5,6 +5,16 @@ Doer is a Java library designed for building fault-tolerant, cluster-ready backe
 It simplifies distributed task execution, automatic retries, and state transitions, ensuring reliable 
 processing of complex workflows.
 
+> **Coming in version 1.0.0:** Doer is undergoing a major update with breaking changes to its API, runtime requirements, and implementation. The new version will also use the Maven group ID `io.github.doer-lib` instead of `com.java-doer`. A preview is available as:
+>
+> ```xml
+> <dependency>
+>     <groupId>io.github.doer-lib</groupId>
+>     <artifactId>doer</artifactId>
+>     <version>1.0.0-beta1</version>
+> </dependency>
+> ```
+
 ## Features
 
 - Annotation-based API
