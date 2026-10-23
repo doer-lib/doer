@@ -1,8 +1,10 @@
 package com.doer.e2e;
 
 import static com.doer.e2e.TransitSimsE2E.boarding;
+import static com.doer.e2e.TransitSimsE2E.busOf;
 import static com.doer.e2e.TransitSimsE2E.buses;
 import static com.doer.e2e.TransitSimsE2E.createSim;
+import static com.doer.e2e.TransitSimsE2E.get;
 import static com.doer.e2e.TransitSimsE2E.standsAt;
 import static com.doer.e2e.TransitSimsE2E.stateOf;
 import static com.doer.e2e.TransitSimsE2E.waitBus;
@@ -14,6 +16,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import io.restassured.http.ContentType;
 import io.restassured.path.json.JsonPath;
 import io.restassured.specification.RequestSpecification;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -41,7 +44,11 @@ class LifecycleE2E extends E2eTestBase {
         assertEquals(143, E2eEnvironment.stopNode(1), "exit code after SIGTERM");
         E2eEnvironment.startNode(1);
 
-        waitBus(sim, b -> standsAt(b, "s2"));
+        // The simulation time goes on while the node is down, and the bus in the database is where the node left it:
+        // it may stand at s2 since before the stop, then the first step after the start departs to s3. Wait for an
+        // arrival at s2 after the start (the bus comes back from the terminal s3, the passenger is still on board).
+        long startedAt = get("/api/sims/" + sim).getLong("time");
+        waitBus(sim, b -> standsAt(b, "s2") && arrivedAtOf(b) >= startedAt);
         post(1, "/api/sims/" + sim + "/buses/" + bus + "/alight", boarding(passenger, "s2"));
         post(1, "/api/sims/" + sim + "/passengers/" + passenger + "/arrived", null);
         waitSim(sim, "COMPLETED");
@@ -73,6 +80,10 @@ class LifecycleE2E extends E2eTestBase {
             // Doer of node 2 must not run the tasks of the next tests
             E2eEnvironment.stopNode(2);
         }
+    }
+
+    private static long arrivedAtOf(Map<String, Object> busView) {
+        return ((Number) busOf(busView).get("arrivedAt")).longValue();
     }
 
     private static RequestSpecification node(int node) {
