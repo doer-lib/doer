@@ -221,9 +221,9 @@ public class ClusterTest {
         }
 
         @Override
-        public TaskLog insertTaskLog(TaskLog log) {
+        protected void insertTaskLog(long taskId, String initialStatus, String finalStatus, String className,
+                String methodName, Integer durationMs, String exceptionType, String extraJson) {
             db.logs++;
-            return log;
         }
 
         @Override
