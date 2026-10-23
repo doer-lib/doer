@@ -41,6 +41,8 @@
         <maven.compiler.release>17</maven.compiler.release>
         <maven.compiler.debug>true</maven.compiler.debug>
         <maven.compiler.debuglevel>lines,vars,source</maven.compiler.debuglevel>
+        <!-- Version under which built jar is installed into local repo for integration tests -->
+        <doer.it.version>0.0.0-IT-SNAPSHOT</doer.it.version>
     </properties>
 
     <dependencies>
@@ -75,6 +77,12 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>3.13.2</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>com.google.auto.service</groupId>
             <artifactId>auto-service</artifactId>
             <version>1.1.1</version>
@@ -100,6 +108,10 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.6.0</version>
                 </plugin>
+                <plugin>
+                    <artifactId>maven-install-plugin</artifactId>
+                    <version>3.1.4</version>
+                </plugin>
             </plugins>
         </pluginManagement>
         <plugins>
@@ -117,13 +129,36 @@
                 </configuration>
             </plugin>
             <plugin>
+                <artifactId>maven-install-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>install-doer-for-it</id>
+                        <phase>pre-integration-test</phase>
+                        <goals>
+                            <goal>install-file</goal>
+                        </goals>
+                        <configuration>
+                            <file>${project.build.directory}/${project.build.finalName}.jar</file>
+                            <groupId>${project.groupId}</groupId>
+                            <artifactId>${project.artifactId}</artifactId>
+                            <version>${doer.it.version}</version>
+                            <packaging>jar</packaging>
+                            <generatePom>true</generatePom>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
                 <version>3.6.0</version>
                 <configuration>
-                    <systemProperties>
-                        <doer.lib.version>${project.version}</doer.lib.version>
-                    </systemProperties>
+                    <!-- Separate JVM (and Postgres container) per test class -->
+                    <reuseForks>false</reuseForks>
+                    <systemPropertyVariables>
+                        <doer.lib.version>${doer.it.version}</doer.lib.version>
+                        <doer.test.m2.repo>${settings.localRepository}</doer.test.m2.repo>
+                    </systemPropertyVariables>
                 </configuration>
                 <executions>
                     <execution>
@@ -137,6 +172,55 @@
         </plugins>
     </build>
     <profiles>
+        <profile>
+            <!-- E2E suite (*E2E classes) in the runtime given by -Ddoer.e2e.runtime; see src/test/README.md -->
+            <id>e2e</id>
+            <activation>
+                <property>
+                    <name>doer.e2e.runtime</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <skipTests>true</skipTests>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <!-- ITCase classes run in the JDK matrix, not here -->
+                                <id>default</id>
+                                <phase>none</phase>
+                            </execution>
+                            <execution>
+                                <id>e2e</id>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                                <configuration>
+                                    <includes>
+                                        <include>**/*E2E.java</include>
+                                    </includes>
+                                    <!-- One JVM, so one E2eEnvironment for all E2E classes -->
+                                    <reuseForks>true</reuseForks>
+                                    <systemPropertyVariables>
+                                        <doer.e2e.runtime>${doer.e2e.runtime}</doer.e2e.runtime>
+                                        <doer.lib.version>${doer.it.version}</doer.lib.version>
+                                        <doer.test.m2.repo>${settings.localRepository}</doer.test.m2.repo>
+                                    </systemPropertyVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <profile>
             <id>release</id>
             <build>

@@ -1,0 +1,5 @@
+embed-server --std-out=echo
+/subsystem=ee/managed-executor-service=default:write-attribute(name=core-threads, value=200)
+/subsystem=logging/logger=com.doer:add(level=FINE)
+/subsystem=logging/console-handler=CONSOLE:write-attribute(name=level, value=DEBUG)
+stop-embedded-server

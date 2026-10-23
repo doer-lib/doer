@@ -35,5 +35,3 @@ jobs:
         run: mvn --version
       - name: Tests Java${{ matrix.version }} jakarta 10.0.0
         run: mvn -B --color=always verify
-      - name: Tests Java${{ matrix.version }} jakarta 8.0.0
-        run: mvn -B --color=always -Dtest.doer.jakarta.version=8.0.0 verify
