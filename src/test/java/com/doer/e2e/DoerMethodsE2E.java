@@ -89,7 +89,7 @@ class DoerMethodsE2E extends E2eTestBase {
     /** The final statuses in the task logs of the task, in order. */
     private static List<String> finalStatuses(long taskId) {
         String statuses = selectStringValue(
-                "SELECT string_agg(final_status, '|' ORDER BY id) FROM task_logs WHERE task_id = " + taskId);
+                "SELECT string_agg(final_status, '|' ORDER BY seqno) FROM task_logs WHERE task_id = " + taskId);
         return List.of(statuses.split("\\|"));
     }
 }

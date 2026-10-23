@@ -139,10 +139,9 @@ class ConcurrencyE2E extends E2eTestBase {
         // All 150 readyToRetry should be updated first, but few of ASAP tasks may also be updated
         // (When readyToRetry queue become empty and DoerService start loading bigger queue from DB
         // it continues processing other queues - in our case ASAP queue).
-        Long lastReadyToRetryLog = selectLongValue(
-                "SELECT max(id) FROM task_logs WHERE task_id <= " + idList1.peekLast());
-        Long aheadOfTime = selectLongValue("SELECT count(*) FROM task_logs WHERE id < " + lastReadyToRetryLog
-                + " AND task_id >= " + idList2.peekFirst());
+        // The logs are ordered by created: the start of the short transaction that writes the log after the method.
+        Long aheadOfTime = selectLongValue("SELECT count(*) FROM task_logs WHERE task_id >= " + idList2.peekFirst()
+                + " AND created < (SELECT max(created) FROM task_logs WHERE task_id <= " + idList1.peekLast() + ")");
         int maxAheadOfTime = 50;
         // DUMP logs just for debug purpose
         if (aheadOfTime > maxAheadOfTime) {
@@ -221,6 +220,6 @@ class ConcurrencyE2E extends E2eTestBase {
     /** The task logs in their order, for the message of a failed check of timing. */
     private static String taskLogs() {
         return selectStringValue("SELECT string_agg(task_id || ' ' || to_char(created, 'HH24:MI:SS.MS') || ' '"
-                + " || coalesce(duration_ms::text, '-'), ', ' ORDER BY id) FROM task_logs");
+                + " || coalesce(duration_ms::text, '-'), ', ' ORDER BY created, task_id, seqno) FROM task_logs");
     }
 }

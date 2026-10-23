@@ -259,13 +259,10 @@ public class CallDoerMethodTest {
                         .map(r -> r.getLevel() + " " + r.getMessage()).toList());
     }
 
-    record Log(String initialStatus, String finalStatus, String exceptionType, String extraJson) {
-    }
-
     /** DoerService on tables in memory: one task row and the task logs. */
     static class FakeDbService extends DoerService {
         final Map<Long, Task> rows = new HashMap<>();
-        final List<Log> logs = new ArrayList<>();
+        final List<TaskLog> logs = new ArrayList<>();
         Function<Throwable, String> extraJson = e -> "{\"message\": \"" + e.getMessage() + "\"}";
 
         FakeDbService() {
@@ -324,10 +321,9 @@ public class CallDoerMethodTest {
         }
 
         @Override
-        public long writeTaskLog(Long taskId, String initialStatus, String finalStatus, String className,
-                String methodName, String exceptionType, String extraJson, Integer durationMs) {
-            logs.add(new Log(initialStatus, finalStatus, exceptionType, extraJson));
-            return logs.size();
+        public TaskLog insertTaskLog(TaskLog log) {
+            logs.add(log);
+            return log;
         }
 
         @Override
