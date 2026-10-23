@@ -18,6 +18,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -26,6 +27,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -304,8 +309,10 @@ public class DoerServiceJdbcITCase {
         assertEquals("NEW", stalledTask.getStatus());
         assertEquals(1, stalledTask.getVersion());
         assertTrue(stalledTask.getModified().isAfter(stalledModified));
-        assertEquals(List.of(new TaskLog(stalled, "NEW", "NEW", "DoerService", "resetStalledInProgressTasks", null,
-                "StalledTaskReset", null)), taskLogs(stalled));
+        List<TaskLog> stalledLogs = taskLogs(stalled);
+        assertEquals(1, stalledLogs.size());
+        assertEquals(new TaskLog(stalled, 1, stalledLogs.get(0).created(), "NEW", "NEW", "DoerService",
+                "resetStalledInProgressTasks", null, "StalledTaskReset", null), stalledLogs.get(0));
         Task runningTask = service.loadTask(running);
         assertTrue(runningTask.isInProgress());
         assertEquals(0, runningTask.getVersion());
@@ -321,21 +328,69 @@ public class DoerServiceJdbcITCase {
     }
 
     @Test
-    void writeTaskLog__should_write_all_columns() throws Exception {
-        long logId = service.writeTaskLog(801L, "NEW", "PAID", "Orders", "process", "java.lang.IllegalStateException",
-                "{\"e1\": \"Exception\"}", 15);
+    void insertTaskLog__should_write_all_columns() throws Exception {
+        TaskLog written = service.insertTaskLog(new TaskLog(801L, "NEW", "PAID", "Orders", "process", 15,
+                "java.lang.IllegalStateException", "{\"e1\": \"Exception\"}"));
 
-        assertTrue(logId >= 1000);
-        assertEquals(List.of(new TaskLog(801L, "NEW", "PAID", "Orders", "process", 15L,
-                "java.lang.IllegalStateException", "{\"e1\": \"Exception\"}")), taskLogs(801L));
+        assertEquals(1, written.seqNo());
+        assertNotNull(written.created());
+        assertEquals(new TaskLog(801L, 1, written.created(), "NEW", "PAID", "Orders", "process", 15,
+                "java.lang.IllegalStateException", "{\"e1\": \"Exception\"}"), written);
+        assertEquals(List.of(written), taskLogs(801L));
     }
 
     @Test
-    void writeTaskLog__should_write_nulls() throws Exception {
-        service.writeTaskLog(802L, "NEW", null, "Orders", "process", null, null, null);
+    void insertTaskLog__should_write_nulls() throws Exception {
+        TaskLog written = service.insertTaskLog(new TaskLog(802L, "NEW", null, "Orders", "process", null, null, null));
 
-        assertEquals(List.of(new TaskLog(802L, "NEW", null, "Orders", "process", null, null, null)),
-                taskLogs(802L));
+        assertEquals(new TaskLog(802L, 1, written.created(), "NEW", null, "Orders", "process", null, null, null),
+                written);
+        assertEquals(List.of(written), taskLogs(802L));
+    }
+
+    @Test
+    void insertTaskLog__should_number_logs_of_each_task() throws Exception {
+        TaskLog first = service.insertTaskLog(new TaskLog(803L, "A", "B", "Orders", "process", null, null, null));
+        TaskLog other = service.insertTaskLog(new TaskLog(804L, "A", "B", "Orders", "process", null, null, null));
+        TaskLog second = service.insertTaskLog(new TaskLog(803L, "B", "C", "Orders", "process", null, null, null));
+
+        assertEquals(1, first.seqNo());
+        assertEquals(1, other.seqNo());
+        assertEquals(2, second.seqNo());
+        assertEquals(List.of(first, second), taskLogs(803L));
+    }
+
+    /**
+     * A concurrent transaction has inserted the next seqno without committing: the insert waits for it, does nothing
+     * after its commit, and is repeated with the seqno after it.
+     */
+    @Test
+    void insertTaskLog__should_take_next_seqno_when_concurrent_writer_took_it() throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (Connection con = Postgres.dataSource().getConnection(); Statement st = con.createStatement()) {
+            con.setAutoCommit(false);
+            st.executeUpdate("INSERT INTO task_logs (task_id, seqno, final_status) VALUES (805, 1, 'Concurrent')");
+            Future<TaskLog> written = executor.submit(() -> service.insertTaskLog(
+                    new TaskLog(805L, "A", "B", "Orders", "process", null, null, null)));
+            waitForLockWait();
+            assertFalse(written.isDone());
+            con.commit();
+
+            assertEquals(2, written.get(10, TimeUnit.SECONDS).seqNo());
+        } finally {
+            executor.shutdownNow();
+        }
+        assertEquals(List.of("Concurrent", "B"), taskLogs(805L).stream().map(TaskLog::finalStatus).toList());
+    }
+
+    /** Waits until an insert into task_logs waits for a lock. */
+    private static void waitForLockWait() throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (Sql.selectLong(Postgres.dataSource(), "SELECT count(*) FROM pg_stat_activity "
+                + "WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO task_logs%'") == 0) {
+            assertTrue(System.nanoTime() < deadline, "No session waits for a lock");
+            Thread.sleep(20);
+        }
     }
 
     @Test
@@ -366,22 +421,19 @@ public class DoerServiceJdbcITCase {
         }
     }
 
-    record TaskLog(long taskId, String initialStatus, String finalStatus, String className, String methodName,
-            Long durationMs, String exceptionType, String extraJson) {
-    }
-
     /** The task_logs rows of the task, in the order they were written. */
     List<TaskLog> taskLogs(long taskId) throws SQLException {
-        String sql = "SELECT task_id, initial_status, final_status, class_name, method_name, duration_ms, "
-                + "exception_type, extra_json::text FROM task_logs WHERE task_id = ? ORDER BY id";
+        String sql = "SELECT task_id, seqno, created, initial_status, final_status, class_name, method_name, "
+                + "duration_ms, exception_type, extra_json::text FROM task_logs WHERE task_id = ? ORDER BY seqno";
         List<TaskLog> logs = new ArrayList<>();
         try (Connection con = Postgres.dataSource().getConnection();
                 PreparedStatement pst = con.prepareStatement(sql)) {
             pst.setLong(1, taskId);
             try (ResultSet rs = pst.executeQuery()) {
                 while (rs.next()) {
-                    logs.add(new TaskLog(rs.getLong(1), rs.getString(2), rs.getString(3), rs.getString(4),
-                            rs.getString(5), rs.getObject(6, Long.class), rs.getString(7), rs.getString(8)));
+                    logs.add(new TaskLog(rs.getLong(1), rs.getInt(2), rs.getObject(3, OffsetDateTime.class).toInstant(),
+                            rs.getString(4), rs.getString(5), rs.getString(6), rs.getString(7),
+                            rs.getObject(8, Integer.class), rs.getString(9), rs.getString(10)));
                 }
             }
         }

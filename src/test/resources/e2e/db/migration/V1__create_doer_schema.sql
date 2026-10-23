@@ -12,15 +12,16 @@ CREATE TABLE tasks (
 );
 
 CREATE TABLE task_logs (
-    id BIGINT DEFAULT nextval('id_generator'::regclass) PRIMARY KEY,
     task_id BIGINT NOT NULL,
+    seqno INTEGER NOT NULL,
     created TIMESTAMP WITH TIME ZONE DEFAULT now(),
     initial_status VARCHAR,
     final_status VARCHAR,
     class_name VARCHAR,
     method_name VARCHAR,
-    duration_ms BIGINT,
+    duration_ms INTEGER,
     exception_type VARCHAR,
-    extra_json JSON
+    extra_json JSON,
+    PRIMARY KEY (task_id, seqno)
 );
 

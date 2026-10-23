@@ -221,10 +221,9 @@ public class ClusterTest {
         }
 
         @Override
-        public long writeTaskLog(Long taskId, String initialStatus, String finalStatus, String className,
-                String methodName, String exceptionType, String extraJson, Integer durationMs) {
+        public TaskLog insertTaskLog(TaskLog log) {
             db.logs++;
-            return db.logs;
+            return log;
         }
 
         @Override

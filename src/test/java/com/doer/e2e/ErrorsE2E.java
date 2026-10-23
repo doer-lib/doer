@@ -73,7 +73,7 @@ class ErrorsE2E extends E2eTestBase {
         assertEquals("Error retry forever", task.status());
         assertNotNull(task.failingSince());
         assertEquals("Error retry forever", selectStringValue(
-                "SELECT final_status FROM task_logs WHERE task_id = " + taskId + " ORDER BY id DESC LIMIT 1"));
+                "SELECT final_status FROM task_logs WHERE task_id = " + taskId + " ORDER BY seqno DESC LIMIT 1"));
     }
 
     @Test

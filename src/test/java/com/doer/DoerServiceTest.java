@@ -913,9 +913,8 @@ public class DoerServiceTest {
         }
 
         @Override
-        public long writeTaskLog(Long taskId, String initialStatus, String finalStatus, String className,
-                String methodName, String exceptionType, String extraJson, Integer durationMs) {
-            return 1;
+        public TaskLog insertTaskLog(TaskLog log) {
+            return log;
         }
 
         @Override
