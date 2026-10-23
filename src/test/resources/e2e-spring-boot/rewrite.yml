@@ -1,0 +1,27 @@
+# The CDI annotations of Transit Sims replaced with Spring ones; run by SpringBootApp after the sources are copied and the
+# Spring annotations without a CDI counterpart are added (@Scope("prototype"), @Component on JAX-RS classes).
+# @Inject, @PostConstruct and @jakarta.transaction.Transactional stay: Spring supports them.
+type: specs.openrewrite.org/v1beta/recipe
+name: transitsims.CdiToSpring
+displayName: CDI annotations of Transit Sims as Spring annotations
+description: Turns the CDI beans of Transit Sims into Spring beans, so that Spring Boot runs it without emulating CDI.
+recipeList:
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: jakarta.enterprise.context.ApplicationScoped
+      newFullyQualifiedTypeName: org.springframework.stereotype.Component
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: jakarta.inject.Singleton
+      newFullyQualifiedTypeName: org.springframework.stereotype.Component
+  # With @Scope("prototype"): one instance per injection point
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: jakarta.enterprise.context.Dependent
+      newFullyQualifiedTypeName: org.springframework.stereotype.Component
+  # With @Scope("prototype"): a producer without a scope makes a @Dependent bean
+  - org.openrewrite.java.ChangeType:
+      oldFullyQualifiedTypeName: jakarta.enterprise.inject.Produces
+      newFullyQualifiedTypeName: org.springframework.context.annotation.Bean
+  # BeanKindTraced binds the aspect of the Spring BeanKindTracedInterceptor
+  - org.openrewrite.java.RemoveAnnotation:
+      annotationPattern: "@jakarta.interceptor.InterceptorBinding"
+  # Imports for the annotations added by SpringBootApp
+  - org.openrewrite.java.ShortenFullyQualifiedTypeReferences

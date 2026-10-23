@@ -1,0 +1,225 @@
+package com.doer.e2e;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.regex.Pattern;
+import org.junit.jupiter.api.Test;
+
+/** {@code @ConcurrencyLimit}, {@code @ConcurrencyGroup} and the queues of DoerService. */
+class ConcurrencyE2E extends E2eTestBase {
+
+    /**
+     * The line of the limits in the FINE message of each load ("Queues loaded by sub-queue"), which the runtimes of the
+     * tests write to the console: {@code "  limit:   10   20   10"}, under the first line of the message.
+     */
+    private static final Pattern LIMITS_LINE = Pattern.compile("\\s*limit:(\\s+\\d+)+\\s*");
+
+    @Test
+    void concurrency_1_should_run_only_1_method_at_a_time() {
+        resetServer();
+        long task1 = pushTask("Concurrency limit 1 first");
+        pushTask("Concurrency limit 1 second");
+        pushTask("Concurrency limit 1 other");
+        pushTask("Concurrency limit 1 first");
+        pushTask("Concurrency limit 1 second");
+        long task2 = pushTask("Concurrency limit 1 other");
+        assertEquals("Concurrency limit 1 other done", waitTaskStatus(task2, "Concurrency limit 1 other done"));
+
+        RestTask firstTask = restGetTask(task1);
+        RestTask lastTask = restGetTask(task2);
+        Duration timeToFinish6TasksBy100msEach = Duration.between(firstTask.created(), lastTask.modified());
+        assertTrue(timeToFinish6TasksBy100msEach.compareTo(Duration.ofMillis(600)) >= 0,
+                () -> timeToFinish6TasksBy100msEach + ", task logs (task, created, duration): " + taskLogs());
+    }
+
+    @Test
+    void concurrency_group_should_run_methods_of_both_classes_one_at_a_time() {
+        resetServer();
+        long task1 = pushTask("Concurrency group first");
+        pushTask("Concurrency group second");
+        pushTask("Concurrency group first");
+        pushTask("Concurrency group second");
+        pushTask("Concurrency group first");
+        long task2 = pushTask("Concurrency group second");
+        assertEquals("Concurrency group second done", waitTaskStatus(task2, "Concurrency group second done"));
+        assertEquals(6, selectLongValue("SELECT count(*) FROM tasks WHERE status LIKE 'Concurrency group % done'"));
+
+        // In two domains of their own, the classes would run in parallel: 300 ms
+        RestTask firstTask = restGetTask(task1);
+        RestTask lastTask = restGetTask(task2);
+        Duration timeToFinish6TasksBy100msEach = Duration.between(firstTask.created(), lastTask.modified());
+        assertTrue(timeToFinish6TasksBy100msEach.compareTo(Duration.ofMillis(600)) >= 0,
+                timeToFinish6TasksBy100msEach::toString);
+    }
+
+    @Test
+    void concurrency_10_should_run_10_methods_in_parallel() {
+        resetServer();
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        pushTask("Concurrency queues slow");
+        long lastTaskId = pushTask("Concurrency queues slow");
+        assertEquals("Concurrency queues slow done", waitTaskStatus(lastTaskId, "Concurrency queues slow done"));
+        Long timeSpentMs = selectLongValue(
+                "SELECT (extract(EPOCH FROM max(modified) - min(created)) * 1000)::INT FROM tasks");
+        Long timeSleptMs = selectLongValue("SELECT sum(duration_ms) FROM task_logs");
+        assertTrue(timeSpentMs < 800, () -> "spent " + timeSpentMs + " ms, task logs (task, created, duration): "
+                + taskLogs());
+        assertTrue(timeSleptMs >= 1000, () -> "slept " + timeSleptMs + " ms");
+    }
+
+    @Test
+    void task_should_be_instantly_processed_by_different_methods() {
+        resetServer();
+        long taskId = pushTask("Concurrency chain class");
+        assertEquals("Concurrency chain done", waitTaskStatus(taskId, "Concurrency chain done"));
+    }
+
+    @Test
+    void queues__should_grow_and_shrink() throws Exception {
+        resetServer();
+        pauseServer();
+        LinkedList<Long> idList1 = new LinkedList<>(); // Failing but ready for retry
+        LinkedList<Long> idList2 = new LinkedList<>(); // Asap tasks
+        LinkedList<Long> idList3 = new LinkedList<>(); // Failing but not ready for retry
+        for (int i = 0; i < 150; i++) {
+            idList1.add(pushTask("Concurrency queues failing"));
+        }
+        sqlUpdate("UPDATE tasks SET modified = now() - '6 min'::INTERVAL, " +
+                "failing_since = now() - '10 min'::INTERVAL, " +
+                "created = now() - '12 min'::INTERVAL");
+        for (int i = 0; i < 300; i++) {
+            idList2.add(pushTask("Concurrency queues slow"));
+        }
+        sqlUpdate("UPDATE tasks SET modified = now() - '6 min'::INTERVAL, " +
+                "created = now() - '11 min'::INTERVAL " +
+                "WHERE id >= " + idList2.peekFirst());
+        for (int i = 0; i < 150; i++) {
+            idList3.add(pushTask("Concurrency queues failing"));
+        }
+        sqlUpdate("UPDATE tasks SET modified = now() - '1 min'::INTERVAL, " +
+                "failing_since = now() - '10 min'::INTERVAL, " +
+                "created = now() - '10 min'::INTERVAL " +
+                "WHERE id >= " + idList3.peekFirst());
+        long linesToSkip = E2eEnvironment.appLog(1).lines().count();
+        resumeServer();
+        for (Long id : idList2) {
+            waitTaskStatus(id, "Concurrency queues slow done");
+        }
+        // Time for the scheduler to run a task that must not run, and for the loads after the last tasks
+        Thread.sleep(750);
+        List<List<Integer>> limitsTable = E2eEnvironment.appLog(1).lines()
+                .skip(linesToSkip)
+                .filter(line -> LIMITS_LINE.matcher(line).matches())
+                .map(ConcurrencyE2E::parseLimitsLine)
+                .toList();
+
+        // All readyToRetry and asapTasks should be updated exactly 1 time
+        // No one failed but not ready task should be updated
+        for (Long id : idList1) {
+            assertEquals(1L, selectLongValue("SELECT count(*) FROM task_logs WHERE task_id = " + id));
+        }
+        for (Long id : idList2) {
+            assertEquals(1L, selectLongValue("SELECT count(*) FROM task_logs WHERE task_id = " + id));
+        }
+        for (Long id : idList3) {
+            assertEquals(0L, selectLongValue("SELECT count(*) FROM task_logs WHERE task_id = " + id));
+        }
+        // All 150 readyToRetry should be updated first, but few of ASAP tasks may also be updated
+        // (When readyToRetry queue become empty and DoerService start loading bigger queue from DB
+        // it continues processing other queues - in our case ASAP queue).
+        // The logs are ordered by created: the start of the short transaction that writes the log after the method.
+        Long aheadOfTime = selectLongValue("SELECT count(*) FROM task_logs WHERE task_id >= " + idList2.peekFirst()
+                + " AND created < (SELECT max(created) FROM task_logs WHERE task_id <= " + idList1.peekLast() + ")");
+        int maxAheadOfTime = 50;
+        // DUMP logs just for debug purpose
+        if (aheadOfTime > maxAheadOfTime) {
+            System.out.println(selectStringValue("select json_agg(row_to_json(x)) from (select task_id, created, "
+                    + "final_status, duration_ms from task_logs order by created) x;"));
+        }
+        System.out.println("Limits");
+        for (List<Integer> limits : limitsTable) {
+            System.out.println(limits);
+        }
+        assertTrue(aheadOfTime <= maxAheadOfTime,
+                "Expected only few ASAP task updated ahead of time " + aheadOfTime + " <= " + maxAheadOfTime);
+
+        List<Integer> firstRow = limitsTable.get(0);
+        List<Integer> lastRow = limitsTable.get(limitsTable.size() - 1);
+        for (int i = 0; i < firstRow.size(); i++) {
+            assertEquals(10, firstRow.get(i), "Test should start with minimal limits for all queues");
+        }
+        int asapQueueIndex = maxValueIndex(lastRow);
+        // The other queue with the largest limit; the number of loads varies, so the peak, not the middle of the table
+        int retryQueueIndex = -1;
+        int retryPeak = 0;
+        int peakRowIndex = -1;
+        for (int r = 0; r < limitsTable.size(); r++) {
+            List<Integer> row = limitsTable.get(r);
+            for (int i = 0; i < row.size(); i++) {
+                if (i != asapQueueIndex && row.get(i) > retryPeak) {
+                    retryQueueIndex = i;
+                    retryPeak = row.get(i);
+                    peakRowIndex = r;
+                }
+            }
+        }
+        List<Integer> peakRow = limitsTable.get(peakRowIndex);
+        for (List<Integer> row : limitsTable) {
+            for (int i = 0; i < row.size(); i++) {
+                int value = row.get(i);
+                assertTrue(value >= 10, "Minimal limit value should be 10. But found " + value);
+                if (i != retryQueueIndex && i != asapQueueIndex) {
+                    assertEquals(10, value,
+                            "Queues, not affected by the test, should have limit = 10. But found " + value);
+                }
+            }
+        }
+        assertTrue(firstRow.get(retryQueueIndex) < retryPeak,
+                "ReadyToRetry queue limits should grow till their peak");
+        assertTrue(retryPeak > lastRow.get(retryQueueIndex),
+                "ReadyToRetry queue limits should shrink from their peak till lastRow");
+        for (int r = 0; r <= peakRowIndex; r++) {
+            assertEquals(10, limitsTable.get(r).get(asapQueueIndex),
+                    "Asap queue should remain minimal till the peak of ReadyToRetry, row " + r);
+        }
+        assertTrue(peakRow.get(asapQueueIndex) < lastRow.get(asapQueueIndex),
+                "Asap queue should grow from the peak of ReadyToRetry till lastRow");
+    }
+
+    private static int maxValueIndex(List<Integer> row) {
+        int maxValue = row.get(0);
+        int indexOfMaxValue = 0;
+        for (int i = 1; i < row.size(); i++) {
+            int value = row.get(i);
+            if (value > maxValue) {
+                maxValue = value;
+                indexOfMaxValue = i;
+            }
+        }
+        return indexOfMaxValue;
+    }
+
+    /** The limits of the sub-queues in the line of {@link #LIMITS_LINE}. */
+    private static List<Integer> parseLimitsLine(String line) {
+        String limits = line.trim().substring("limit:".length()).trim();
+        return Arrays.stream(limits.split("\\s+")).map(Integer::valueOf).toList();
+    }
+
+    /** The task logs in their order, for the message of a failed check of timing. */
+    private static String taskLogs() {
+        return selectStringValue("SELECT string_agg(task_id || ' ' || to_char(created, 'HH24:MI:SS.MS') || ' '"
+                + " || coalesce(duration_ms::text, '-'), ', ' ORDER BY created, task_id, seqno) FROM task_logs");
+    }
+}

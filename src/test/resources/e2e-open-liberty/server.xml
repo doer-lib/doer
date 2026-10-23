@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<server>
+    <featureManager>
+        <feature>webProfile-11.0</feature>
+        <feature>jdbc-4.3</feature>
+    </featureManager>
+
+    <!-- The defaults are for a run from the IDE (doer.e2e.runtime=external) -->
+    <variable name="env.E2E_DB_URL" defaultValue="jdbc:postgresql://localhost:5432/doer"/>
+    <variable name="env.E2E_DB_USER" defaultValue="doer"/>
+    <variable name="env.E2E_DB_PASSWORD" defaultValue="doer"/>
+
+    <!-- The INFO messages of the application on the console, as in the other runtimes. The console shows no level
+         below INFO, so the FINE messages of Doer (the limits and loaded rows of the sub-queues, ConcurrencyE2E) come
+         from the trace, which goes to stdout too -->
+    <logging consoleLogLevel="INFO" traceSpecification="*=info:com.doer.*=fine" traceFileName="stdout"/>
+
+    <!-- The ManagedExecutorService runs on this pool, which starts with as many threads as processors (4 on
+         a runner of GitHub Actions) and adds them slowly: Doer would run fewer tasks at once than its
+         limits. 200, as the pool of Quarkus. -->
+    <executor coreThreads="200"/>
+
+    <httpEndpoint id="defaultHttpEndpoint" host="*" httpPort="8080" httpsPort="-1"/>
+
+    <library id="postgresql">
+        <file name="${server.config.dir}/postgresql.jar"/>
+    </library>
+    <dataSource id="transitsims" jndiName="jdbc/transitsims">
+        <jdbcDriver libraryRef="postgresql"/>
+        <properties.postgresql URL="${env.E2E_DB_URL}" user="${env.E2E_DB_USER}" password="${env.E2E_DB_PASSWORD}"/>
+        <connectionManager maxPoolSize="4"/>
+    </dataSource>
+
+    <!-- Otherwise the context root is the name of the WAR -->
+    <webApplication location="ROOT.war" contextRoot="/"/>
+</server>
