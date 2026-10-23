@@ -5,13 +5,13 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.java-doer</groupId>
+    <groupId>io.github.doer-lib</groupId>
     <artifactId>doer</artifactId>
-    <version>0.0.17-SNAPSHOT</version>
+    <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <name>com.java-doer:doer</name>
-    <description>Library for JavaEE/JakartaEE application to perform long-running jobs.</description>
+    <name>io.github.doer-lib:doer</name>
+    <description>Library for Jakarta EE application to perform long-running jobs.</description>
     <url>https://github.com/doer-lib/doer.git</url>
 
     <licenses>
@@ -38,8 +38,7 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
+        <maven.compiler.release>17</maven.compiler.release>
         <maven.compiler.debug>true</maven.compiler.debug>
         <maven.compiler.debuglevel>lines,vars,source</maven.compiler.debuglevel>
     </properties>
