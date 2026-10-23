@@ -53,7 +53,11 @@ public class GeneratorITCase implements InWorkspace {
                         System.out.println("Main method called");
                         var doer = new TestDoerService();
                         doer._inject_doer1(Doer1::new);
-                        Task task = new Task();
+                        Task task = new Task() {
+                            {
+                                setId(1L);
+                            }
+                        };
                         task.setStatus("A");
                         doer.runTask(task);
                     }
@@ -93,7 +97,11 @@ public class GeneratorITCase implements InWorkspace {
                             return new Doer1();
                         });
                         System.out.println("Provider injected");
-                        Task task = new Task();
+                        Task task = new Task() {
+                            {
+                                setId(1L);
+                            }
+                        };
                         task.setStatus("A");
                         doer.runTask(task);
                         doer.runTask(task);
@@ -184,7 +192,11 @@ public class GeneratorITCase implements InWorkspace {
                         System.out.println("---main---");
                         var doer = new TestDoerService();
                         doer._inject_doer1(Doer1::new);
-                        Task task = new Task();
+                        Task task = new Task() {
+                            {
+                                setId(1L);
+                            }
+                        };
                         task.setStatus("A");
                         doer.runTask(task);
                         task.setStatus("B");
@@ -389,7 +401,11 @@ public class GeneratorITCase implements InWorkspace {
                         var doer = new TestDoerService();
                         doer._inject_doer1(Doer1::new);
                         doer._inject_demoClassLoader(DemoClassLoader::new);
-                        Task task = new Task();
+                        Task task = new Task() {
+                            {
+                                setId(1L);
+                            }
+                        };
                         task.setStatus("A");
                         doer.runTask(task);
                     }
@@ -418,7 +434,11 @@ public class GeneratorITCase implements InWorkspace {
                         System.out.println("---main---");
                         var doer = new TestDoerService();
                         doer._inject_main(Main::new);
-                        Task task = new Task();
+                        Task task = new Task() {
+                            {
+                                setId(1L);
+                            }
+                        };
                         task.setStatus("A");
                         doer.runTask(task);
                     }
@@ -475,7 +495,11 @@ public class GeneratorITCase implements InWorkspace {
                             }
                         };
                         doer._inject_main(Main::new);
-                        Task task = new Task();
+                        Task task = new Task() {
+                            {
+                                setId(1L);
+                            }
+                        };
                         task.setStatus("A");
 
                         Object data = doer.tst_load(task, String.class);
@@ -548,7 +572,11 @@ public class GeneratorITCase implements InWorkspace {
                     public static void main(String[] args) throws Exception {
                         var doer = new TestDoerService();
                         doer._inject_orders(Orders::new);
-                        Task task = new Task();
+                        Task task = new Task() {
+                            {
+                                setId(1L);
+                            }
+                        };
                         task.setStatus("A");
                         doer.runTask(task);
                     }
@@ -643,7 +671,11 @@ public class GeneratorITCase implements InWorkspace {
                     public static void main(String[] args) throws Exception {
                         var doer = new TestDoerService();
                         doer._inject_orders(Orders::new);
-                        Task task = new Task();
+                        Task task = new Task() {
+                            {
+                                setId(1L);
+                            }
+                        };
                         task.setStatus("A");
 
                         System.out.println("--- runTask ---");

@@ -18,6 +18,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -785,20 +786,6 @@ public abstract class DoerService {
         return task;
     }
 
-    private static TaskLog readTaskLog(ResultSet rs) throws SQLException {
-        return new TaskLog(
-                rs.getLong("task_id"),
-                rs.getInt("seqno"),
-                toInstant(rs.getObject("created", OffsetDateTime.class)),
-                rs.getString("initial_status"),
-                rs.getString("final_status"),
-                rs.getString("class_name"),
-                rs.getString("method_name"),
-                rs.getObject("duration_ms", Integer.class),
-                rs.getString("exception_type"),
-                rs.getString("extra_json"));
-    }
-
     public abstract void runTask(Task task) throws Exception;
 
     public abstract void runInTransaction(Callable<Object> code) throws Exception;
@@ -861,8 +848,8 @@ public abstract class DoerService {
                         task.setInProgress(false);
                         updateAndBumpVersionOrThrow(task);
                         saver.call();
-                        insertTaskLog(new TaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName,
-                                millisSince(startNanos), null, null));
+                        insertTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName,
+                                millisSince(startNanos), null, null);
                         return null;
                     });
                     return;
@@ -895,8 +882,8 @@ public abstract class DoerService {
                 updateAndBumpVersionOrThrow(task);
                 String exceptionType = finalFailure.getClass().getName();
                 String extraJson = createExtraJson(TaskSnapshot.of(task), finalFailure);
-                insertTaskLog(new TaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName,
-                        millisSince(startNanos), exceptionType, extraJson));
+                insertTaskLog(task.getId(), initialStatus, task.getStatus(), className, methodName,
+                        millisSince(startNanos), exceptionType, extraJson);
                 return null;
             });
         } catch (TaskVersionConflictException e) {
@@ -1025,8 +1012,8 @@ public abstract class DoerService {
                         + ", inProgressSince=" + inProgressSince + ", by=" + className + "." + methodName);
                 String extraJson = inProgressSince == null ? null
                         : "{\"inProgressSince\": \"" + inProgressSince + "\"}";
-                insertTaskLog(new TaskLog(taskId, task.getStatus(), task.getStatus(), className, methodName, null,
-                        "TaskHijacked", extraJson));
+                insertTaskLog(taskId, task.getStatus(), task.getStatus(), className, methodName, null,
+                        "TaskHijacked", extraJson);
             }
             String initialStatus = task.getStatus();
             long startNanos = System.nanoTime();
@@ -1038,8 +1025,8 @@ public abstract class DoerService {
             if (dataType != null) {
                 _save(TaskSnapshot.of(task), dataType, data);
             }
-            insertTaskLog(new TaskLog(taskId, initialStatus, task.getStatus(), className, methodName,
-                    millisSince(startNanos), null, null));
+            insertTaskLog(taskId, initialStatus, task.getStatus(), className, methodName,
+                    millisSince(startNanos), null, null);
             result[0] = task;
             return null;
         });
@@ -1124,26 +1111,25 @@ public abstract class DoerService {
                 WHERE in_progress AND modified < ?
                 RETURNING id, status
                 """;
-        List<TaskLog> logs = new ArrayList<>();
+        Map<Long, String> statuses = new LinkedHashMap<>();
         try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sqlUpdate)) {
             pst.setObject(1, toOffsetDateTime(treshold));
             try (ResultSet rs = pst.executeQuery()) {
                 while (rs.next()) {
-                    String status = rs.getString("status");
-                    logs.add(new TaskLog(rs.getLong("id"), status, status, "DoerService", "resetStalledInProgressTasks",
-                            null, "StalledTaskReset", null));
+                    statuses.put(rs.getLong("id"), rs.getString("status"));
                 }
             }
         }
-        for (TaskLog log : logs) {
-            insertTaskLog(log);
+        for (Map.Entry<Long, String> entry : statuses.entrySet()) {
+            insertTaskLog(entry.getKey(), entry.getValue(), entry.getValue(), "DoerService",
+                    "resetStalledInProgressTasks", null, "StalledTaskReset", null);
         }
-        if (!logs.isEmpty()) {
-            LOG.log(Level.WARNING, "Stalled tasks reset: tasks=" + logs.size() + ", timeout=" + timeout);
+        if (!statuses.isEmpty()) {
+            LOG.log(Level.WARNING, "Stalled tasks reset: tasks=" + statuses.size() + ", timeout=" + timeout);
         } else {
             LOG.log(Level.FINE, "No stalled tasks: timeout=" + timeout);
         }
-        return logs.size();
+        return statuses.size();
     }
 
     /**
@@ -1153,7 +1139,8 @@ public abstract class DoerService {
     public abstract String createExtraJson(TaskSnapshot task, Throwable exception);
 
     /**
-     * Writes the log with the next seqno of the task; returns the written row, with its seqno and created.
+     * Writes a task_logs row with the next seqno of the task: a change of the task by a doer method or a coordinated
+     * update, a failure of a doer method, a hijack or a reset of a stalled task. The database sets created.
      * <p>
      * The writers of the logs of a task hold the lock of its row, so the next seqno is normally free. When a writer
      * without the lock has taken it, the insert does nothing and is repeated. ON CONFLICT DO NOTHING keeps the
@@ -1161,40 +1148,38 @@ public abstract class DoerService {
      * conflicting row, so in READ COMMITTED the repeated insert sees the row and takes the seqno after it. In
      * REPEATABLE READ and SERIALIZABLE, a conflict with the row of a concurrent transaction is a serialization failure.
      */
-    public TaskLog insertTaskLog(TaskLog log) throws SQLException {
+    protected void insertTaskLog(long taskId, String initialStatus, String finalStatus, String className,
+            String methodName, Integer durationMs, String exceptionType, String extraJson) throws SQLException {
         String sql = """
                 INSERT INTO task_logs (task_id, seqno, initial_status, final_status, class_name, method_name,
                     duration_ms, exception_type, extra_json)
                 VALUES (?, (SELECT coalesce(max(seqno), 0) + 1 FROM task_logs WHERE task_id = ?), ?, ?, ?, ?, ?, ?,
                     ?::json)
                 ON CONFLICT DO NOTHING
-                RETURNING *
                 """;
         try (Connection con = getConnection(); PreparedStatement pst = con.prepareStatement(sql)) {
-            pst.setLong(1, log.taskId());
-            pst.setLong(2, log.taskId());
-            pst.setString(3, log.initialStatus());
-            pst.setString(4, log.finalStatus());
-            pst.setString(5, log.className());
-            pst.setString(6, log.methodName());
-            if (log.durationMs() == null) {
+            pst.setLong(1, taskId);
+            pst.setLong(2, taskId);
+            pst.setString(3, initialStatus);
+            pst.setString(4, finalStatus);
+            pst.setString(5, className);
+            pst.setString(6, methodName);
+            if (durationMs == null) {
                 pst.setNull(7, Types.INTEGER);
             } else {
-                pst.setInt(7, log.durationMs());
+                pst.setInt(7, durationMs);
             }
-            pst.setString(8, log.exceptionType());
-            pst.setString(9, log.extraJson());
+            pst.setString(8, exceptionType);
+            pst.setString(9, extraJson);
             for (int attempt = 1; attempt <= TASK_LOG_ATTEMPTS; attempt++) {
-                try (ResultSet rs = pst.executeQuery()) {
-                    if (rs.next()) {
-                        return readTaskLog(rs);
-                    }
+                if (pst.executeUpdate() > 0) {
+                    return;
                 }
-                LOG.log(Level.FINE, "Task log seqno taken by a concurrent writer: taskId=" + log.taskId()
+                LOG.log(Level.FINE, "Task log seqno taken by a concurrent writer: taskId=" + taskId
                         + ", attempt=" + attempt);
             }
             throw new SQLException("Task log not written, concurrent writers took its seqno " + TASK_LOG_ATTEMPTS
-                    + " times: taskId=" + log.taskId());
+                    + " times: taskId=" + taskId);
         }
     }
 
