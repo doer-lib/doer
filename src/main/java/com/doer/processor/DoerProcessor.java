@@ -100,7 +100,7 @@ public class DoerProcessor extends AbstractProcessor {
     private final Map<String, Integer> limits = new HashMap<>();
     /** Domain names given in @ConcurrencyGroup. */
     private final Set<String> namedDomains = new HashSet<>();
-    /** Created in init(); adds the statuses set in code to doerMethods. */
+    /** Created in init(); adds the statuses set in code to doerMethods. Null when the compiler is not javac. */
     private SetStatusFinder setStatusFinder;
     /**
      * Set by process() when it generated _GeneratedDoerService; false when there are no doer annotations or test
@@ -117,13 +117,21 @@ public class DoerProcessor extends AbstractProcessor {
      * attributed method bodies. So they are generated after javac has attributed the classes (task events),
      * not during annotation processing: attributing them from the processor, before the generated classes exist,
      * breaks compilation of anonymous classes on javac 17-25. Without attribution (e.g. javac -proc:only) they are
-     * generated without these statuses, with a warning.
+     * generated without these statuses, with a warning. Other compilers (e.g. Eclipse JDT in IDEs) have no task
+     * events and attributed trees, so they are not generated at all, with a warning.
      */
     @Override
     public synchronized void init(ProcessingEnvironment processingEnv) {
         super.init(processingEnv);
+        JavacTask javacTask;
+        try {
+            javacTask = JavacTask.instance(processingEnv);
+        } catch (IllegalArgumentException e) {
+            // Not javac
+            return;
+        }
         setStatusFinder = new SetStatusFinder(processingEnv, doerMethods);
-        JavacTask.instance(processingEnv).addTaskListener(new TaskListener() {
+        javacTask.addTaskListener(new TaskListener() {
             @Override
             public void finished(TaskEvent e) {
                 onJavacTaskFinished(e);
@@ -156,6 +164,11 @@ public class DoerProcessor extends AbstractProcessor {
             throw new RuntimeException(e);
         }
         // doer.json and doer.dot are generated when compilation has finished (see init)
+        if (setStatusFinder == null) {
+            processingEnv.getMessager().printMessage(Kind.WARNING, "doer.json and doer.dot are not generated: "
+                    + "they need javac, but the compiler is " + processingEnv.getClass().getName()
+                    + " (for example, Eclipse JDT in an IDE). Build with javac (Maven, Gradle) to generate them.");
+        }
         doerAnnotationsProcessed = true;
         return true;
     }
