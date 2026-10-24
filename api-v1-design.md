@@ -289,7 +289,7 @@ The processor fails compilation when:
 - the dedicated group of a method with `@ConcurrencyLimit` has the name of another group (an overloaded doer method with `@ConcurrencyLimit`, or a nested class named like the method);
 - a doer method has a parameter of a type without a `@TaskDataLoader` (reported once per type).
 
-It warns about every doer method without `@RetryPolicy`, and about a class-level `@ConcurrencyLimit` whose group has no doer methods.
+It warns about a class-level `@ConcurrencyLimit` whose group has no doer methods.
 
 ## Updater interfaces
 
@@ -376,7 +376,7 @@ and then reloads the queues (`GET /api/validation/load`, `triggerQueuesReload()`
 ## Migration
 
 - All renames are source-incompatible, which v1 allows. Annotations have `CLASS` retention and the generated service is regenerated on recompilation, so for them there is nothing to keep at runtime. The interfaces are runtime types: a library compiled against 0.x that calls `facilitateCoordinatedUpdate` with `DoerTaskConsumer` or `DoerUpdater` fails at runtime with v1 until it is recompiled.
-- v1 stops retrying unannotated doer methods after 1 day (see "Methods without `@RetryPolicy`"), so every doer method that relies on endless retries needs `@RetryPolicy(interval = "5m")`. The renames break compilation, but this change does not, so the processor warns about every doer method without `@RetryPolicy`. The release notes must call it out as well.
+- v1 stops retrying unannotated doer methods after 1 day (see "Methods without `@RetryPolicy`"), so every doer method that relies on endless retries needs `@RetryPolicy(interval = "5m")`. The renames break compilation, but this change does not, and the processor does not warn about it, so the release notes must call it out.
 - Loaders, savers and describers take `TaskSnapshot` instead of `Task` (getters become record accessors: `task.getId()` → `task.id()`); the processor reports a method with `Task`.
 - Processor error messages that name annotations must use the new names (they currently also say `DoerParameterLoader`, a name that does not exist).
 - Optional: in the last 0.x release, have the processor accept both old and new annotations and warn on the old ones. That gives users one release to migrate with compiler guidance.

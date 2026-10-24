@@ -1,46 +1,37 @@
 # Doer
 
-[![maven](https://badges.mvnrepository.com/badge/com.java-doer/doer/badge.svg?label=maven)](https://mvnrepository.com/artifact/com.java-doer/doer)
+[![maven](https://badges.mvnrepository.com/badge/io.github.doer-lib/doer/badge.svg?label=maven)](https://mvnrepository.com/artifact/io.github.doer-lib/doer)
 
 Doer is a Java library designed for building fault-tolerant, cluster-ready backend applications using annotations.
 
-It simplifies distributed task execution, automatic retries, and state transitions to help build reliable workflows.
+It simplifies distributed task execution, automatic retries, and state transitions, ensuring reliable processing of complex workflows.
 
-> **Coming in version 1.0.0:** Doer is undergoing a major update with breaking changes to its API, runtime requirements, and implementation. The new version will also use the Maven group ID `io.github.doer-lib` instead of `com.java-doer`. A preview is available as:
->
-> ```xml
-> <dependency>
->     <groupId>io.github.doer-lib</groupId>
->     <artifactId>doer</artifactId>
->     <version>1.0.0-beta1</version>
-> </dependency>
-> ```
+> Version 1.0.0 introduces breaking changes to the API, runtime requirements, and Maven group ID (`io.github.doer-lib` instead of `com.java-doer`). For the 0.x version, see the [0.x branch](https://github.com/doer-lib/doer/tree/0.x).
 
 ## Features
 
-- Annotation-based API
+- [Annotation-based API](api.1.x.md)
 - Execution in distributed environments
 - Automatic retries and failover
 - Coordinated updates between Doer tasks and external APIs
 
 ## Usage
 
-Requires Java 17+. Generated code depends on Jakarta EE 10+ (CDI, JTA, JSON-P) and PostgreSQL.
-
 ```xml
 <dependency>
-    <groupId>com.java-doer</groupId>
+    <groupId>io.github.doer-lib</groupId>
     <artifactId>doer</artifactId>
-    <version>0.0.16</version>
+    <version>1.0.0-beta1</version>
 </dependency>
 ```
 
-Version 1.0 is in development on `main`, and this README describes it. It renames the public API (for example `@OnException` becomes `@RetryPolicy`); see [api-v1-design.md](api-v1-design.md#migration).
+## Annotation processing since JDK 23
 
-### Annotation processing since JDK 23
+Since JDK 23, annotation processing needs to be activated explicitly.
 
-Starting with JDK 23, annotation processing must be explicitly enabled.
-You can enable it for all processors using -Dmaven.compiler.proc=full, or configure the Doer processor explicitly:
+> For details, read “Recommended Way to Activate Annotation Processing” in the Maven documentation https://maven.apache.org
+
+You can enable all annotation processors by adding `-Dmaven.compiler.proc=full` to the `mvn` command. However, it is better to configure annotation processing explicitly:
 
 ```xml
 <plugin>
@@ -48,38 +39,20 @@ You can enable it for all processors using -Dmaven.compiler.proc=full, or config
     <configuration>
         <annotationProcessorPaths>
             <path>
-                <groupId>com.java-doer</groupId>
+                <groupId>io.github.doer-lib</groupId>
                 <artifactId>doer</artifactId>
-                <version>0.0.16</version>
+                <version>1.0.0-beta1</version>
             </path>
         </annotationProcessorPaths>
     </configuration>
 </plugin>
 ```
 
-### What the library provides
-
-Define workflows in your backend using annotations. The annotation processor generates the implementation of `com.doer.DoerService`, which your backend can inject and use as a regular dependency. Beans with doer methods may inject `DoerService` too: the generated service injects providers of the beans and looks them up on first use, so there is no circular reference to resolve, in Spring as well.
-
-```java
-@ApplicationScoped
-public class DoerLifecycle {
-    @Inject
-    DoerService doerService;
-
-    void onStart(@Observes Startup event) {
-        doerService.start();
-    }
-
-    void onStop(@Observes Shutdown event) {
-        doerService.stop();
-    }
-}
-```
-
 ## Example
 
-The following code illustrates an order-processing workflow from the [Doer Tutorial](https://github.com/doer-lib/doertutorial).
+See: https://github.com/doer-lib/doertutorial
+
+The following code illustrates an order-processing workflow from the `Doer Tutorial`.
 
 ```java
 @AcceptStatus(GOODS_RESERVED)
@@ -105,13 +78,13 @@ public void shipOrder(Task task, Order order) {
 }
 ```
 
-The following diagram illustrates the state transitions and error-handling mechanisms in this workflow:
+Doer generates a workflow diagram for the business operations defined in your code, illustrating their state transitions and error-handling mechanisms.
 
 ![intro.svg](intro.svg)
 
-## Tutorials
+## Video tutorials
 
-Video tutorials are available on [YouTube](https://www.youtube.com/@DoerLib):
+Video tutorials are available on YouTube (https://www.youtube.com/@DoerLib), with text versions in the doertutorial wiki (https://github.com/doer-lib/doertutorial/wiki).
 
 1. [Episode 01: The Core Concept Behind the Doer](https://github.com/doer-lib/doertutorial/wiki/Episode-01:-The-Core-Concept-Behind-the-Doer)
 2. [Episode 02: Doer Methods - Implementing Business Operations with Doer](https://github.com/doer-lib/doertutorial/wiki/Episode-02.-Doer-Methods:-Implementing-Business-Operations-with-Doer)
