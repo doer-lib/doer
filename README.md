@@ -1,71 +1,62 @@
 # Doer
 
+[![maven](https://badges.mvnrepository.com/badge/io.github.doer-lib/doer/badge.svg?label=maven)](https://mvnrepository.com/artifact/io.github.doer-lib/doer)
+
 Doer is a Java library designed for building fault-tolerant, cluster-ready backend applications using annotations.
 
-It simplifies distributed task execution, automatic retries, and state transitions, ensuring reliable 
-processing of complex workflows.
+It simplifies distributed task execution, automatic retries, and state transitions, ensuring reliable processing of complex workflows.
 
-> **Coming in version 1.0.0:** Doer is undergoing a major update with breaking changes to its API, runtime requirements, and implementation. The new version will also use the Maven group ID `io.github.doer-lib` instead of `com.java-doer`. A preview is available as:
->
-> ```xml
-> <dependency>
->     <groupId>io.github.doer-lib</groupId>
->     <artifactId>doer</artifactId>
->     <version>1.0.0-beta1</version>
-> </dependency>
-> ```
+> Version 1.0.0 introduces breaking changes to the API, runtime requirements, and Maven group ID (`io.github.doer-lib` instead of `com.java-doer`). For the 0.x version, see the [0.x branch](https://github.com/doer-lib/doer/tree/0.x).
 
 ## Features
 
-- Annotation-based API
+- [Annotation-based API](api.1.x.md)
 - Execution in distributed environments
 - Automatic retries and failover
+- Coordinated updates between Doer tasks and external APIs
 
 ## Usage
 
 ```xml
 <dependency>
-    <groupId>com.java-doer</groupId>
+    <groupId>io.github.doer-lib</groupId>
     <artifactId>doer</artifactId>
-    <version>0.0.16</version>
+    <version>1.0.0-beta1</version>
 </dependency>
 ```
-### Since JDK23
 
-Starting from java 23 you need to enable annotation processing explicitly.
+## Annotation processing since JDK 23
 
-Set `-Dmaven.compiler.proc=full` to enable ALL annotation processors.
+Since JDK 23, annotation processing needs to be activated explicitly.
 
-Or explicitly enable doer annotation processor:
+> For details, read “Recommended Way to Activate Annotation Processing” in the Maven documentation https://maven.apache.org
+
+You can enable all annotation processors by adding `-Dmaven.compiler.proc=full` to the `mvn` command. However, it is better to configure annotation processing explicitly:
 
 ```xml
-<build>
-    <plugins>
-        <plugin>
-            <artifactId>maven-compiler-plugin</artifactId>
-            <version>3.14.0</version>
-            <configuration>
-                <annotationProcessorPaths>
-                    <path>
-                        <groupId>com.java-doer</groupId>
-                        <artifactId>doer</artifactId>
-                        <version>0.0.16</version>
-                    </path>
-                </annotationProcessorPaths>
-            </configuration>
-        </plugin>
-    </plugins>
-</build>
+<plugin>
+    <artifactId>maven-compiler-plugin</artifactId>
+    <configuration>
+        <annotationProcessorPaths>
+            <path>
+                <groupId>io.github.doer-lib</groupId>
+                <artifactId>doer</artifactId>
+                <version>1.0.0-beta1</version>
+            </path>
+        </annotationProcessorPaths>
+    </configuration>
+</plugin>
 ```
 
-## Example Code
+## Example
 
-The following code fragment demonstrates how Doer specifies order processing workflow.
-This example is part of the **Doer Tutorial** [https://github.com/doer-lib/doertutorial](https://github.com/doer-lib/doertutorial)
+See: https://github.com/doer-lib/doertutorial
+
+The following code illustrates an order-processing workflow from the `Doer Tutorial`.
 
 ```java
 @AcceptStatus(GOODS_RESERVED)
-@OnException(retry = "every 5s during 10s", setStatus = PAYMENT_FAILED)
+@RetryPolicy(interval = "5s", duration = "10s", fallbackStatus = PAYMENT_FAILED)
 public void payOrder(Task task, Order order) {
     Check check = bank.processPayment(order);
     order.setPaymentTransactionId(check.transactionId());
@@ -79,7 +70,7 @@ public void reportNoPaymentForOrder(Task task, Order order) {
 }
 
 @AcceptStatus(ORDER_PAID)
-@OnException(retry = "every 5s during 5s", setStatus = ORDER_NOT_SHIPPED)
+@RetryPolicy(interval = "5s", duration = "5s", fallbackStatus = ORDER_NOT_SHIPPED)
 public void shipOrder(Task task, Order order) {
     TrackId trackId = warehouse.shipTheOrder(order);
     order.setDeliveryTrackingId(trackId.token());
@@ -87,17 +78,13 @@ public void shipOrder(Task task, Order order) {
 }
 ```
 
-### Workflow Overview
-
-The following diagram illustrates the state transitions and error-handling mechanisms in this workflow:
+Doer generates a workflow diagram for the business operations defined in your code, illustrating their state transitions and error-handling mechanisms.
 
 ![intro.svg](intro.svg)
 
-## Tutorials
+## Video tutorials
 
-Video tutorials are available on [YouTube](https://www.youtube.com/@DoerLib).
-
-Learn how to use Doer with these tutorials:
+Video tutorials are available on YouTube (https://www.youtube.com/@DoerLib), with text versions in the doertutorial wiki (https://github.com/doer-lib/doertutorial/wiki).
 
 1. [Episode 01: The Core Concept Behind the Doer](https://github.com/doer-lib/doertutorial/wiki/Episode-01:-The-Core-Concept-Behind-the-Doer)
 2. [Episode 02: Doer Methods - Implementing Business Operations with Doer](https://github.com/doer-lib/doertutorial/wiki/Episode-02.-Doer-Methods:-Implementing-Business-Operations-with-Doer)
@@ -105,9 +92,8 @@ Learn how to use Doer with these tutorials:
 
 ## Tools
 
-- [Doer Diagram Tool](https://www.java-doer.com/doer-diagram.html) - Visualize your Doer workflows
+- [Doer Diagram Tool](https://www.java-doer.com/doer-diagram.html): visualize your Doer workflows
 
----
+## Development
 
 Contributions and feedback are welcome! Feel free to open an issue or submit a pull request.
-

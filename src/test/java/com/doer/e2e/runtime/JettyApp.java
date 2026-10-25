@@ -1,0 +1,60 @@
+package com.doer.e2e.runtime;
+
+import java.nio.file.Path;
+import java.util.List;
+
+/**
+ * Transit Sims in Jetty, a servlet container: {@code ROOT.war} brings CDI (Weld servlet), JAX-RS (Jersey), JTA
+ * (Narayana and its CDI interceptors of {@code @Transactional}) and a transactional {@code DataSource} (Agroal with its
+ * Narayana integration).
+ */
+class JettyApp implements E2eApp {
+    static final String JETTY_IMAGE = "jetty:12.1.14-jdk25";
+
+    @Override
+    public String customSourcesFolder() {
+        return "e2e-jetty";
+    }
+
+    @Override
+    public void configure(Path workdir) throws Exception {
+        Path sources = workdir.resolve("src/main/java/transitsims");
+        Path migrations = workdir.resolve("src/main/resources/db/migration");
+        Path webInf = workdir.resolve("src/main/webapp/WEB-INF");
+        copySources("e2e/transitsims", sources);
+        copySources("e2e/db/migration", migrations);
+        copyCustomSource("pom.xml", workdir);
+        // A transactional DataSource of Agroal and Narayana and an Executor as CDI beans: Jetty has neither
+        copyCustomSource("Producers.java", sources);
+        // Flyway at start, before DoerLifecycle starts Doer
+        copyCustomSource("FlywayMigration.java", sources);
+        // Weld servlet discovers the beans of WEB-INF/classes only with beans.xml. Mode all: the extension of Jersey
+        // (jersey-cdi1x) makes the JAX-RS resources without a scope (SimResource, BusResource) CDI beans only if CDI
+        // discovers them; Jersey creates such a @Dependent resource per request. So the @Singleton class
+        // BeanKindSingleton is a bean too, and needs no producer here.
+        copyCustomSource("beans.xml", webInf);
+        // The listener of Weld and the servlet of Jersey at /api
+        copyCustomSource("web.xml", webInf);
+        // The format of java.util.logging, and the FINE messages of Doer
+        copyCustomSource("logging.properties", workdir.resolve("src/main/jetty"));
+    }
+
+    /**
+     * {@code start.jar} with the modules of Jakarta EE 11; the entrypoint of the image runs it with {@code exec}. Jetty
+     * and {@code java.util.logging} write to stderr, and the tests read stdout, so stderr goes to stdout. With the
+     * settings of the image {@code start.jar} starts the server in a JVM of its own: a system property for the server
+     * is an argument of {@code start.jar}, not of the {@code java} that runs it.
+     */
+    static final String START = """
+            exec /docker-entrypoint.sh java -jar "$JETTY_HOME/start.jar" --module=ee11-deploy,ee11-cdi-decorate \\
+                -Djava.util.logging.config.file=/opt/e2e/logging.properties 2>&1
+            """;
+
+    @Override
+    public DockerRunSpec dockerRun(Path workdir) {
+        return new DockerRunSpec(
+                List.of("-v", workdir.resolve("target/ROOT.war") + ":/var/lib/jetty/webapps/ROOT.war:ro",
+                        "-v", workdir.resolve("src/main/jetty/logging.properties") + ":/opt/e2e/logging.properties:ro"),
+                JETTY_IMAGE, List.of("sh", "-c", START));
+    }
+}
