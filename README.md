@@ -21,7 +21,7 @@ It simplifies distributed task execution, automatic retries, and state transitio
 <dependency>
     <groupId>io.github.doer-lib</groupId>
     <artifactId>doer</artifactId>
-    <version>1.0.0-beta1</version>
+    <version>1.0.0-beta2</version>
 </dependency>
 ```
 
@@ -41,7 +41,7 @@ You can enable all annotation processors by adding `-Dmaven.compiler.proc=full` 
             <path>
                 <groupId>io.github.doer-lib</groupId>
                 <artifactId>doer</artifactId>
-                <version>1.0.0-beta1</version>
+                <version>1.0.0-beta2</version>
             </path>
         </annotationProcessorPaths>
     </configuration>
