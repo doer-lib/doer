@@ -219,8 +219,8 @@ What the code of Transit Sims follows, and why. A Doer user meets the same quest
 
 - **Validation only in `transitsims.validation`.** The simulation knows nothing of the tests; `demo_log_tasks` is written only by `TransactionMethods`.
 - **A JAX-RS resource with doer methods has a scope** (`ValidationResource` is `@ApplicationScoped`). Doer threads have no request context: without a scope a resource is per request in WildFly and Open Liberty and no Spring bean in Spring Boot, and the generated service could not call it. For the same reason a doer method is never in a `@RequestScoped` bean.
-- **A JAX-RS resource without a scope** (`SimResource`, `BusResource`) is fine where RESTEasy makes it a CDI bean; with Jersey and CDI it needs a scope or the bean discovery mode `all` (as in Jetty).
-- **`@jakarta.inject.Singleton` alone does not make a CDI bean** (nor does `@Named`): a WAR without `beans.xml` does not discover `BeanKindSingleton`. Quarkus does; the servers get a producer, Jetty the mode `all`.
+- **A JAX-RS resource without a scope** (`SimResource`, `BusResource`) is fine where RESTEasy makes it a CDI bean; with Jersey and CDI it needs a scope or the bean discovery mode `all` (as in Jetty and Helidon).
+- **`@jakarta.inject.Singleton` alone does not make a CDI bean** (nor does `@Named`): a WAR without `beans.xml` does not discover `BeanKindSingleton`. Quarkus does; the servers get a producer, Jetty and Helidon the mode `all`.
 - **Reads that precede a coordinated update run in a transaction** (`BusRepository` is `@Transactional`). In Open Liberty a connection taken outside a transaction stays with the request until it ends, so reading a bus and then updating it needed two connections at once, and concurrent boardings exhausted the pool.
 - **No qualifiers, decorators or alternatives** on beans with doer methods: the generated service injects by type.
 - **Beans with doer methods may inject `DoerService`**, also through the constructor (`DoerMethodCalls`). The generated service injects `Provider`s of the beans and of itself and looks the beans up on first use, so Spring Boot needs no `spring.main.allow-circular-references`.

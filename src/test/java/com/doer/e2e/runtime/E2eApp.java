@@ -22,6 +22,7 @@ public interface E2eApp {
             case "wildfly" -> new WildflyApp();
             case "open-liberty" -> new OpenLibertyApp();
             case "jetty" -> new JettyApp();
+            case "helidon" -> new HelidonApp();
             default -> throw new IllegalArgumentException("Unknown doer.e2e.runtime: " + runtime);
         };
     }
