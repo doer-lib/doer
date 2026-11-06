@@ -1,11 +1,12 @@
 package com.doer.e2e.runtime;
 
 import java.nio.file.Path;
-import java.util.List;
 
-/** Transit Sims in WildFly: {@code ROOT.war} with its data source ({@code -ds.xml}), deployed by the deployment scanner. */
+/**
+ * Transit Sims in WildFly: {@code ROOT.war} with its data source ({@code -ds.xml}), unpacked, deployed by the
+ * deployment scanner.
+ */
 class WildflyApp implements E2eApp {
-    static final String WILDFLY_IMAGE = "quay.io/wildfly/wildfly:41.0.1.Final-jdk25";
 
     @Override
     public String customSourcesFolder() {
@@ -33,30 +34,8 @@ class WildflyApp implements E2eApp {
         // The FINE messages of Doer on the console (DEBUG of the console handler): the limits and loaded rows of the
         // sub-queues (ConcurrencyE2E).
         copyCustomSource("server.cli", workdir.resolve("src/main/wildfly"));
-    }
-
-    /**
-     * {@code standalone.sh} with {@code exec}. With {@code LAUNCH_JBOSS_IN_BACKGROUND}, set in the image, the script runs
-     * Java in the background and turns its exit code after SIGTERM (143) into 0; in the foreground it runs Java without
-     * {@code exec}, and the signals of the container do not reach Java. So the container runs a copy of the script that
-     * starts Java with {@code exec} in the foreground: Java gets the signals, and its exit code is the one of the container.
-     * If {@code sed} finds nothing to change in a new {@code standalone.sh}, the container fails at once, rather than the
-     * test of the exit code after SIGTERM. The data source gets the {@code E2E_DB_*} variables as system properties.
-     * Before the start, {@code server.cli} configures the server with the embedded server of {@code jboss-cli.sh}.
-     */
-    static final String START = """
-            "$JBOSS_HOME/bin/jboss-cli.sh" --file=/opt/jboss/e2e/server.cli
-            sed 's/eval \\\\"\\$JAVA\\\\" -D/eval exec \\\\"$JAVA\\\\" -D/' "$JBOSS_HOME/bin/standalone.sh" > "$JBOSS_HOME/bin/standalone-exec.sh"
-            grep -q 'eval exec' "$JBOSS_HOME/bin/standalone-exec.sh" || { echo 'No exec in standalone-exec.sh' >&2; exit 1; }
-            LAUNCH_JBOSS_IN_BACKGROUND= exec sh "$JBOSS_HOME/bin/standalone-exec.sh" -b 0.0.0.0 \\
-                -De2e.db.url="$E2E_DB_URL" -De2e.db.user="$E2E_DB_USER" -De2e.db.password="$E2E_DB_PASSWORD"
-            """;
-
-    @Override
-    public DockerRunSpec dockerRun(Path workdir) {
-        return new DockerRunSpec(List.of("-v", workdir.resolve("target/ROOT.war")
-                + ":/opt/jboss/wildfly/standalone/deployments/ROOT.war:ro",
-                "-v", workdir.resolve("src/main/wildfly/server.cli") + ":/opt/jboss/e2e/server.cli:ro"),
-                WILDFLY_IMAGE, List.of("sh", "-c", START));
+        // The WildFly image configured by server.cli, the WAR unpacked, and a start command with exec (standalone.sh
+        // turns the exit code 143 into 0)
+        copyCustomSource("Dockerfile", workdir);
     }
 }

@@ -2,7 +2,6 @@ package com.doer.e2e;
 
 import static com.doer.testkit.Toolchain.property;
 
-import com.doer.e2e.runtime.DockerRunSpec;
 import com.doer.e2e.runtime.E2eApp;
 import com.doer.testkit.Postgres;
 import com.doer.testkit.Processes;
@@ -46,7 +45,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * <pre>
  * target/e2e-test-workspaces/&lt;runtime&gt;/    the work folder: a complete Maven project of Transit Sims in the runtime
  *     mvn-package-*.txt                     command and output of the build
- *     docker-pull-*.txt                     the same for docker pull of the application image
+ *     Dockerfile                            the image of the application, built from the work folder
+ *     docker-build-*.txt                    command and output of docker build of the image
  *     app-&lt;node&gt;-out.txt, app-&lt;node&gt;-err.txt  stdout and stderr of the application, all starts of the node
  *     app-&lt;node&gt;-cmd.txt                    docker run command of every start
  *     container-usage.json                  CPU, disk and network I/O of every container of the application and
@@ -63,7 +63,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 public class E2eEnvironment implements BeforeAllCallback {
     static final String POSTGRES_IMAGE = Postgres.IMAGE;
     static final String WIREMOCK_IMAGE = "wiremock/wiremock:3.13.2";
-    static final int DOCKER_PULL_TIMEOUT_SECONDS = 600;
+    static final int DOCKER_BUILD_TIMEOUT_SECONDS = 600;
     static final int READY_TIMEOUT_SECONDS = 120;
     static final String EXTERNAL = "external";
 
@@ -76,7 +76,7 @@ public class E2eEnvironment implements BeforeAllCallback {
     private static Throwable startFailure;
     private static DataSource dataSource;
     private static Network network;
-    private static DockerRunSpec dockerRun;
+    private static String image;
     private static Map<String, String> appEnv;
     private static final Map<Integer, AppNode> nodes = new TreeMap<>();
 
@@ -150,10 +150,15 @@ public class E2eEnvironment implements BeforeAllCallback {
         checkMigration("V1__create_doer_schema.sql", "CreateSchema.sql");
         checkMigration("V2__create_doer_indexes.sql", "CreateIndexes.sql");
 
-        dockerRun = app.dockerRun(workdir);
-        RunResult pull = Processes.run(workdir, "docker-pull", DOCKER_PULL_TIMEOUT_SECONDS,
-                List.of("docker", "pull", dockerRun.image()));
-        pull.assertStatus(0);
+        // The application is installed in the image (unpacked, configured, its caches filled): a start of a container
+        // starts the application only
+        if (!Files.exists(workdir.resolve("Dockerfile"))) {
+            throw new IllegalStateException("No Dockerfile in " + workdir
+                    + ", a work folder of an older run. Run once without doer.e2e.skip-build.");
+        }
+        image = "transitsims-e2e:" + runtime;
+        Processes.run(workdir, "docker-build", DOCKER_BUILD_TIMEOUT_SECONDS,
+                List.of("docker", "build", "-t", image, ".")).assertStatus(0);
 
         containers.join();
         PGSimpleDataSource ds = new PGSimpleDataSource();
@@ -164,7 +169,7 @@ public class E2eEnvironment implements BeforeAllCallback {
         ds.setPassword("doer");
         dataSource = ds;
         WireMock.configureFor(wiremock.getHost(), wiremock.getMappedPort(8080));
-        System.out.printf("✔ Postgres and WireMock started, image %s pulled, in %s ms%n", dockerRun.image(),
+        System.out.printf("✔ Postgres and WireMock started, image %s built, in %s ms%n", image,
                 System.currentTimeMillis() - t0);
 
         appEnv = new LinkedHashMap<>();
@@ -214,7 +219,7 @@ public class E2eEnvironment implements BeforeAllCallback {
         requireDocker("startNode");
         boolean firstStart = !nodes.containsKey(node);
         AppNode appNode = nodes.computeIfAbsent(node,
-                n -> new AppNode(runtime, n, workdir, network.getId(), appEnv, dockerRun));
+                n -> new AppNode(runtime, n, workdir, network.getId(), appEnv, image));
         long t0 = System.currentTimeMillis();
         appNode.start();
         waitReady(appNode.baseUrl(), appNode);

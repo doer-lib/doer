@@ -1,7 +1,6 @@
 package com.doer.e2e.runtime;
 
 import java.nio.file.Path;
-import java.util.List;
 
 /**
  * Transit Sims in Helidon MP: a jar with its dependencies in {@code libs}, run with {@code java -jar} in a JRE image.
@@ -38,13 +37,7 @@ class HelidonApp implements E2eApp {
         copyCustomSource("microprofile-config.properties", metaInf);
         // The format of java.util.logging on stdout, and the FINE messages of Doer
         copyCustomSource("logging.properties", resources);
-    }
-
-    @Override
-    public DockerRunSpec dockerRun(Path workdir) {
-        return new DockerRunSpec(
-                List.of("-v", workdir.resolve("target/transitsims-helidon.jar") + ":/app/transitsims-helidon.jar:ro",
-                        "-v", workdir.resolve("target/libs") + ":/app/libs:ro"),
-                JRE_IMAGE, List.of("java", "-jar", "/app/transitsims-helidon.jar"));
+        // The jar and libs in a JRE image
+        copyCustomSource("Dockerfile", workdir);
     }
 }

@@ -3,7 +3,6 @@ package com.doer.e2e;
 import static java.nio.file.StandardOpenOption.APPEND;
 import static java.nio.file.StandardOpenOption.CREATE;
 
-import com.doer.e2e.runtime.DockerRunSpec;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
@@ -21,10 +20,11 @@ import java.util.concurrent.TimeUnit;
 import org.testcontainers.DockerClientFactory;
 
 /**
- * One node of the application: a {@code docker run --rm} process. Its stdout and stderr are appended to
- * {@code app-<node>-out.txt} and {@code app-<node>-err.txt} of the work folder, with a separator line at every start
- * and stop, and every command to {@code app-<node>-cmd.txt}, for all starts in this run. The host port is kept
- * across restarts. Before a stop the resources the container used are measured, see {@link ContainerUsage}.
+ * One node of the application: a {@code docker run --rm} process of the image of the application. Its stdout and
+ * stderr are appended to {@code app-<node>-out.txt} and {@code app-<node>-err.txt} of the work folder, with a separator
+ * line at every start and stop, and every command to {@code app-<node>-cmd.txt}, for all starts in this run. The host
+ * port is kept across restarts. Before a stop the resources the container used are measured, see
+ * {@link ContainerUsage}.
  */
 class AppNode {
     static final int STOP_TIMEOUT_SECONDS = 60;
@@ -44,18 +44,17 @@ class AppNode {
     private final String runtime;
     private final String network;
     private final Map<String, String> env;
-    private final DockerRunSpec dockerRun;
+    private final String image;
     private Process process;
     private String name;
     private int starts;
 
-    AppNode(String runtime, int node, Path workdir, String network, Map<String, String> env,
-            DockerRunSpec dockerRun) {
+    AppNode(String runtime, int node, Path workdir, String network, Map<String, String> env, String image) {
         this.runtime = runtime;
         this.node = node;
         this.network = network;
         this.env = env;
-        this.dockerRun = dockerRun;
+        this.image = image;
         this.port = freePort();
         this.out = workdir.resolve("app-" + node + "-out.txt");
         this.err = workdir.resolve("app-" + node + "-err.txt");
@@ -88,9 +87,7 @@ class AppNode {
         command.addAll(List.of("--label",
                 DockerClientFactory.TESTCONTAINERS_SESSION_ID_LABEL + "=" + DockerClientFactory.SESSION_ID));
         env.forEach((k, v) -> command.addAll(List.of("-e", k + "=" + v)));
-        command.addAll(dockerRun.options());
-        command.add(dockerRun.image());
-        command.addAll(dockerRun.command());
+        command.add(image);
 
         separator("node " + node + " started: " + name);
         Files.writeString(cmd, String.join(" ", command) + "\n", CREATE, APPEND);
