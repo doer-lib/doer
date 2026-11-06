@@ -49,8 +49,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *     docker-build-*.txt                    command and output of docker build of the image
  *     app-&lt;node&gt;-out.txt, app-&lt;node&gt;-err.txt  stdout and stderr of the application, all starts of the node
  *     app-&lt;node&gt;-cmd.txt                    docker run command of every start
+ *     app-&lt;node&gt;-diff.txt                   files the containers of the node added, changed, deleted; sizes
  *     container-usage.json                  CPU, disk and network I/O of every container of the application and
- *                                           their total, written when the JVM ends; for the test summary of CI
+ *                                           their total, also until the node was ready, written when the JVM ends;
+ *                                           for the test summary of CI
  * </pre>
  *
  * Properties:
@@ -213,7 +215,8 @@ public class E2eEnvironment implements BeforeAllCallback {
     /**
      * Starts the node (a new one, or one stopped by {@link #stopNode}) and waits until it is ready. Its log files get
      * a separator line, and the output of the new start is appended to them. After the first start of the node Doer
-     * is stopped, see {@link #stopDoer}; after a restart it runs as the application started it.
+     * is stopped, see {@link #stopDoer}; after a restart it runs as the application started it. Then the resources the
+     * container used until now are measured: the startup of the runtime.
      */
     public static synchronized void startNode(int node) throws Exception {
         requireDocker("startNode");
@@ -228,6 +231,8 @@ public class E2eEnvironment implements BeforeAllCallback {
         }
         System.out.printf("✔ Node %s of Transit Sims started in %s ms at %s%n", node, System.currentTimeMillis() - t0,
                 appNode.baseUrl());
+        // After the time above: Docker takes about a second to answer
+        appNode.measureStartup();
     }
 
     /**

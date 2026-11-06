@@ -17,7 +17,8 @@ import org.testcontainers.DockerClientFactory;
 /**
  * Resources a container of the application used from its start: CPU time, disk I/O and network I/O, as
  * {@code docker stats} counts them (the cgroup of the container). Measured just before the node is stopped: a
- * container of {@code docker run --rm} has no statistics after it exits, so its shutdown is not counted.
+ * container of {@code docker run --rm} has no statistics after it exits, so its shutdown is not counted. The usage
+ * until the node was ready is measured too, to tell the startup of the runtime from the work of the tests.
  *
  * @param container  name of the container
  * @param node       the node the container ran
@@ -26,9 +27,11 @@ import org.testcontainers.DockerClientFactory;
  * @param diskWrite  bytes written to block devices
  * @param netIn      bytes received on all interfaces
  * @param netOut     bytes sent on all interfaces
+ * @param startup    the usage until the node was ready, a part of this one; null when not measured or for the
+ *                   startup itself
  */
 record ContainerUsage(String container, int node, long cpuNanos, long diskRead, long diskWrite, long netIn,
-        long netOut) {
+        long netOut, ContainerUsage startup) {
     static final int STATS_TIMEOUT_SECONDS = 10;
 
     /**
@@ -55,7 +58,12 @@ record ContainerUsage(String container, int node, long cpuNanos, long diskRead, 
         List<BlkioStatEntry> io = s.getBlkioStats() == null ? null : s.getBlkioStats().getIoServiceBytesRecursive();
         return new ContainerUsage(container, node, cpu == null ? 0 : cpu, disk(io, "read"), disk(io, "write"),
                 net(s.getNetworks(), StatisticNetworksConfig::getRxBytes),
-                net(s.getNetworks(), StatisticNetworksConfig::getTxBytes));
+                net(s.getNetworks(), StatisticNetworksConfig::getTxBytes), null);
+    }
+
+    /** This usage with the usage until the node was ready. */
+    ContainerUsage withStartup(ContainerUsage startup) {
+        return new ContainerUsage(container, node, cpuNanos, diskRead, diskWrite, netIn, netOut, startup);
     }
 
     private static long disk(List<BlkioStatEntry> entries, String op) {
@@ -77,7 +85,8 @@ record ContainerUsage(String container, int node, long cpuNanos, long diskRead, 
     /** For the separator line in the logs of the node. */
     String summary() {
         return String.format(Locale.ROOT, "CPU %.1f s, disk read %s, write %s, network in %s, out %s",
-                cpuNanos / 1e9, bytes(diskRead), bytes(diskWrite), bytes(netIn), bytes(netOut));
+                cpuNanos / 1e9, bytes(diskRead), bytes(diskWrite), bytes(netIn), bytes(netOut))
+                + (startup == null ? "" : "; until ready " + startup.summary());
     }
 
     /** Decimal units, as {@code docker stats}. */
@@ -94,7 +103,8 @@ record ContainerUsage(String container, int node, long cpuNanos, long diskRead, 
 
     /**
      * The usage of all containers of the run as JSON, for the test summary of CI (.github/scripts/test-summary.py): the
-     * containers and their total.
+     * containers and their total, each with the usage until the node was ready in {@code startup} when measured (the
+     * total sums the startups that were measured).
      */
     static String json(String runtime, List<ContainerUsage> usages) {
         StringBuilder json = new StringBuilder("{\n  \"runtime\": \"" + runtime + "\",\n  \"containers\": [");
@@ -104,20 +114,26 @@ record ContainerUsage(String container, int node, long cpuNanos, long diskRead, 
                     .append("    {\"container\": \"").append(u.container).append("\", \"node\": ").append(u.node)
                     .append(", ").append(fields(u)).append('}');
         }
-        ContainerUsage total = new ContainerUsage("total", 0,
-                usages.stream().mapToLong(ContainerUsage::cpuNanos).sum(),
-                usages.stream().mapToLong(ContainerUsage::diskRead).sum(),
-                usages.stream().mapToLong(ContainerUsage::diskWrite).sum(),
-                usages.stream().mapToLong(ContainerUsage::netIn).sum(),
-                usages.stream().mapToLong(ContainerUsage::netOut).sum());
+        List<ContainerUsage> startups = usages.stream().map(ContainerUsage::startup).filter(Objects::nonNull).toList();
+        ContainerUsage total = sum(usages).withStartup(startups.isEmpty() ? null : sum(startups));
         return json.append(usages.isEmpty() ? "],\n" : "\n  ],\n")
                 .append("  \"total\": {").append(fields(total)).append("}\n}\n")
                 .toString();
     }
 
+    private static ContainerUsage sum(List<ContainerUsage> usages) {
+        return new ContainerUsage("total", 0,
+                usages.stream().mapToLong(ContainerUsage::cpuNanos).sum(),
+                usages.stream().mapToLong(ContainerUsage::diskRead).sum(),
+                usages.stream().mapToLong(ContainerUsage::diskWrite).sum(),
+                usages.stream().mapToLong(ContainerUsage::netIn).sum(),
+                usages.stream().mapToLong(ContainerUsage::netOut).sum(), null);
+    }
+
     private static String fields(ContainerUsage u) {
         return String.format(Locale.ROOT, "\"cpuSeconds\": %.3f, \"diskReadBytes\": %d, \"diskWriteBytes\": %d, "
                 + "\"netInBytes\": %d, \"netOutBytes\": %d", u.cpuNanos / 1e9, u.diskRead, u.diskWrite, u.netIn,
-                u.netOut);
+                u.netOut)
+                + (u.startup == null ? "" : ", \"startup\": {" + fields(u.startup) + "}");
     }
 }
