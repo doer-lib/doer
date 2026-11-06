@@ -1,14 +1,13 @@
 package com.doer.e2e.runtime;
 
 import java.nio.file.Path;
-import java.util.List;
 
 /**
- * Transit Sims in Open Liberty: {@code ROOT.war}, {@code server.xml} and the Postgres driver mounted to {@code /config}. A
- * data source of {@code server.xml} cannot use the driver of the WAR, so the driver is also a file next to it.
+ * Transit Sims in Open Liberty: {@code ROOT.war}, unpacked, {@code server.xml} and the Postgres driver in
+ * {@code /config} of the image. A data source of {@code server.xml} cannot use the driver of the WAR, so the driver is
+ * also a file next to it.
  */
 class OpenLibertyApp implements E2eApp {
-    static final String OPEN_LIBERTY_IMAGE = "icr.io/appcafe/open-liberty:26.0.0.10-full-java25-openj9-ubi-minimal";
 
     @Override
     public String customSourcesFolder() {
@@ -30,16 +29,8 @@ class OpenLibertyApp implements E2eApp {
         copyCustomSource("flyway.location", migrations);
         // Features, the data source, the context root /, INFO on the console, the threads of the ManagedExecutorService
         copyCustomSource("server.xml", workdir.resolve("src/main/liberty"));
-    }
-
-    /** The command of the image: {@code server run defaultServer}. */
-    @Override
-    public DockerRunSpec dockerRun(Path workdir) {
-        String config = "/opt/ol/wlp/usr/servers/defaultServer/";
-        return new DockerRunSpec(List.of(
-                "-v", workdir.resolve("src/main/liberty/server.xml") + ":" + config + "server.xml:ro",
-                "-v", workdir.resolve("target/liberty/postgresql.jar") + ":" + config + "postgresql.jar:ro",
-                "-v", workdir.resolve("target/ROOT.war") + ":" + config + "apps/ROOT.war:ro"),
-                OPEN_LIBERTY_IMAGE, List.of());
+        // The Open Liberty image with them, prepared by configure.sh of the image: the shared class cache of OpenJ9
+        // and the workarea of the server
+        copyCustomSource("Dockerfile", workdir);
     }
 }

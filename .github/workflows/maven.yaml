@@ -71,7 +71,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [ quarkus, spring-boot, wildfly, open-liberty, jetty ]
+        runtime: [ quarkus, spring-boot, wildfly, open-liberty, jetty, helidon ]
     steps:
       - uses: actions/checkout@v7
 
@@ -115,10 +115,12 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: test-reports-e2e-${{ matrix.runtime }}
-          # CPU and I/O of the application containers, for the first rows of the table of E2E runtimes
+          # CPU and I/O of the application containers, for the first rows of the table of E2E runtimes; the files
+          # the containers wrote
           path: |
             target/failsafe-reports/TEST-*.xml
             target/e2e-test-workspaces/*/container-usage.json
+            target/e2e-test-workspaces/*/app-*-diff.txt
           if-no-files-found: ignore
           overwrite: true
           retention-days: 7

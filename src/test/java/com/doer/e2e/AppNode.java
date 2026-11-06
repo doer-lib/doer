@@ -3,7 +3,6 @@ package com.doer.e2e;
 import static java.nio.file.StandardOpenOption.APPEND;
 import static java.nio.file.StandardOpenOption.CREATE;
 
-import com.doer.e2e.runtime.DockerRunSpec;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.io.UncheckedIOException;
@@ -17,14 +16,22 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NavigableSet;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.testcontainers.DockerClientFactory;
 
 /**
- * One node of the application: a {@code docker run --rm} process. Its stdout and stderr are appended to
- * {@code app-<node>-out.txt} and {@code app-<node>-err.txt} of the work folder, with a separator line at every start
- * and stop, and every command to {@code app-<node>-cmd.txt}, for all starts in this run. The host port is kept
- * across restarts. Before a stop the resources the container used are measured, see {@link ContainerUsage}.
+ * One node of the application: a {@code docker run --rm} process of the image of the application. Its stdout and
+ * stderr are appended to {@code app-<node>-out.txt} and {@code app-<node>-err.txt} of the work folder, with a separator
+ * line at every start and stop, and every command to {@code app-<node>-cmd.txt}, for all starts in this run. The host
+ * port is kept across restarts. When the node is ready and before a stop the resources the container used are
+ * measured, see {@link ContainerUsage}. Before a stop the files the container added, changed and deleted
+ * ({@code docker diff}), with the sizes of the added and changed ones, are appended to {@code app-<node>-diff.txt}:
+ * what the runtime writes to its disk.
  */
 class AppNode {
     static final int STOP_TIMEOUT_SECONDS = 60;
@@ -33,38 +40,45 @@ class AppNode {
      * then as small as in CI.
      */
     static final String CPUS = "4";
+    static final int DOCKER_COMMAND_TIMEOUT_SECONDS = 30;
+    /** A line of {@code du -sk}: the size in kB, a tab and the path. */
+    private static final Pattern DU_LINE = Pattern.compile("(\\d+)\t(.+)");
 
     final int node;
     final int port;
     final Path out;
     final Path err;
     final Path cmd;
+    final Path diff;
     /** The resources used by the containers of the node, one per stopped start. */
     final List<ContainerUsage> usages = new ArrayList<>();
     private final String runtime;
     private final String network;
     private final Map<String, String> env;
-    private final DockerRunSpec dockerRun;
+    private final String image;
     private Process process;
     private String name;
     private int starts;
+    /** The usage until the node was ready, for the current start; null when not measured. */
+    private ContainerUsage startup;
 
-    AppNode(String runtime, int node, Path workdir, String network, Map<String, String> env,
-            DockerRunSpec dockerRun) {
+    AppNode(String runtime, int node, Path workdir, String network, Map<String, String> env, String image) {
         this.runtime = runtime;
         this.node = node;
         this.network = network;
         this.env = env;
-        this.dockerRun = dockerRun;
+        this.image = image;
         this.port = freePort();
         this.out = workdir.resolve("app-" + node + "-out.txt");
         this.err = workdir.resolve("app-" + node + "-err.txt");
         this.cmd = workdir.resolve("app-" + node + "-cmd.txt");
+        this.diff = workdir.resolve("app-" + node + "-diff.txt");
         // The work folder is kept with doer.e2e.skip-build: the files keep the starts of this run only
         try {
             Files.deleteIfExists(out);
             Files.deleteIfExists(err);
             Files.deleteIfExists(cmd);
+            Files.deleteIfExists(diff);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -80,6 +94,7 @@ class AppNode {
             throw new IllegalStateException("Node " + node + " is already started");
         }
         starts++;
+        startup = null;
         name = "transitsims-" + runtime + "-" + node + "-" + starts;
         List<String> command = new ArrayList<>(List.of("docker", "run", "--rm", "--name", name,
                 "--network", network, "-p", "127.0.0.1:" + port + ":8080", "--cpus", CPUS));
@@ -88,9 +103,7 @@ class AppNode {
         command.addAll(List.of("--label",
                 DockerClientFactory.TESTCONTAINERS_SESSION_ID_LABEL + "=" + DockerClientFactory.SESSION_ID));
         env.forEach((k, v) -> command.addAll(List.of("-e", k + "=" + v)));
-        command.addAll(dockerRun.options());
-        command.add(dockerRun.image());
-        command.addAll(dockerRun.command());
+        command.add(image);
 
         separator("node " + node + " started: " + name);
         Files.writeString(cmd, String.join(" ", command) + "\n", CREATE, APPEND);
@@ -111,6 +124,8 @@ class AppNode {
             throw new IllegalStateException("Node " + node + " is not started");
         }
         String usage = measureUsage();
+        // After the measure: du runs in the container
+        writeDiff();
         long t0 = System.currentTimeMillis();
         process.destroy();
         boolean exited = process.waitFor(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -129,8 +144,29 @@ class AppNode {
     }
 
     /**
-     * Measures the resources the running container used, into {@link #usages}. A failure does not fail the test: the
-     * measure is for the test summary only.
+     * Measures the resources the container used until the node was ready; called when it is ready. It is reported with
+     * the usage of the stop, see {@link #measureUsage()}: the log of a start has no line of its own for it. A failure
+     * does not fail the test. Docker takes about a second to answer.
+     */
+    void measureStartup() {
+        if (process == null) {
+            throw new IllegalStateException("Node " + node + " is not started");
+        }
+        if (exitCode() != null) {
+            return;
+        }
+        try {
+            startup = ContainerUsage.measure(name, node);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException e) {
+            // Not measured: the usage of the stop has no startup
+        }
+    }
+
+    /**
+     * Measures the resources the running container used, with the usage until it was ready, into {@link #usages}. A
+     * failure does not fail the test: the measure is for the test summary only.
      *
      * @return the usage, or the failure, for the separator line of the stop
      */
@@ -139,7 +175,7 @@ class AppNode {
             return "";
         }
         try {
-            ContainerUsage usage = ContainerUsage.measure(name, node);
+            ContainerUsage usage = ContainerUsage.measure(name, node).withStartup(startup);
             usages.add(usage);
             return ", used " + usage.summary();
         } catch (InterruptedException e) {
@@ -147,6 +183,125 @@ class AppNode {
             return ", usage not measured: interrupted";
         } catch (RuntimeException e) {
             return ", usage not measured: " + e;
+        }
+    }
+
+    /**
+     * Appends the files the running container added (A), changed (C) and deleted (D) to {@link #diff}: first the sizes
+     * of the added trees and the changed files ({@code du -sk} in the container, largest first, without the mounts in
+     * them: a mounted artifact is not written), then the whole {@code docker diff}. The sizes are of the files now, not
+     * the bytes written: a file written over or deleted is not counted. A failure does not fail the test.
+     */
+    private void writeDiff() throws IOException {
+        if (exitCode() != null) {
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        try {
+            List<String> entries = docker(List.of("docker", "diff", name)).lines().filter(l -> !l.isBlank()).toList();
+            NavigableSet<String> paths = new TreeSet<>();
+            NavigableSet<String> added = new TreeSet<>();
+            int[] counts = new int[3];
+            for (String entry : entries) {
+                String path = entry.substring(2);
+                paths.add(path);
+                switch (entry.charAt(0)) {
+                    case 'A' -> {
+                        added.add(path);
+                        counts[0]++;
+                    }
+                    case 'C' -> counts[1]++;
+                    default -> counts[2]++;
+                }
+            }
+            // The roots of the added trees, and the changed paths with no change below them: the changed files
+            List<String> measured = new ArrayList<>();
+            for (String entry : entries) {
+                String path = entry.substring(2);
+                String below = paths.higher(path);
+                boolean leaf = below == null || !below.startsWith(path + "/");
+                if (entry.charAt(0) == 'A' ? !added.contains(parent(path)) : entry.charAt(0) == 'C' && leaf) {
+                    measured.add(path);
+                }
+            }
+            text.append(String.format(Locale.ROOT, "%d added, %d changed, %d deleted%n", counts[0], counts[1],
+                    counts[2]));
+            // du in the image may not skip a mounted file (-x): the size of a mount is taken off the path it is in
+            List<String> mounts = docker(List.of("docker", "inspect", "-f",
+                    "{{range .Mounts}}{{println .Destination}}{{end}}", name)).lines()
+                    .filter(l -> !l.isBlank()).toList();
+            measured.removeIf(path -> mounts.stream().anyMatch(m -> isUnder(path, m)));
+            List<String> mountsIn = mounts.stream()
+                    .filter(m -> measured.stream().anyMatch(path -> isUnder(m, path))).toList();
+            if (!measured.isEmpty()) {
+                Map<String, Long> kb = new TreeMap<>();
+                List<String> other = new ArrayList<>();
+                // The mounts in a call of their own: du counts a file once, in the first path it is in
+                for (List<String> group : List.of(measured, mountsIn)) {
+                    if (group.isEmpty()) {
+                        continue;
+                    }
+                    List<String> du = new ArrayList<>(List.of("docker", "exec", name, "du", "-sk", "--"));
+                    du.addAll(group);
+                    for (String line : docker(du).lines().toList()) {
+                        Matcher m = DU_LINE.matcher(line);
+                        if (m.matches()) {
+                            kb.put(m.group(2), Long.parseLong(m.group(1)));
+                        } else {
+                            other.add(line);
+                        }
+                    }
+                }
+                Map<String, Long> sizes = new TreeMap<>();
+                for (String path : measured) {
+                    if (kb.containsKey(path)) {
+                        sizes.put(path, kb.get(path) - mountsIn.stream().filter(m -> isUnder(m, path))
+                                .mapToLong(m -> kb.getOrDefault(m, 0L)).sum());
+                    }
+                }
+                text.append("du -sk of the added trees and the changed files, without mounts, ")
+                        .append(sizes.values().stream().mapToLong(Long::longValue).sum()).append(" kB:\n");
+                sizes.entrySet().stream()
+                        .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                        .forEach(e -> text.append(e.getValue()).append('\t').append(e.getKey()).append('\n'));
+                other.forEach(line -> text.append(line).append('\n'));
+            }
+            text.append("docker diff:\n");
+            entries.forEach(line -> text.append(line).append('\n'));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            text.append("not written: interrupted\n");
+        } catch (IOException | RuntimeException e) {
+            text.append("not written: ").append(e).append('\n');
+        }
+        String header = "==== " + Instant.now().truncatedTo(ChronoUnit.MILLIS) + " node " + node + " before stop: "
+                + name + " ====\n";
+        Files.writeString(diff, header + text, CREATE, APPEND);
+    }
+
+    private static String parent(String path) {
+        int slash = path.lastIndexOf('/');
+        return slash <= 0 ? "/" : path.substring(0, slash);
+    }
+
+    /** True when the path is the folder or in it. */
+    private static boolean isUnder(String path, String folder) {
+        return path.equals(folder) || path.startsWith(folder.endsWith("/") ? folder : folder + "/");
+    }
+
+    /** Runs a docker command; its stdout and stderr, together. */
+    private static String docker(List<String> command) throws IOException, InterruptedException {
+        Path output = Files.createTempFile("e2e-docker-", ".txt");
+        try {
+            Process p = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(output.toFile()).start();
+            if (!p.waitFor(DOCKER_COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                throw new IOException("Not finished in " + DOCKER_COMMAND_TIMEOUT_SECONDS + " s: "
+                        + String.join(" ", command));
+            }
+            return Files.readString(output);
+        } finally {
+            Files.deleteIfExists(output);
         }
     }
 

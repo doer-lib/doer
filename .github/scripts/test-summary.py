@@ -5,7 +5,8 @@ Per matrix: tests run/failed/skipped, wallclock of the matrix jobs, and a table
 with a row per test class (time of the class) and a row per test method, a column per matrix value.
 Time of a failed test is marked with 🔴 (time of its class is not); a cell is empty when the test did not run there.
 When an artifact has container-usage.json (written by the e2e suite, see E2eEnvironment), the table starts with
-the CPU, disk and network I/O of the application containers, summed over all of them (node 1, node 2, restarts).
+the CPU, disk and network I/O of the application containers, summed over all of them (node 1, node 2, restarts). CPU
+is split into startup (until the node was ready) and run (the rest: the tests); disk I/O has the startup part too.
 
 Input:
   --reports DIR      downloaded artifacts: DIR/<artifact-prefix><value>/**/TEST-*.xml (surefire/failsafe reports)
@@ -87,6 +88,7 @@ class Usage:
         self.containers = 0
         self.cpu_seconds = 0.0
         self.disk_read = self.disk_write = self.net_in = self.net_out = 0
+        self.startup = None  # Usage until the nodes were ready, of the containers that have it
 
     def add(self, container):
         self.containers += 1
@@ -95,6 +97,9 @@ class Usage:
         self.disk_write += int(container.get("diskWriteBytes") or 0)
         self.net_in += int(container.get("netInBytes") or 0)
         self.net_out += int(container.get("netOutBytes") or 0)
+        if (startup := container.get("startup")) is not None:
+            self.startup = self.startup or Usage()
+            self.startup.add(startup)
 
 
 def read_usage(directory):
@@ -125,11 +130,31 @@ def usage_rows(usages, values):
         return (f"| {title} | "
                 + " | ".join(text(usages[value]) if value in usages else "" for value in values) + " |")
 
+    def startup_row(title, text):
+        """A row of the usage until the nodes were ready; none when no value has it."""
+        if all(usage.startup is None for usage in usages.values()):
+            return []
+        return [row(title, lambda u: text(u.startup) if u.startup is not None else "")]
+
+    def disk(u):
+        return f"{format_bytes(u.disk_read)} / {format_bytes(u.disk_write)}"
+
+    def cpu_rows():
+        """CPU startup and CPU run; only CPU when no value has the startup. A container whose startup was not
+        measured counts in run."""
+        if all(usage.startup is None for usage in usages.values()):
+            return [row("&emsp;CPU", lambda u: f"{u.cpu_seconds:.1f} s")]
+        return [
+            row("&emsp;CPU startup", lambda u: f"{u.startup.cpu_seconds:.1f} s" if u.startup is not None else ""),
+            row("&emsp;CPU run",
+                lambda u: f"{u.cpu_seconds - (u.startup.cpu_seconds if u.startup is not None else 0):.1f} s"),
+        ]
+
     return [
         row("**App containers**", lambda u: str(u.containers)),
-        row("&emsp;CPU", lambda u: f"{u.cpu_seconds:.1f} s"),
-        row("&emsp;Disk read / write",
-            lambda u: f"{format_bytes(u.disk_read)} / {format_bytes(u.disk_write)}"),
+        *cpu_rows(),
+        row("&emsp;Disk read / write", disk),
+        *startup_row("&emsp;&emsp;startup", disk),
         row("&emsp;Network in / out",
             lambda u: f"{format_bytes(u.net_in)} / {format_bytes(u.net_out)}"),
     ]

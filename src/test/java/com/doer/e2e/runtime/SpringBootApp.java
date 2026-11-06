@@ -10,10 +10,11 @@ import java.nio.file.Path;
 import java.util.List;
 
 /**
- * Transit Sims in Spring Boot: an executable jar with Jersey, run with {@code java -jar} in a JRE image. The sources become
- * a Spring application: the Spring annotations that have no CDI counterpart are added here, OpenRewrite replaces the CDI
- * annotations with Spring ones ({@code e2e-spring-boot/rewrite.yml}), and {@code e2e-spring-boot} brings the main class
- * and the Spring versions of the classes whose code differs (see src/test/README.md).
+ * Transit Sims in Spring Boot: an executable jar with Jersey, extracted and run with {@code java -jar} in a JRE image.
+ * The sources become a Spring application: the Spring annotations that have no CDI counterpart are added here,
+ * OpenRewrite replaces the CDI annotations with Spring ones ({@code e2e-spring-boot/rewrite.yml}), and
+ * {@code e2e-spring-boot} brings the main class and the Spring versions of the classes whose code differs (see
+ * src/test/README.md).
  */
 class SpringBootApp implements E2eApp {
     static final String REWRITE_PLUGIN_VERSION = "6.46.1";
@@ -50,12 +51,8 @@ class SpringBootApp implements E2eApp {
         Toolchain.mvn(workdir, "mvn-rewrite",
                 "org.openrewrite.maven:rewrite-maven-plugin:" + REWRITE_PLUGIN_VERSION + ":runNoFork",
                 "-Drewrite.activeRecipes=transitsims.CdiToSpring", "-Ddoer.version=" + doerLibVersion).assertStatus(0);
-    }
-
-    @Override
-    public DockerRunSpec dockerRun(Path workdir) {
-        return new DockerRunSpec(List.of("-v", workdir.resolve("target/transitsims.jar") + ":/app/transitsims.jar:ro"),
-                JRE_IMAGE, List.of("java", "-jar", "/app/transitsims.jar"));
+        // The executable jar, extracted, in a JRE image
+        copyCustomSource("Dockerfile", workdir);
     }
 
     /**
